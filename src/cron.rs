@@ -327,19 +327,69 @@ impl ScheduledJobRunner for AgentCronRunner {
             Arc::new(PlanStore::memory_only()),
             CRON_SYSTEM_PROMPT,
         )?;
-        let session_path = self.workspace.join(".my-agent/cron-sessions").join(format!(
-            "{}-{}.jsonl",
-            job.id,
-            unix_now()?
-        ));
-        let session = Arc::new(SessionStore::new(session_path));
+        use crate::storage::{RunStore, SessionLifecycle, SessionQuery};
+        let key = agent_core::SessionKey(format!("session-cron-{}-{}.jsonl", job.id, unix_now()?));
+        let store = Arc::new(RunStore::open(
+            &self.workspace.join(".my-agent/runtime.sqlite3"),
+        )?);
+        store.create_session(&key)?;
+        let admitted = store.admit_with_route(
+            key.clone(),
+            agent_core::RequestId::String(format!("cron:{}", key.0)),
+            &job.prompt,
+            agent_core::AdmissionMode::Queue,
+            None,
+        )?;
+        let run = match admitted {
+            agent_core::Admission::New(run) | agent_core::Admission::Existing(run) => run,
+        };
+        anyhow::ensure!(
+            store.try_start_queued(&run.run_id)?,
+            "cron session writer 忙碌"
+        );
+        let session = Arc::new(SessionStore::from_env(&self.workspace).open_known_session(&key.0)?);
+        let owner = store.run_owner(&run.run_id)?;
+        let session = Arc::new(session.with_trace_lifetime(&owner.session_lifetime_id)?);
         let runner = LoopEngine::new(self.provider.clone(), self.tools.clone(), context, session);
-        tokio::time::timeout(
+        let mut history = store.session_snapshot(&key)?.messages;
+        let result = tokio::time::timeout(
             self.timeout,
-            runner.run_turn(&mut Vec::new(), job.prompt.clone()),
+            crate::loop_engine::with_tool_audit(
+                store.clone(),
+                run.run_id.clone(),
+                runner.run_turn(&mut history, job.prompt.clone()),
+            ),
         )
-        .await
-        .context("cron 任务执行超时")?
+        .await;
+        match result {
+            Ok(Ok(content)) => {
+                store.finish(
+                    &run.run_id,
+                    agent_core::RunStatus::Completed,
+                    Some(&content),
+                    None,
+                )?;
+                Ok(content)
+            }
+            Ok(Err(error)) => {
+                store.finish(
+                    &run.run_id,
+                    agent_core::RunStatus::Failed,
+                    None,
+                    Some((-32002, &error.to_string())),
+                )?;
+                Err(error)
+            }
+            Err(error) => {
+                store.finish(
+                    &run.run_id,
+                    agent_core::RunStatus::UnknownAfterRestart,
+                    None,
+                    Some((-32002, "cron 超时，执行结果待核实")),
+                )?;
+                Err(anyhow::anyhow!(error))
+            }
+        }
     }
 }
 
@@ -648,11 +698,17 @@ mod tests {
             },
         );
         assert_eq!(runner.run(&job).await.unwrap(), "scheduled-result");
-        let sessions = std::fs::read_dir(workspace.join(".my-agent/cron-sessions"))
-            .unwrap()
-            .collect::<std::io::Result<Vec<_>>>()
-            .unwrap();
+        use crate::storage::{RunStore, SessionQuery};
+        let repository = RunStore::open(&workspace.join(".my-agent/runtime.sqlite3")).unwrap();
+        let sessions = repository.session_metadata_list().unwrap();
         assert_eq!(sessions.len(), 1);
+        let snapshot = repository.session_snapshot(&sessions[0].key).unwrap();
+        assert_eq!(snapshot.messages.len(), 2);
+        assert_eq!(
+            snapshot.messages[1].content.as_deref(),
+            Some("scheduled-result")
+        );
+        assert!(!workspace.join(".my-agent/cron-sessions").exists());
         assert!(!workspace.join(".my-agent/session.jsonl").exists());
         let _ = std::fs::remove_dir_all(workspace);
     }

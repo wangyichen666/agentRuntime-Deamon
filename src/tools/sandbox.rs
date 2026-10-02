@@ -15,8 +15,7 @@ use super::ToolCancellation;
 
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
-pub struct ResourceId(pub u64);
+use agent_core::ResourceId;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -31,6 +30,7 @@ pub struct ExecRequest {
     pub cwd: PathBuf,
     pub timeout: Duration,
     pub requested: SandboxBackend,
+    pub owner: Option<agent_core::ExactOwner>,
 }
 
 pub struct ExecResult {
@@ -134,6 +134,142 @@ impl NativeSandbox {
             resources: Arc::new(ResourceManager::default()),
         }
     }
+    pub async fn docker_available() -> bool {
+        let image = std::env::var("MY_AGENT_DOCKER_IMAGE").unwrap_or_else(|_| "alpine:3.21".into());
+        match tokio::time::timeout(
+            Duration::from_secs(3),
+            Command::new("docker")
+                .args(["image", "inspect", &image])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .status(),
+        )
+        .await
+        {
+            Ok(Ok(status)) => status.success(),
+            _ => false,
+        }
+    }
+    async fn execute_docker(
+        &self,
+        request: ExecRequest,
+        cancellation: &dyn ToolCancellation,
+    ) -> Result<ExecResult> {
+        let owner = request
+            .owner
+            .as_ref()
+            .context("Docker 执行要求 exact owner")?;
+        if !Self::docker_available().await {
+            bail!("Docker backend 或预装镜像不可用；拒绝强隔离请求");
+        }
+        let cwd = std::fs::canonicalize(&request.cwd)?;
+        if cwd.to_string_lossy().contains(',') {
+            bail!("Docker mount 路径包含不支持的分隔符");
+        }
+        let name = format!(
+            "myagent-{}-{}-{}",
+            owner.session_lifetime_id.0,
+            std::process::id(),
+            self.resources.next_id.fetch_add(1, Ordering::Relaxed)
+        );
+        let image =
+            if let Some((repository, current)) = crate::loop_engine::current_session_repository() {
+                if &current != owner {
+                    bail!("Docker owner 不匹配");
+                }
+                repository
+                    .run_snapshot(&current.run_id)?
+                    .and_then(|s| s.docker_image)
+                    .unwrap_or_else(|| "alpine:3.21".into())
+            } else {
+                "alpine:3.21".into()
+            };
+        let args = vec![
+            "docker".to_owned(),
+            "run".into(),
+            "--pull=never".into(),
+            "--rm".into(),
+            "--name".into(),
+            name.clone(),
+            "--network=none".into(),
+            "--read-only".into(),
+            "--user=65534:65534".into(),
+            "--pids-limit=64".into(),
+            "--memory=512m".into(),
+            "--cpus=1".into(),
+            "--cap-drop=ALL".into(),
+            "--security-opt=no-new-privileges".into(),
+            "--tmpfs=/tmp:rw,nosuid,nodev,size=67108864".into(),
+            "--mount".into(),
+            format!("type=bind,src={},dst=/workspace,readonly", cwd.display()),
+            "--tmpfs=/workspace/.my-agent:ro,nosuid,nodev,size=1048576".into(),
+            "--workdir=/workspace".into(),
+            image,
+            "/bin/sh".into(),
+            "-c".into(),
+            request.command,
+        ];
+        let mut guard = DockerLease(Some(name));
+        let result = Box::pin(
+            self.execute(
+                ExecRequest {
+                    command: args
+                        .iter()
+                        .map(|s| shell_quote(s))
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    shell: PathBuf::from("/bin/sh"),
+                    cwd,
+                    timeout: request.timeout,
+                    requested: SandboxBackend::Native,
+                    owner: request.owner,
+                },
+                cancellation,
+            ),
+        )
+        .await;
+        guard.cleanup().await;
+        result.map(|mut r| {
+            r.requested = SandboxBackend::Docker;
+            r.effective = SandboxBackend::Docker;
+            r
+        })
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+struct DockerLease(Option<String>);
+impl DockerLease {
+    async fn cleanup(&mut self) {
+        if let Some(name) = self.0.take() {
+            remove_container(name).await;
+        }
+    }
+}
+async fn remove_container(name: String) {
+    let _ = tokio::time::timeout(
+        Duration::from_secs(5),
+        Command::new("docker")
+            .args(["rm", "--force", &name])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .status(),
+    )
+    .await;
+}
+impl Drop for DockerLease {
+    fn drop(&mut self) {
+        if let Some(name) = self.0.take() {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(remove_container(name));
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -144,7 +280,7 @@ impl Sandbox for NativeSandbox {
         cancellation: &dyn ToolCancellation,
     ) -> Result<ExecResult> {
         if !matches!(request.requested, SandboxBackend::Native) {
-            bail!("Docker sandbox 尚未实现");
+            return self.execute_docker(request, cancellation).await;
         }
         if cancellation.is_cancelled() {
             bail!("命令执行已取消");

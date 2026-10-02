@@ -64,7 +64,10 @@ pub struct PlanStore {
 }
 
 impl PlanStore {
-    pub async fn from_env(workspace: &Path) -> Result<Self> {
+    pub async fn from_env(
+        workspace: &Path,
+        store: &dyn crate::storage::MaintenanceRepository,
+    ) -> Result<Self> {
         let path = match env::var_os("PLAN_PATH") {
             Some(value) if value.is_empty() || value == "off" => None,
             Some(value) => {
@@ -77,7 +80,50 @@ impl PlanStore {
             }
             None => Some(workspace.join(".my-agent/plan.json")),
         };
+        if let Some(path) = &path
+            && store.legacy_plan_imported(&path.to_string_lossy())?
+        {
+            return Ok(Self::memory_only());
+        }
         Self::new(path).await
+    }
+
+    pub async fn migrate_legacy(
+        &self,
+        store: &dyn crate::storage::MaintenanceRepository,
+        key: &agent_core::SessionKey,
+    ) -> Result<()> {
+        let Some(path) = self.path.as_ref().filter(|p| p.exists()) else {
+            return Ok(());
+        };
+        let source = path.to_string_lossy();
+        if store.legacy_plan_imported(&source)? {
+            return Ok(());
+        }
+        let bytes = tokio::fs::read(path).await?;
+        let backup = path.with_extension("json.pre-repository.backup");
+        if !backup.exists() {
+            use tokio::io::AsyncWriteExt;
+            let mut file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&backup)
+                .await?;
+            file.write_all(&bytes).await?;
+            file.sync_all().await?;
+            anyhow::ensure!(
+                tokio::fs::read(&backup).await? == bytes,
+                "plan 备份校验失败"
+            );
+        }
+        use sha2::{Digest, Sha256};
+        store.import_legacy_plan(
+            &source,
+            &format!("{:x}", Sha256::digest(&bytes)),
+            key,
+            &serde_json::to_value(&*self.state.read().await)?,
+        )?;
+        Ok(())
     }
 
     pub fn memory_only() -> Self {
@@ -111,7 +157,7 @@ impl PlanStore {
 
     pub async fn update(&self, id: &str, status: PlanStatus) -> Result<String> {
         let _mutation_guard = self.mutation_lock.lock().await;
-        let mut next = self.state.read().await.clone();
+        let mut next = self.current_state().await?;
         let Some(step) = next
             .steps
             .iter_mut()
@@ -125,22 +171,41 @@ impl PlanStore {
 
     pub async fn add(&self, step: PlanStep) -> Result<String> {
         let _mutation_guard = self.mutation_lock.lock().await;
-        let mut next = self.state.read().await.clone();
+        let mut next = self.current_state().await?;
         next.steps.push(step);
         validate_steps(&next.steps)?;
         self.commit(next).await
     }
 
     pub async fn show(&self) -> String {
-        render_plan(&self.state.read().await.steps)
+        match self.current_state().await {
+            Ok(state) => render_plan(&state.steps),
+            Err(error) => format!("计划读取失败：{error}"),
+        }
     }
 
     pub async fn context_block(&self) -> Option<String> {
-        let state = self.state.read().await;
+        let state = match self.current_state().await {
+            Ok(state) => state,
+            Err(error) => return Some(format!("[plan_unavailable] {error}")),
+        };
         (!state.steps.is_empty()).then(|| format!("当前任务计划：\n{}", render_plan(&state.steps)))
     }
 
+    async fn current_state(&self) -> Result<PlanState> {
+        if let Some((store, owner)) = crate::loop_engine::current_session_repository() {
+            return Ok(serde_json::from_value(store.read_plan(&owner)?.value)?);
+        }
+        Ok(self.state.read().await.clone())
+    }
+
     async fn commit(&self, next: PlanState) -> Result<String> {
+        if let Some((store, owner)) = crate::loop_engine::current_session_repository() {
+            let current = store.read_plan(&owner)?;
+            store.stage_plan(&owner, current.revision, &serde_json::to_value(&next)?)?;
+            return Ok(render_plan(&next.steps));
+        }
+
         persist_state(self.path.as_deref(), &next).await?;
         let rendered = render_plan(&next.steps);
         *self.state.write().await = next;

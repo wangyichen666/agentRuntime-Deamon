@@ -1,8 +1,10 @@
 pub mod approval;
 pub mod delegation_tool;
+mod frames;
 pub mod handlers;
 pub mod lifecycle;
 pub mod protocol;
+pub mod resources;
 pub mod runtime;
 pub mod server;
 
@@ -12,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde_json::Value;
-use tokio::sync::{Mutex, Notify, broadcast, mpsc};
+use tokio::sync::{Mutex, Notify, broadcast};
 use tokio::task::JoinSet;
 
 use self::approval::ApprovalBroker;
@@ -25,34 +27,51 @@ use crate::provider::{FrozenRoute, Message, ProviderManager};
 use crate::safety::SafetyPolicy;
 use crate::session::SessionStore;
 use crate::skills::SkillLibrary;
-use crate::storage::{EventSeq, RunId, RunStore};
+use crate::storage::SessionLifecycle;
+use crate::storage::{
+    ControlRepository, EventSeq, MaintenanceRepository, RunId, RunStore, SessionQuery,
+    TranscriptStore,
+};
 
 pub struct DaemonState {
+    pub(crate) session_supervisor: SessionSupervisor,
+    pub(crate) run_coordinator: RunCoordinator,
     pub(crate) session: Arc<SessionStore>,
-    pub(crate) legacy_session_id: Mutex<String>,
-    pub(crate) default_session: Arc<SessionRuntime>,
-    pub(crate) sessions: Mutex<HashMap<String, Arc<SessionRuntime>>>,
     pub(crate) approvals: ApprovalBroker,
     pub(crate) safety: Option<Arc<SafetyPolicy>>,
-    pub(crate) active: Mutex<HashMap<ActiveKey, ActiveRequest>>,
-    pub(crate) request_tasks: Mutex<JoinSet<()>>,
-    pub(crate) queue_notify: Notify,
-    pub(crate) control_lock: Mutex<()>,
-    pub(crate) run_store: Arc<RunStore>,
+    pub(crate) run_store: Arc<dyn ControlRepository>,
+    pub(crate) maintenance_store: Arc<dyn MaintenanceRepository>,
     pub(crate) shutdown: CancellationToken,
+    pub(crate) resource_tokens: Mutex<HashMap<agent_core::ResourceId, CancellationToken>>,
     pub(crate) skills: Option<SkillLibrary>,
     pub(crate) cron: Option<Arc<CronManager>>,
     pub(crate) mcp: Option<Arc<McpManager>>,
     pub(crate) provider_manager: Option<Arc<ProviderManager>>,
-    pub(crate) frozen_routes: Mutex<HashMap<RunId, FrozenRoute>>,
     pub(crate) config_store: ConfigStore,
     pub(crate) daemon_log_path: PathBuf,
+}
+
+/// 会话实例、writer 与生命周期屏障的唯一运行时 owner。
+pub(crate) struct SessionSupervisor {
+    pub(crate) legacy_session_id: Mutex<String>,
+    pub(crate) default_session: Arc<SessionRuntime>,
+    pub(crate) sessions: Mutex<HashMap<String, Arc<SessionRuntime>>>,
+    pub(crate) control_lock: Mutex<()>,
+}
+/// 准入后的活跃任务、冻结能力和排队唤醒的唯一协调 owner。
+pub(crate) struct RunCoordinator {
+    pub(crate) active: Mutex<HashMap<ActiveKey, ActiveRequest>>,
+    pub(crate) request_tasks: Mutex<JoinSet<()>>,
+    pub(crate) queue_notify: Notify,
+    pub(crate) frozen_routes: Mutex<HashMap<RunId, FrozenRoute>>,
+    pub(crate) frozen_engines: Mutex<HashMap<RunId, LoopEngine>>,
 }
 
 pub(crate) struct SessionRuntime {
     pub(crate) id: String,
     pub(crate) engine: Arc<LoopEngine>,
-    pub(crate) history: Mutex<Vec<Message>>,
+    pub(crate) lifetime: agent_core::SessionLifetimeId,
+    pub(crate) writer: Mutex<()>,
     pub(crate) store: Arc<SessionStore>,
 }
 
@@ -114,7 +133,7 @@ pub(crate) struct ActiveRequest {
     updates: broadcast::Sender<ActiveRequestUpdate>,
     replay: VecDeque<ActiveRequestUpdate>,
     replay_bytes: usize,
-    origin: Option<mpsc::UnboundedSender<ServerFrame>>,
+    origin: Option<frames::FrameSender>,
 }
 
 impl ActiveRequest {
@@ -131,7 +150,7 @@ impl ActiveRequest {
         }
     }
 
-    pub(crate) fn with_origin(mut self, origin: mpsc::UnboundedSender<ServerFrame>) -> Self {
+    pub(crate) fn with_origin(mut self, origin: frames::FrameSender) -> Self {
         self.origin = Some(origin);
         self
     }
@@ -276,6 +295,7 @@ impl DaemonState {
             ConfigStore::default(),
             run_store,
         )
+        .expect("测试 session repository")
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -292,46 +312,82 @@ impl DaemonState {
         provider_manager: Option<Arc<ProviderManager>>,
         config_store: ConfigStore,
         run_store: Arc<RunStore>,
-    ) -> Self {
-        let default_session_id = session.current_id_sync();
+    ) -> anyhow::Result<Self> {
+        let original_key = agent_core::SessionKey(session.current_id_sync());
+        run_store.import_legacy(&original_key, &history)?;
+        let selected = run_store.preferred_session()?.filter(|key| {
+            run_store
+                .session_metadata(key)
+                .ok()
+                .flatten()
+                .is_some_and(|m| !m.deleted)
+        });
+        let default_session_id = if let Some(key) = selected {
+            key.0
+        } else if run_store
+            .session_metadata(&original_key)?
+            .is_some_and(|m| !m.deleted)
+        {
+            original_key.0
+        } else if let Some(meta) = run_store.session_metadata_list()?.into_iter().next() {
+            meta.key.0
+        } else {
+            let (key, _) = session.create_isolated_session()?;
+            run_store.create_session(&agent_core::SessionKey(key.clone()))?;
+            key
+        };
+        let session = Arc::new(session.open_known_session(&default_session_id)?);
+        run_store.set_preferred_session(&agent_core::SessionKey(default_session_id.clone()))?;
+        let snapshot =
+            run_store.session_snapshot(&agent_core::SessionKey(default_session_id.clone()))?;
+        let session = Arc::new(session.with_trace_lifetime(&snapshot.lifetime)?);
+        let engine = Arc::new(engine.for_session(session.clone()));
         let default_session = Arc::new(SessionRuntime {
             id: default_session_id.clone(),
             engine,
-            history: Mutex::new(history),
+            lifetime: snapshot.lifetime,
+            writer: Mutex::new(()),
             store: session.clone(),
         });
-        Self {
+        Ok(Self {
             session,
-            legacy_session_id: Mutex::new(default_session_id),
-            default_session,
-            sessions: Mutex::new(HashMap::new()),
+            session_supervisor: SessionSupervisor {
+                legacy_session_id: Mutex::new(default_session_id),
+                default_session,
+                sessions: Mutex::new(HashMap::new()),
+                control_lock: Mutex::new(()),
+            },
             approvals,
             safety,
-            active: Mutex::new(HashMap::new()),
-            request_tasks: Mutex::new(JoinSet::new()),
-            queue_notify: Notify::new(),
-            control_lock: Mutex::new(()),
+            run_coordinator: RunCoordinator {
+                active: Mutex::new(HashMap::new()),
+                request_tasks: Mutex::new(JoinSet::new()),
+                queue_notify: Notify::new(),
+                frozen_routes: Mutex::new(HashMap::new()),
+                frozen_engines: Mutex::new(HashMap::new()),
+            },
+            maintenance_store: run_store.clone(),
             run_store,
             shutdown: CancellationToken::new(),
+            resource_tokens: Mutex::new(HashMap::new()),
             skills,
             cron,
             mcp,
             provider_manager,
-            frozen_routes: Mutex::new(HashMap::new()),
             config_store,
             daemon_log_path,
-        }
+        })
     }
 
     pub async fn has_active_turns(&self) -> bool {
-        !self.active.lock().await.is_empty()
+        !self.run_coordinator.active.lock().await.is_empty()
     }
 
     pub(crate) async fn spawn_owned<F>(&self, future: F) -> bool
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let mut tasks = self.request_tasks.lock().await;
+        let mut tasks = self.run_coordinator.request_tasks.lock().await;
         if self.shutdown.is_cancelled() {
             return false;
         }
@@ -340,12 +396,12 @@ impl DaemonState {
                 tracing::error!(%error, "受管 daemon 任务异常结束");
             }
         }
-        tasks.spawn(future);
+        tasks.spawn(Box::pin(future));
         true
     }
 
     pub(crate) async fn join_owned(&self, grace: std::time::Duration) -> usize {
-        let mut tasks = self.request_tasks.lock().await;
+        let mut tasks = self.run_coordinator.request_tasks.lock().await;
         let joined = async {
             while let Some(result) = tasks.join_next().await {
                 if let Err(error) = result {
@@ -363,6 +419,9 @@ impl DaemonState {
     }
 
     pub async fn has_persistent_background_work(&self) -> bool {
+        if !self.resource_tokens.lock().await.is_empty() {
+            return true;
+        }
         match &self.cron {
             Some(cron) => cron.keeps_daemon_alive().await,
             None => false,

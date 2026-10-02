@@ -20,12 +20,12 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
-use crate::client::{DaemonClient, RpcStream};
-use crate::daemon::approval::PendingApprovalInfo;
-use crate::daemon::protocol::{EventFrame, EventKind, RequestId, ServerFrame};
 use crate::entry::recovery;
-use crate::provider::{Message, Role};
 use crate::slash::{SlashAction, SlashParse, SlashRegistry, SlashResponse};
+use agent_core::PendingApprovalInfo;
+use agent_core::{Message, Role};
+use agent_daemon_client::{DaemonClient, RpcStream};
+use agent_daemon_protocol::{EventFrame, EventKind, RequestId, ServerFrame};
 
 type ActiveRequests = Arc<Mutex<HashMap<String, RequestId>>>;
 
@@ -243,6 +243,10 @@ async fn run_acp_slash(
         &parsed,
         SlashParse::Command(crate::slash::SlashInvocation {
             action: SlashAction::Help
+                | SlashAction::Memory
+                | SlashAction::Context
+                | SlashAction::Resources
+                | SlashAction::Doctor
                 | SlashAction::Run
                 | SlashAction::Subagents
                 | SlashAction::Subagent

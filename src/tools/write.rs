@@ -45,6 +45,29 @@ impl Tool for WriteFileTool {
         })
     }
 
+    fn descriptor(&self, args: &Value) -> Result<agent_core::ToolDescriptor> {
+        let path = args
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("缺少 path"))?;
+        let path = self.safety.resolve_path(std::path::Path::new(path))?;
+        let mut descriptor = agent_core::ToolDescriptor::read();
+        descriptor.effect = agent_core::ToolEffect::Write;
+        descriptor.replay = agent_core::ReplayPolicy::ReceiptOnly;
+        descriptor.approval_required = true;
+        descriptor.resources.push(agent_core::ResourceAccess {
+            key: format!("file:{}", path.display()),
+            mode: agent_core::AccessMode::Write,
+        });
+        Ok(descriptor)
+    }
+    async fn preflight(&self, args: &Value) -> Result<()> {
+        let args: WriteArgs = serde_json::from_value(args.clone())?;
+        self.safety
+            .authorize_file(&args.path, PathIntent::Write)
+            .await?;
+        Ok(())
+    }
     async fn execute(&self, args: Value) -> Result<String> {
         let args: WriteArgs = serde_json::from_value(args).context("write_file 参数无效")?;
         let authorized = self

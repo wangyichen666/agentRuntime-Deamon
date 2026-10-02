@@ -1,0 +1,10 @@
+BEGIN IMMEDIATE;
+CREATE TABLE run_snapshots(run_id TEXT PRIMARY KEY REFERENCES runs(id),snapshot_json TEXT NOT NULL);
+CREATE TABLE turn_outputs(run_id TEXT PRIMARY KEY REFERENCES runs(id),message_json TEXT NOT NULL);
+CREATE TABLE legacy_plan_imports(source TEXT PRIMARY KEY,digest TEXT NOT NULL,lifetime TEXT NOT NULL);
+CREATE TABLE session_plans(lifetime TEXT PRIMARY KEY,revision INTEGER NOT NULL,data_json TEXT NOT NULL);
+CREATE TABLE turn_plan_stages(run_id TEXT PRIMARY KEY REFERENCES runs(id),base_revision INTEGER NOT NULL,revision INTEGER NOT NULL,data_json TEXT NOT NULL);
+CREATE TABLE turn_commits(run_id TEXT PRIMARY KEY REFERENCES runs(id),owner_json TEXT NOT NULL,usage_json TEXT NOT NULL,status TEXT NOT NULL,plan_revision INTEGER);
+CREATE TABLE tool_batches(run_id TEXT NOT NULL REFERENCES runs(id),round INTEGER NOT NULL,calls_json TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'prepared',PRIMARY KEY(run_id,round));
+INSERT INTO schema_migrations VALUES(7,CAST(strftime('%s','now') AS INTEGER)*1000);
+COMMIT;

@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "crates/core", "crates/daemon-protocol", "crates/daemon-client", "crates/storage", "crates/context", "crates/memory"]
+resolver = "3"
+
 [package]
 name = "my-agent"
 version = "0.1.0"
@@ -7,6 +11,12 @@ publish = false
 description = "个人使用的轻量 Rust AI 编码 Agent"
 
 [dependencies]
+agent-memory = { version = "=0.1.0", path = "crates/memory" }
+agent-context = { version = "=0.1.0", path = "crates/context" }
+agent-daemon-client = { version = "=0.1.0", path = "crates/daemon-client" }
+agent-storage = { version = "=0.1.0", path = "crates/storage" }
+agent-core = { version = "=0.1.0", path = "crates/core" }
+agent-daemon-protocol = { version = "=0.1.0", path = "crates/daemon-protocol" }
 agent-client-protocol = "=2.1.0"
 anyhow = "1"
 async-trait = "0.1"
@@ -33,6 +43,16 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 unicode-width = "=0.2.2"
 unicode-segmentation = "=1.13.3"
+jsonschema = { version = "=0.33.0", default-features = false }
 
 [dev-dependencies]
+agent-storage = { version = "=0.1.0", path = "crates/storage", features = ["test-support"] }
+agent-daemon-client = { version = "=0.1.0", path = "crates/daemon-client", features = ["test-transport"] }
+syn = { version = "2", features = ["full", "visit"] }
+toml = "0.8"
 tokio-tungstenite = "=0.29.0"
+rcgen = "=0.13.2"
+tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring", "tls12"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "=3.6.3", features = ["apple-native"] }

@@ -1,45 +1,8 @@
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TimeoutPhase {
-    Connect,
-    FirstEvent,
-    StreamIdle,
-    Overall,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", content = "phase", rename_all = "snake_case")]
-pub enum ProviderErrorKind {
-    Auth,
-    AccessDenied,
-    RateLimit,
-    QuotaExceeded,
-    InvalidRequest,
-    ContextOverflow,
-    ContentPolicy,
-    Timeout(TimeoutPhase),
-    Transport,
-    Server,
-    Protocol,
-    EmptyCompletion,
-    ReasoningOnly,
-    OutputTruncated,
-    Cancelled,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ProviderDiagnostic {
-    pub http_status: Option<u16>,
-    pub upstream_code: Option<String>,
-    pub request_id: Option<String>,
-    pub retry_after_ms: Option<u64>,
-    pub redacted_message: String,
-}
+pub use agent_core::{ProviderDiagnostic, ProviderErrorKind, TimeoutPhase};
 
 #[derive(Clone, Debug, Error)]
 #[error("Provider {kind:?}: {diagnostic_message}")]

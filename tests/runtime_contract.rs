@@ -272,6 +272,36 @@ async fn entry_views(
     expected_content: &str,
     subagent_parent: Option<&str>,
 ) {
+    let daemon_socket = std::fs::read_dir(runtime_dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path().join("daemon.sock"))
+        .find(|p| p.exists())
+        .unwrap();
+    let read = rpc(
+        &daemon_socket,
+        "view-owner",
+        "run.read",
+        json!({"run_id":run_id}),
+    )
+    .await;
+    let session_key = read["result"]["session_id"].as_str().unwrap();
+    let mut facts = Vec::new();
+    for command in ["memory", "context", "resources"] {
+        let line = format!("/{command} {session_key}");
+        let result = rpc(
+            &daemon_socket,
+            "view-fact",
+            "slash.execute",
+            json!({"line":line}),
+        )
+        .await;
+        let content = result["result"]["content"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{result}"))
+            .to_owned();
+        facts.push((line, content));
+    }
     let mut cli = Command::new(env!("CARGO_BIN_EXE_my-agent"))
         .arg("--workspace")
         .arg(workspace)
@@ -295,7 +325,10 @@ async fn entry_views(
                 subagent_parent.map_or(String::new(), |parent| format!(
                     "/subagent {parent} {run_id}\n"
                 )),
-                ""
+                facts
+                    .iter()
+                    .map(|(line, _)| format!("{line}\n"))
+                    .collect::<String>()
             )
             .as_bytes(),
         )
@@ -315,6 +348,13 @@ async fn entry_views(
             && subagent_parent.is_none_or(|_| cli_text.contains(&format!("child_run_id={run_id}"))),
         "{cli_text}"
     );
+
+    for (_, fact) in &facts {
+        assert!(
+            cli_text.contains(fact),
+            "CLI 缺少 durable fact: {fact}; {cli_text}"
+        );
+    }
 
     let mut acp = Command::new(env!("CARGO_BIN_EXE_my-agent"))
         .arg("--workspace")
@@ -395,6 +435,22 @@ async fn entry_views(
         assert!(
             child_text.contains(&format!("child_run_id={run_id}")),
             "{child_text}"
+        );
+    }
+    for (index, (line, fact)) in facts.iter().enumerate() {
+        let id = 10 + index;
+        acp_in.write_all(format!("{}\n",json!({"jsonrpc":"2.0","id":id,"method":"session/prompt","params":{"sessionId":acp_session,"prompt":[{"type":"text","text":line}]}})).as_bytes()).await.unwrap();
+        let mut text = String::new();
+        loop {
+            let line = acp_out.next_line().await.unwrap().unwrap();
+            text.push_str(&line);
+            if serde_json::from_str::<Value>(&line).unwrap()["id"] == id {
+                break;
+            }
+        }
+        assert!(
+            text.contains(&serde_json::to_string(fact).unwrap()),
+            "ACP durable fact 不一致: {fact}; {text}"
         );
     }
     acp.kill().await.unwrap();
@@ -482,6 +538,28 @@ async fn entry_views(
             "{child_view}"
         );
     }
+    for (index, (line, fact)) in facts.iter().enumerate() {
+        let id = format!("web-fact-{index}");
+        socket
+            .send(WsMessage::Text(
+                json!({"jsonrpc":"2.0","id":id,"method":"slash.execute","params":{"line":line}})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        loop {
+            let text = socket.next().await.unwrap().unwrap().into_text().unwrap();
+            let value: Value = serde_json::from_str(&text).unwrap();
+            if value["id"] == id {
+                assert_eq!(
+                    value["result"]["content"], *fact,
+                    "WebSocket durable fact 不一致"
+                );
+                break;
+            }
+        }
+    }
     web.kill().await.unwrap();
     web.wait().await.unwrap();
 }
@@ -514,6 +592,43 @@ async fn committed_terminal_survives_real_daemon_restart_and_uncertain_run_is_no
         child.kill().await.unwrap();
         child.wait().await.unwrap();
         let (mut restarted, socket) = daemon(&workspace, &runtime_dir, &url).await;
+        let client = agent_daemon_client::DaemonClient::connect_unix(&socket)
+            .await
+            .unwrap();
+        let client = client.reconnect().await.unwrap();
+        let typed_run = client
+            .read_run(&agent_core::RunId(complete_id.clone()))
+            .await
+            .unwrap();
+        assert_eq!(typed_run.status, agent_core::RunStatus::Completed);
+        assert_eq!(typed_run.content.as_deref(), Some("已完成"));
+        let mut cursor = agent_core::EventSeq(0);
+        let mut found_terminal = false;
+        loop {
+            let page = client
+                .read_events(&typed_run.run_id, cursor, 2)
+                .await
+                .unwrap();
+            found_terminal |= page.events.iter().any(|event| event.event == "terminal");
+            assert!(page.events.len() <= 2);
+            cursor = page.cursor;
+            if !page.has_more {
+                break;
+            }
+        }
+        assert_eq!(cursor, typed_run.last_seq);
+        assert!(found_terminal);
+        let rejected = client
+            .request_result(
+                "runs.send",
+                json!({"session_id":session,"message":"拒绝未知字段","unknown":true}),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(rejected, agent_daemon_client::ClientError::Rpc(error) if error.code == -32602)
+        );
+        assert_eq!(provider_requests.load(Ordering::SeqCst), 2);
         let complete = rpc(
             &socket,
             "read-complete",
@@ -1073,8 +1188,12 @@ async fn child_read_permission_stays_frozen_after_parent_mode_changes() {
             "{receipts}"
         );
         assert_eq!(
-            receipts["result"]["receipts"][0]["outcome"], "tool_error",
+            receipts["result"]["receipts"][0]["outcome"], "not_executed",
             "{receipts}"
+        );
+        assert!(
+            receipts["result"]["receipts"][0]["started_at_ms"].is_null(),
+            "预检拒绝不能启动工具"
         );
         daemon_process.kill().await.unwrap();
         daemon_process.wait().await.unwrap();
@@ -1084,4 +1203,84 @@ async fn child_read_permission_stays_frozen_after_parent_mode_changes() {
     })
     .await
     .expect("child permission contract timed out");
+}
+
+#[tokio::test]
+async fn session_delete_recreate_and_fork_survive_restart_without_old_history_or_dual_write() {
+    tokio::time::timeout(Duration::from_secs(30),async {
+        let workspace=temp_workspace();let runtime_dir=std::env::temp_dir().join(format!("ma-life-{}-{}",std::process::id(),NEXT.fetch_add(1,Ordering::Relaxed)));
+        let (url,server,count)=mock_delegation_ollama(vec![1,2]).await;
+        let (mut process,socket)=daemon(&workspace,&runtime_dir,&url).await;
+        let key="session-lifetime-test.jsonl";
+        let created=rpc(&socket,"create","sessions.create",json!({"session_id":key,"operation_id":"create-original"})).await;
+        assert_eq!(created["result"]["session_id"],key);
+        let (_,response)=chat(&socket,"same-request",key,"旧输入",true).await;assert!(response.unwrap().get("error").is_none());
+        let before=rpc(&socket,"before","sessions.read",json!({"session_id":key})).await;
+        assert_eq!(before["result"]["transcript_revision"],2);
+        let fork=rpc(&socket,"fork","sessions.fork",json!({"session_id":key,"target_session_id":"session-forked-test.jsonl","operation_id":"fork-original","expected_revision":2})).await;assert_eq!(fork["result"]["forked"],true);
+        let deleted=rpc(&socket,"delete","sessions.delete",json!({"session_id":key,"operation_id":"delete-original"})).await;assert_eq!(deleted["result"]["deleted"],true);
+        let missing=rpc(&socket,"deleted-read","sessions.read",json!({"session_id":key})).await;assert!(missing.get("error").is_some());
+        let recreated=rpc(&socket,"recreate","sessions.create",json!({"session_id":key,"operation_id":"create-replacement"})).await;assert_eq!(recreated["result"]["created"],true);
+        let (new_run,response)=chat(&socket,"same-request",key,"新输入",true).await;assert!(response.unwrap().get("error").is_none());
+        process.kill().await.unwrap();process.wait().await.unwrap();
+        let (mut restarted,socket)=daemon(&workspace,&runtime_dir,&url).await;
+        let after=rpc(&socket,"after","sessions.read",json!({"session_id":key})).await;
+        assert_eq!(after["result"]["messages"].as_array().unwrap().len(),2);assert_eq!(after["result"]["messages"][0]["content"],"新输入");
+        let forked=rpc(&socket,"fork-read","sessions.read",json!({"session_id":"session-forked-test.jsonl"})).await;assert_eq!(forked["result"]["messages"][0]["content"],"旧输入");
+        assert!(!workspace.join(".my-agent").join(key).exists());assert_eq!(count.load(Ordering::SeqCst),2);
+        entry_views(&workspace,&runtime_dir,&url,&new_run,"子任务完成",None).await;
+        restarted.kill().await.unwrap();restarted.wait().await.unwrap();server.abort();let _=std::fs::remove_dir_all(workspace);let _=std::fs::remove_dir_all(runtime_dir);
+    }).await.expect("lifetime restart contract timed out");
+}
+
+#[tokio::test]
+async fn compact_memory_receipts_survive_restart_and_all_three_entries() {
+    tokio::time::timeout(Duration::from_secs(30),async {
+        let workspace=temp_workspace();
+        let runtime_dir=std::env::temp_dir().join(format!("ma-cm-{}-{}",std::process::id(),NEXT.fetch_add(1,Ordering::Relaxed)));
+        let (url,server,_)=mock_delegation_ollama((1..=20).collect()).await;
+        let (mut process,socket)=daemon(&workspace,&runtime_dir,&url).await;
+        let key="session-context-memory.jsonl";
+        rpc(&socket,"create","sessions.create",json!({"session_id":key,"operation_id":"create-context"})).await;
+        let invalid=rpc(&socket,"invalid-sandbox","chat.send",json!({"session_id":key,"message":"不能静默忽略 sandbox 政策","sandbox":"unsupported"})).await;
+        assert!(invalid.get("error").is_some(),"{invalid}");
+        let mut owner=String::new();
+        for i in 0..4 {
+            let (run,response)=chat(&socket,&format!("turn-{i}"),key,&"constraint-".repeat(1000),true).await;
+            assert!(response.unwrap().get("error").is_none());owner=run;
+        }
+        let command=json!({"session_id":key,"owner_run_id":owner,"operation_id":"compact-once","expected_revision":8});
+        let installed=rpc(&socket,"compact","sessions.compact",command.clone()).await;
+        assert_eq!(installed["result"]["projection_generation"],1,"{installed}");
+        let remembered=rpc(&socket,"remember","memory.store",json!({"session_id":key,"owner_run_id":owner,"operation_id":"explicit-memory","content":"用户明确要求保留这个约束"})).await;
+        assert!(remembered["result"]["entry"]["id"].is_string(),"{remembered}");
+        let readonly=rpc(&socket,"readonly","chat.send",json!({"session_id":key,"message":"只读核对","context_read_only":true})).await;
+        assert!(readonly.get("error").is_none(),"{readonly}");
+        let readonly_run=readonly["result"]["run_id"].as_str().unwrap();
+        let denied=rpc(&socket,"deny-write","memory.store",json!({"session_id":key,"owner_run_id":readonly_run,"operation_id":"denied","content":"不能写入"})).await;
+        assert!(denied.get("error").is_some(),"{denied}");
+        let replay=rpc(&socket,"compact-retry","sessions.compact",command.clone()).await;
+        assert_eq!(replay["result"]["projection_generation"],1,"{replay}");
+        assert_eq!(replay["result"]["replayed"],true);
+        let page=rpc(&socket,"canonical","session.load_page",json!({"session_id":key,"limit":100})).await;
+        assert_eq!(page["result"]["transcript_revision"],10,"{page}");
+        process.kill().await.unwrap();process.wait().await.unwrap();
+        let (mut restarted,socket)=daemon(&workspace,&runtime_dir,&url).await;
+        let fresh=rpc(&socket,"after","sessions.read",json!({"session_id":key})).await;
+        assert_eq!(fresh["result"]["projection_generation"],1);
+        assert_eq!(fresh["result"]["transcript_revision"],10);
+        let replay=rpc(&socket,"restarted-retry","sessions.compact",command).await;
+        assert_eq!(replay["result"]["replayed"],true,"{replay}");
+        entry_views(&workspace,&runtime_dir,&url,&owner,"子任务完成",None).await;
+        let doctor=rpc(&socket,"doctor","runtime.doctor",json!({})).await;
+        assert_eq!(doctor["result"]["storage"]["integrity"],"ok");
+        assert_eq!(doctor["result"]["storage"]["schema_version"],12);
+        rpc(&socket,"clear","sessions.clear",json!({"session_id":key,"operation_id":"clear-context"})).await;
+        let cleared=rpc(&socket,"clear-read","memory.list",json!({"session_id":key})).await;
+        assert_eq!(cleared["result"]["entries"],json!([]));
+        let late=rpc(&socket,"late","memory.store",json!({"session_id":key,"owner_run_id":owner,"operation_id":"late-old","content":"迟到旧写入"})).await;
+        assert!(late.get("error").is_some());
+        restarted.kill().await.unwrap();restarted.wait().await.unwrap();server.abort();
+        let _=std::fs::remove_dir_all(workspace);let _=std::fs::remove_dir_all(runtime_dir);
+    }).await.expect("compact memory 三入口重启合同超时");
 }

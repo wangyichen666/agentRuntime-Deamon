@@ -43,10 +43,18 @@ impl Tool for ExecTool {
         "在工作区执行 shell 命令，返回退出码、stdout、stderr 和实际 sandbox；Native 不提供强隔离"
     }
     fn parameters(&self) -> Value {
-        json!({"type":"object","properties":{"command":{"type":"string","description":"要执行的 shell 命令"},"sandbox":{"type":"string","enum":["native","docker"],"description":"请求的执行后端；docker 尚未实现"}},"required":["command"]})
+        json!({"type":"object","properties":{"command":{"type":"string","description":"要执行的 shell 命令"},"sandbox":{"type":"string","enum":["native","docker"],"description":"执行后端；Docker 要求预装镜像，工作区只读、网络关闭"}},"required":["command"]})
     }
     fn stop_resources(&self) {
         self.sandbox.stop_all();
+    }
+    async fn preflight(&self, args: &Value) -> Result<()> {
+        let args: ExecArgs = serde_json::from_value(args.clone())?;
+        let backend = frozen_backend(args.sandbox)?;
+        if matches!(backend, SandboxBackend::Docker) && !NativeSandbox::docker_available().await {
+            bail!("强沙箱 backend 或预装镜像不可用，整批拒绝");
+        }
+        self.safety.authorize_command(&args.command).await
     }
     async fn execute(&self, args: Value) -> Result<String> {
         self.execute_command(args, &NeverCancelled).await
@@ -78,7 +86,8 @@ impl ExecTool {
             shell: PathBuf::from("/bin/sh"),
             cwd: self.safety.workspace().to_path_buf(),
             timeout: execution_timeout(),
-            requested: args.sandbox.unwrap_or(SandboxBackend::Native),
+            requested: frozen_backend(args.sandbox)?,
+            owner: crate::loop_engine::current_session_repository().map(|(_, owner)| owner),
         };
         let result = self.sandbox.execute(request, cancellation).await?;
         Ok(format!(
@@ -86,6 +95,20 @@ impl ExecTool {
             result.exit_code, result.requested, result.effective, result.stdout, result.stderr
         ))
     }
+}
+
+fn frozen_backend(requested: Option<SandboxBackend>) -> Result<SandboxBackend> {
+    if let Some((repository, owner)) = crate::loop_engine::current_session_repository() {
+        if let Some(snapshot) = repository.run_snapshot(&owner.run_id)? {
+            if snapshot.sandbox_effective == "docker" {
+                if matches!(requested, Some(SandboxBackend::Native)) {
+                    bail!("不能放宽冻结的 Docker 隔离政策");
+                }
+                return Ok(SandboxBackend::Docker);
+            }
+        }
+    }
+    Ok(requested.unwrap_or(SandboxBackend::Native))
 }
 
 struct NeverCancelled;
@@ -160,7 +183,7 @@ mod tests {
             .execute(json!({"command":"printf hello", "sandbox":"docker"}))
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("尚未实现"));
+        assert!(error.to_string().contains("exact owner"));
     }
 
     #[tokio::test]

@@ -15,6 +15,44 @@ mod file_access;
 #[cfg(unix)]
 pub use file_access::AuthorizedPath;
 
+tokio::task_local! { static FROZEN_MODE: SafetyMode; }
+tokio::task_local! { static RUN_APPROVALS: std::cell::RefCell<std::collections::HashSet<String>>; }
+tokio::task_local! { static ACTION_ID: String; }
+pub async fn with_action_identity<F: std::future::Future>(id: String, future: F) -> F::Output {
+    ACTION_ID.scope(id, future).await
+}
+pub fn action_identity(round: usize, call: &crate::provider::ToolCall) -> String {
+    use sha2::{Digest, Sha256};
+    format!(
+        "{round}:{}:{:x}",
+        call.id,
+        Sha256::digest(call.arguments.to_string().as_bytes())
+    )
+}
+pub async fn with_approval_cache<F: std::future::Future>(future: F) -> F::Output {
+    if RUN_APPROVALS.try_with(|_| ()).is_ok() {
+        future.await
+    } else {
+        RUN_APPROVALS
+            .scope(
+                std::cell::RefCell::new(std::collections::HashSet::new()),
+                future,
+            )
+            .await
+    }
+}
+pub async fn with_frozen_mode<F: std::future::Future>(mode: SafetyMode, future: F) -> F::Output {
+    FROZEN_MODE
+        .scope(
+            mode,
+            RUN_APPROVALS.scope(
+                std::cell::RefCell::new(std::collections::HashSet::new()),
+                future,
+            ),
+        )
+        .await
+}
+
 pub type FileAccessIntent = PathIntent;
 
 #[derive(Clone, Copy, Debug)]
@@ -126,6 +164,9 @@ impl SafetyPolicy {
     }
 
     pub fn mode(&self) -> SafetyMode {
+        if let Ok(mode) = FROZEN_MODE.try_with(|mode| *mode) {
+            return mode;
+        }
         match self.mode.load(Ordering::Relaxed) {
             value if value == SafetyMode::RequestApproval as u8 => SafetyMode::RequestApproval,
             value if value == SafetyMode::FullAccess as u8 => SafetyMode::FullAccess,
@@ -139,6 +180,26 @@ impl SafetyPolicy {
 
     pub fn set_mode(&self, mode: SafetyMode) {
         self.mode.store(mode as u8, Ordering::Relaxed);
+    }
+
+    async fn approve_once(&self, prompt: &str) -> Result<bool> {
+        let action = ACTION_ID.try_with(Clone::clone).unwrap_or_default();
+        let key = format!(
+            "{}:{:?}:{action}:{prompt}",
+            self.workspace.display(),
+            self.mode()
+        );
+        if RUN_APPROVALS
+            .try_with(|cache| cache.borrow().contains(&key))
+            .unwrap_or(false)
+        {
+            return Ok(true);
+        }
+        let approved = self.approval.request(prompt).await?;
+        if approved {
+            let _ = RUN_APPROVALS.try_with(|cache| cache.borrow_mut().insert(key));
+        }
+        Ok(approved)
     }
 
     pub async fn authorize_path(
@@ -157,7 +218,7 @@ impl SafetyPolicy {
         if resolved.starts_with(&self.workspace) {
             if mode == SafetyMode::RequestApproval && !matches!(intent, PathIntent::Read) {
                 let prompt = format!("{intent}工作区内路径 {}", resolved.display());
-                if self.approval.request(&prompt).await? {
+                if self.approve_once(&prompt).await? {
                     return Ok(resolved);
                 }
                 return Err(SafetyError::UserRejected(prompt).into());
@@ -170,7 +231,7 @@ impl SafetyPolicy {
         }
 
         let prompt = format!("{intent}工作区外路径 {}", resolved.display());
-        if self.approval.request(&prompt).await? {
+        if self.approve_once(&prompt).await? {
             Ok(resolved)
         } else {
             Err(SafetyError::UserRejected(prompt).into())
@@ -194,7 +255,7 @@ impl SafetyPolicy {
                 if mode == SafetyMode::RequestApproval && command_uses_network(command) =>
             {
                 let prompt = format!("使用互联网（命令）：{command}");
-                if self.approval.request(&prompt).await? {
+                if self.approve_once(&prompt).await? {
                     Ok(())
                 } else {
                     Err(SafetyError::UserRejected(prompt).into())
@@ -207,7 +268,7 @@ impl SafetyPolicy {
                     return Ok(());
                 }
                 let prompt = format!("执行高风险命令（{reason}）：{command}");
-                if self.approval.request(&prompt).await? {
+                if self.approve_once(&prompt).await? {
                     Ok(())
                 } else {
                     Err(SafetyError::UserRejected(prompt).into())
@@ -240,7 +301,7 @@ impl SafetyPolicy {
         let prompt = format!(
             "执行外部 MCP 工具（默认视为有副作用）：{description}；参数：{arguments}{details}"
         );
-        if self.approval.request(&prompt).await? {
+        if self.approve_once(&prompt).await? {
             Ok(())
         } else {
             Err(SafetyError::UserRejected(prompt).into())
@@ -286,7 +347,7 @@ impl SafetyPolicy {
         Ok(())
     }
 
-    fn resolve_path(&self, requested: &Path) -> Result<PathBuf> {
+    pub(crate) fn resolve_path(&self, requested: &Path) -> Result<PathBuf> {
         let candidate = if requested.is_absolute() {
             requested.to_path_buf()
         } else {
@@ -524,6 +585,27 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.allowed)
         }
+    }
+
+    #[tokio::test]
+    async fn admitted_permission_mode_and_action_proof_are_frozen_per_run() {
+        let approval = Arc::new(FixedApproval {
+            allowed: true,
+            calls: AtomicUsize::new(0),
+        });
+        let policy = SafetyPolicy::new(std::env::current_dir().unwrap(), approval.clone()).unwrap();
+        with_frozen_mode(SafetyMode::RequestApproval, async {
+            policy.set_mode(SafetyMode::FullAccess);
+            assert_eq!(policy.mode(), SafetyMode::RequestApproval);
+            for id in ["round-1-call", "round-1-call", "round-2-call"] {
+                with_action_identity(id.into(), policy.authorize_command("kill 12345"))
+                    .await
+                    .unwrap();
+            }
+        })
+        .await;
+        assert_eq!(approval.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(policy.mode(), SafetyMode::FullAccess);
     }
 
     #[test]

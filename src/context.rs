@@ -3,12 +3,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use tracing::{debug, warn};
+use tracing::warn;
 
 use crate::plan::PlanStore;
-use crate::provider::{Message, Provider, Response, Role, ToolSpec};
+#[cfg(test)]
+use crate::provider::ToolSpec;
+use crate::provider::{Message, Provider, Response, Role};
 use crate::skills::SkillLibrary;
-use crate::tool_calls::collect_provider_response;
+use crate::tool_calls::collect_complete_provider_response;
 
 const DEFAULT_SYSTEM_PROMPT: &str = "你是一个个人 AI 编码 Agent。先理解任务，再按需调用工具；工具失败时根据错误调整方案，先修正根因再重试，不要在同一失败上无变化地循环；任务完成后给出简洁、可核验的最终回答。面对“给我写一个前端”这类未指定技术栈的请求，优先沿用当前项目已有技术栈；没有现有栈时默认创建可直接打开的原生 HTML/CSS/JavaScript 页面，并明确说明这个假设。开始写入嵌套路径前确保父目录存在，优先使用工具提供的目录创建能力；如果工具报告路径不存在，立即创建目录并重试一次。面对需要三个或更多步骤的复杂任务，先调用 plan 的 set 制定计划，开始和完成每一步时用 update 更新状态，必要时用 add 调整；简单单步任务不要使用 plan，避免形式主义。若动态上下文提供了命中的技能正文，应把它作为当前任务的工作方法；未命中的技能只有索引，不要假装已读取其正文。";
 const DEFAULT_TOKEN_BUDGET: usize = 32_000;
@@ -140,44 +142,143 @@ impl ContextManager {
         })
     }
 
+    pub fn with_frozen_policy(&self, fingerprint: &str) -> Result<Self> {
+        let values = fingerprint
+            .split(':')
+            .map(str::parse::<usize>)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if values.len() != 4
+            || values[0] < 256
+            || values[1] == 0
+            || values[2] == 0
+            || values[2] >= values[3]
+            || values[3] > 100
+        {
+            bail!("冻结的 context policy 无效");
+        }
+        let mut next = self.clone();
+        next.config = ContextConfig {
+            token_budget: values[0],
+            recent_messages: values[1],
+            mild_compression_percent: values[2],
+            strong_compression_percent: values[3],
+            summary_chunk_tokens: (values[0] / 3).max(128),
+        };
+        Ok(next)
+    }
+    pub fn fingerprint(&self) -> String {
+        format!(
+            "{}:{}:{}:{}",
+            self.config.token_budget,
+            self.config.recent_messages,
+            self.config.mild_compression_percent,
+            self.config.strong_compression_percent
+        )
+    }
+    pub fn should_compact(&self, tokens: usize) -> bool {
+        tokens
+            > self
+                .config
+                .token_budget
+                .saturating_mul(self.config.mild_compression_percent)
+                / 100
+    }
+    pub async fn compact_candidate<F: std::future::Future<Output = ()>>(
+        &self,
+        history: &[Message],
+        cancelled: F,
+        force: bool,
+    ) -> Result<Option<(Vec<Message>, String)>> {
+        let old = history.to_vec();
+        let mut projected = old.clone();
+        let mut manager = self.clone();
+        if force {
+            manager.config.recent_messages = 2;
+        }
+        let prune_before = projected
+            .len()
+            .saturating_sub(manager.config.recent_messages)
+            .min(agent_context::current_turn_start(&projected));
+        for message in &mut projected[..prune_before] {
+            message.image_urls.clear();
+            if message.role == Role::Tool
+                && message
+                    .content
+                    .as_ref()
+                    .is_some_and(|s| s.chars().count() > 4096)
+            {
+                message.content = Some(format!(
+                    "{}\n[投影已裁剪；原始结果保留在 transcript 与 artifact 中]",
+                    message
+                        .content
+                        .as_deref()
+                        .unwrap_or_default()
+                        .chars()
+                        .take(2048)
+                        .collect::<String>()
+                ));
+            }
+        }
+        let pruned = projected.clone();
+        tokio::pin!(cancelled);
+        let result = tokio::select! {
+            biased;
+            _=&mut cancelled=>Err(agent_context::ContextError::Cancelled.into()),
+            _=tokio::time::sleep(std::time::Duration::from_secs(30))=>Err(anyhow::anyhow!("上下文摘要超时")),
+            result=manager.compress_history(&mut projected,CompressionMode::Strong)=>result,
+        };
+        match result {
+            Ok(()) if agent_context::validate_candidate(&old, &projected).is_ok() => {
+                Ok(Some((projected, "summary".into())))
+            }
+            Ok(()) => Ok(None),
+            Err(ref error)
+                if error
+                    .downcast_ref::<agent_context::ContextError>()
+                    .is_none_or(|cause| {
+                        !matches!(cause, agent_context::ContextError::Cancelled)
+                    })
+                    && agent_context::validate_candidate(&old, &pruned).is_ok() =>
+            {
+                Ok(Some((pruned, "prune_only/partial".into())))
+            }
+            Err(error) => Err(error),
+        }
+    }
+    #[cfg(test)]
     pub async fn prepare(
         &self,
         history: &mut Vec<Message>,
         tools: &[ToolSpec],
     ) -> Result<Vec<Message>> {
         let before = self.compose(history).await;
-        let total = estimate_messages(&before) + estimate_json_tokens(tools)?;
-        let mild_threshold = self
-            .config
-            .token_budget
-            .saturating_mul(self.config.mild_compression_percent)
-            / 100;
-        let strong_threshold = self
-            .config
-            .token_budget
-            .saturating_mul(self.config.strong_compression_percent)
-            / 100;
-        if total > strong_threshold {
-            debug!(
-                estimated_tokens = total,
-                threshold = strong_threshold,
-                "上下文超过强力压缩闸门"
-            );
-            self.compress_history(history, CompressionMode::Strong)
-                .await?;
-        } else if total > mild_threshold {
-            debug!(
-                estimated_tokens = total,
-                threshold = mild_threshold,
-                "上下文超过温和压缩闸门"
-            );
-            self.compress_history(history, CompressionMode::Mild)
-                .await?;
+        let total = agent_context::TokenEstimator.request(&before, tools)?;
+        let mode = if total
+            > self
+                .config
+                .token_budget
+                .saturating_mul(self.config.strong_compression_percent)
+                / 100
+        {
+            Some(CompressionMode::Strong)
+        } else if total
+            > self
+                .config
+                .token_budget
+                .saturating_mul(self.config.mild_compression_percent)
+                / 100
+        {
+            Some(CompressionMode::Mild)
+        } else {
+            None
+        };
+        if let Some(mode) = mode {
+            self.compress_history(history, mode).await?;
         }
         Ok(self.compose(history).await)
     }
 
-    async fn compose(&self, history: &[Message]) -> Vec<Message> {
+    pub(crate) async fn compose(&self, history: &[Message]) -> Vec<Message> {
         let mut messages = Vec::with_capacity(history.len() + 3);
         messages.push(Message::text(Role::System, &self.system_prompt));
         if let Some(rules) = &self.project_rules {
@@ -186,15 +287,26 @@ impl ContextManager {
                 format!("项目规则（AGENTS.md）：\n{rules}"),
             ));
         }
-        messages.extend_from_slice(history);
+        let overlay_start = history
+            .iter()
+            .rposition(|m| m.role == Role::User)
+            .unwrap_or(history.len());
+        messages.extend_from_slice(&history[..overlay_start]);
+        if let Some(retrieved) = self.retrieved_context(history).await {
+            messages.push(Message::text(
+                Role::System,
+                format!("[retrieved_context] {retrieved}"),
+            ));
+        }
+        messages.extend_from_slice(&history[overlay_start..]);
         messages.push(Message::text(
             Role::System,
-            self.dynamic_environment(history).await,
+            format!("[turn_overlay] {}", self.dynamic_environment().await),
         ));
         messages
     }
 
-    async fn dynamic_environment(&self, history: &[Message]) -> String {
+    async fn dynamic_environment(&self) -> String {
         let branch = tokio::process::Command::new("git")
             .arg("branch")
             .arg("--show-current")
@@ -208,10 +320,13 @@ impl ContextManager {
             })
             .filter(|branch: &String| !branch.is_empty())
             .unwrap_or_else(|| "（非 Git 仓库或 detached HEAD）".to_owned());
-        let mut environment = format!(
+        format!(
             "动态环境：cwd={}；git_branch={branch}",
             self.workspace.display()
-        );
+        )
+    }
+    async fn retrieved_context(&self, history: &[Message]) -> Option<String> {
+        let mut environment = String::new();
         if let Some(plan) = self.plan.context_block().await {
             environment.push('\n');
             environment.push_str(&plan);
@@ -226,7 +341,7 @@ impl ContextManager {
             environment.push('\n');
             environment.push_str(&skills);
         }
-        environment
+        (!environment.is_empty()).then_some(environment)
     }
 
     async fn compress_history(
@@ -244,9 +359,11 @@ impl ContextManager {
 
         let compressible = history.len() - self.config.recent_messages;
         let mut split = match mode {
+            #[cfg(test)]
             CompressionMode::Mild => compressible.div_ceil(3).max(1),
             CompressionMode::Strong => compressible,
         };
+        split = split.min(agent_context::current_turn_start(history));
         while split > 0
             && history
                 .get(split)
@@ -261,11 +378,15 @@ impl ContextManager {
         let old = history[..split].to_vec();
         let serialized = serde_json::to_string(&old).context("序列化待压缩历史失败")?;
         let summary = self.summarize_text(serialized, 0).await?;
+        let anchor_budget = (self.config.token_budget / 8)
+            .min(2048)
+            .min(estimate_messages(&old) / 4);
+        let anchors = agent_context::retained_user_inputs(&old, anchor_budget).unwrap_or_default();
         let recent = history.split_off(split);
         history.clear();
         history.push(Message::text(
             Role::System,
-            format!("此前对话摘要：\n{summary}"),
+            format!("{anchors}此前对话摘要：\n{summary}"),
         ));
         history.extend(recent);
         Ok(())
@@ -316,12 +437,13 @@ impl ContextManager {
         let messages = [
             Message::text(
                 Role::System,
-                "把给定的早期对话压缩成简短事实摘要。保留用户目标、关键决策、文件改动、工具结果、未完成事项；不要虚构。只输出摘要。",
+                "把给定的早期对话压缩成简短事实摘要。按用户目标、明确约束、已完成工作、当前进度、关键决策、文件/符号、真实工具结果、未解决失败、计划与下一步组织 checkpoint；区分未知与事实，不要虚构。已有 checkpoint 应增量更新，不嵌套引用全文。只输出摘要。",
             ),
             Message::text(Role::User, source),
         ];
-        match collect_provider_response(self.provider.as_ref(), &messages, &[]).await? {
-            Response::Text(summary) => Ok(summary),
+        match collect_complete_provider_response(self.provider.as_ref(), &messages, &[]).await? {
+            Response::Text(summary) if !summary.trim().is_empty() => Ok(summary),
+            Response::Text(_) => bail!("模型返回空压缩摘要"),
             Response::ToolCalls(_) => bail!("模型在上下文压缩时返回了工具调用"),
             Response::ToolAssemblyFailed(error) => bail!(
                 "模型在上下文压缩时产生无效工具调用（{}）：{}",
@@ -334,49 +456,17 @@ impl ContextManager {
 
 #[derive(Clone, Copy)]
 enum CompressionMode {
+    #[cfg(test)]
     Mild,
     Strong,
 }
 
 pub fn estimate_messages(messages: &[Message]) -> usize {
-    messages
-        .iter()
-        .map(|message: &Message| {
-            let content = message.content.as_deref().map_or(0, estimate_text_tokens);
-            let tool_calls = serde_json::to_string(&message.tool_calls)
-                .map(|value: String| estimate_text_tokens(&value))
-                .unwrap_or(0);
-            let images = message.image_urls.len().saturating_mul(384);
-            content + tool_calls + images + 6
-        })
-        .sum()
+    agent_context::TokenEstimator.messages(messages)
 }
-
 pub fn estimate_text_tokens(text: &str) -> usize {
-    let mut cjk = 0_usize;
-    let mut other = 0_usize;
-    for character in text.chars() {
-        if is_cjk(character) {
-            cjk += 1;
-        } else {
-            other += 1;
-        }
-    }
-    cjk.saturating_mul(2).div_ceil(3) + other.div_ceil(4)
+    agent_context::TokenEstimator.text(text)
 }
-
-fn estimate_json_tokens<T: serde::Serialize + ?Sized>(value: &T) -> Result<usize> {
-    let serialized = serde_json::to_string(value).context("估算 JSON token 时序列化失败")?;
-    Ok(estimate_text_tokens(&serialized))
-}
-
-fn is_cjk(character: char) -> bool {
-    matches!(
-        character as u32,
-        0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF
-    )
-}
-
 fn split_for_token_budget(text: &str, budget: usize) -> Vec<String> {
     let char_limit = budget.saturating_mul(3).max(1);
     let mut chunks = Vec::new();
@@ -561,7 +651,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn injects_current_plan_into_last_dynamic_block() {
+    async fn injects_current_plan_into_retrieved_partition_before_overlay() {
         let provider = Arc::new(SummaryProvider {
             responses: Mutex::new(VecDeque::new()),
             calls: Mutex::new(0),
@@ -589,7 +679,14 @@ mod tests {
         .unwrap();
 
         let prepared = manager.prepare(&mut Vec::new(), &[]).await.unwrap();
-        let last = prepared.last().unwrap().content.as_deref().unwrap();
+        let last = prepared
+            .iter()
+            .find_map(|m| {
+                m.content
+                    .as_deref()
+                    .filter(|s| s.starts_with("[retrieved_context]"))
+            })
+            .unwrap();
         assert!(last.contains("当前任务计划"));
         assert!(last.contains("[>] 1 · 实现功能"));
     }
@@ -642,7 +739,7 @@ mod tests {
                 .content
                 .as_deref()
                 .unwrap()
-                .starts_with("动态环境")
+                .starts_with("[turn_overlay] 动态环境")
         );
         std::fs::remove_dir_all(workspace).unwrap();
     }
@@ -688,12 +785,160 @@ mod tests {
             .await
             .unwrap();
 
-        let matched_dynamic = matched.last().unwrap().content.as_deref().unwrap();
+        let matched_dynamic = matched
+            .iter()
+            .find_map(|m| {
+                m.content
+                    .as_deref()
+                    .filter(|s| s.starts_with("[retrieved_context]"))
+            })
+            .unwrap();
         assert!(matched_dynamic.contains("可用技能索引"));
         assert!(matched_dynamic.contains("ONLY_MATCHED_BODY"));
-        let unmatched_dynamic = unmatched.last().unwrap().content.as_deref().unwrap();
+        let unmatched_dynamic = unmatched
+            .iter()
+            .find_map(|m| {
+                m.content
+                    .as_deref()
+                    .filter(|s| s.starts_with("[retrieved_context]"))
+            })
+            .unwrap();
         assert!(unmatched_dynamic.contains("rust-testing@1.0.0"));
         assert!(!unmatched_dynamic.contains("ONLY_MATCHED_BODY"));
         std::fs::remove_dir_all(workspace).unwrap();
+    }
+    #[tokio::test]
+    async fn compaction_keeps_entire_current_turn_and_retains_old_user_evidence() {
+        let provider = Arc::new(SummaryProvider {
+            responses: Mutex::new(VecDeque::from([
+                Response::Text("历史结果摘要".into()),
+                Response::Text("模型没有重述用户约束".into()),
+            ])),
+            calls: Mutex::new(0),
+        });
+        let manager = ContextManager::new(
+            provider.clone(),
+            std::env::current_dir().unwrap(),
+            ContextConfig {
+                token_budget: 32000,
+                recent_messages: 2,
+                mild_compression_percent: 60,
+                strong_compression_percent: 85,
+                summary_chunk_tokens: 100000,
+            },
+            Arc::new(PlanStore::memory_only()),
+        )
+        .unwrap();
+        let mut history = vec![
+            Message::text(Role::User, "禁止上传，必须保持中文"),
+            Message::text(Role::Assistant, "历史工作".repeat(1000)),
+            Message::text(Role::User, "继续当前任务"),
+        ];
+        for index in 0..8 {
+            let call = crate::provider::ToolCall {
+                id: format!("call-{index}"),
+                name: "read_file".into(),
+                arguments: serde_json::json!({"path":"src/context.rs"}),
+            };
+            history.push(Message::assistant_tool_calls(vec![call.clone()]));
+            history.push(Message::tool_result(&call, "当前工具证据😀".repeat(1000)));
+        }
+        let (candidate, _) = manager
+            .compact_candidate(&history, std::future::pending(), true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&candidate[1..], &history[2..]);
+        assert!(
+            candidate[0]
+                .content
+                .as_deref()
+                .unwrap()
+                .contains("禁止上传，必须保持中文")
+        );
+        assert_eq!(*provider.calls.lock().unwrap(), 1);
+        assert!(agent_context::validate_candidate(&history, &candidate).is_ok());
+        let current_only = history[2..].to_vec();
+        assert!(
+            manager
+                .compact_candidate(&current_only, std::future::pending(), true)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(*provider.calls.lock().unwrap(), 1);
+        let mut next = candidate;
+        next.push(Message::text(Role::User, "开始下一轮"));
+        next.push(Message::text(Role::Assistant, "下一轮答复"));
+        let (second, _) = manager
+            .compact_candidate(&next, std::future::pending(), true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            second[0]
+                .content
+                .as_deref()
+                .unwrap()
+                .contains("禁止上传，必须保持中文")
+        );
+        assert_eq!(&second[1..], &next[next.len() - 2..]);
+        assert_eq!(*provider.calls.lock().unwrap(), 2);
+    }
+
+    struct TruncatedSummary;
+    #[async_trait]
+    impl Provider for TruncatedSummary {
+        async fn chat(&self, _: &[Message], _: &[ToolSpec]) -> Result<Response> {
+            Ok(Response::Text("partial".into()))
+        }
+        async fn chat_stream(
+            &self,
+            _: &[Message],
+            _: &[ToolSpec],
+            events: tokio::sync::mpsc::UnboundedSender<crate::provider::ProviderEvent>,
+        ) -> Result<()> {
+            for event in [
+                crate::provider::ProviderEvent::TextDelta("partial".into()),
+                crate::provider::ProviderEvent::OutputTruncated,
+                crate::provider::ProviderEvent::ProtocolDone,
+            ] {
+                let _ = events.send(event);
+            }
+            Ok(())
+        }
+    }
+    #[tokio::test]
+    async fn truncated_summary_and_cancelled_candidate_are_never_installed() {
+        let manager = ContextManager::new(
+            Arc::new(TruncatedSummary),
+            std::env::current_dir().unwrap(),
+            ContextConfig {
+                token_budget: 32000,
+                recent_messages: 2,
+                mild_compression_percent: 60,
+                strong_compression_percent: 85,
+                summary_chunk_tokens: 10000,
+            },
+            Arc::new(PlanStore::memory_only()),
+        )
+        .unwrap();
+        assert!(manager.request_summary("source").await.is_err());
+        let history = vec![
+            Message::text(Role::User, "original".repeat(100)),
+            Message::text(Role::Assistant, "result"),
+            Message::text(Role::User, "latest"),
+            Message::text(Role::Assistant, "tail"),
+        ];
+        let original = history.clone();
+        let cancelled = manager
+            .compact_candidate(&history, std::future::ready(()), true)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            cancelled.downcast_ref::<agent_context::ContextError>(),
+            Some(agent_context::ContextError::Cancelled)
+        ));
+        assert_eq!(history, original);
     }
 }

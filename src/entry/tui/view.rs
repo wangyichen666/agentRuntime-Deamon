@@ -10,7 +10,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use super::{
     ActivityPhase, RenderCacheKey, ToolStatus, TuiState, TuiThemeMode, UiMessage, UiMessageKind,
 };
-use crate::provider::Role;
+use agent_core::Role;
 
 #[derive(Clone, Copy)]
 struct Theme {
@@ -914,7 +914,7 @@ mod tests {
         });
         state.workspace = "/Users/pilot/Documents/myproject/agent-rust".into();
         state.push_text(Role::User, "帮我了解这个项目，并给出下一步建议。".into());
-        let turn_id = crate::daemon::protocol::RequestId::String("preview-turn".into());
+        let turn_id = agent_daemon_protocol::RequestId::String("preview-turn".into());
         state.start_tool(
             turn_id.clone(),
             Some("preview-read".into()),
@@ -1047,7 +1047,7 @@ mod tests {
             "上一轮回答第一行\n上一轮回答第二行\n上一轮回答第三行".into(),
         );
         state.push_text(Role::User, "这是必须保留可见的原始 Query".into());
-        let turn_id = crate::daemon::protocol::RequestId::String("anchor-turn".into());
+        let turn_id = agent_daemon_protocol::RequestId::String("anchor-turn".into());
         state.start_tool(turn_id.clone(), Some("long-tool".into()), "exec".into(), 1);
         state.finish_tool(
             &turn_id,
@@ -1110,7 +1110,7 @@ mod tests {
     fn active_status_uses_an_animated_indeterminate_progress_bar() {
         let mut state = fixture();
         state.set_turn_phase(
-            &crate::daemon::protocol::RequestId::String("preview-active".into()),
+            &agent_daemon_protocol::RequestId::String("preview-active".into()),
             ActivityPhase::WaitingModel,
         );
         state.status = "等待模型响应".into();
@@ -1133,7 +1133,7 @@ mod tests {
             .pending_approvals
             .push_back(crate::daemon::approval::PendingApprovalInfo {
                 id: "status-approval".into(),
-                request_id: crate::daemon::protocol::RequestId::String("preview-active".into()),
+                request_id: agent_daemon_protocol::RequestId::String("preview-active".into()),
                 prompt: "允许测试？".into(),
             });
         let approval = status_line(&state, Theme::new(TuiThemeMode::Terminal), 80)
@@ -1188,7 +1188,7 @@ mod tests {
                 .pending_approvals
                 .push_back(crate::daemon::approval::PendingApprovalInfo {
                     id: "a".into(),
-                    request_id: crate::daemon::protocol::RequestId::Number(1),
+                    request_id: agent_daemon_protocol::RequestId::Number(1),
                     prompt: "允许写入工作区外的文件 /tmp/demo.txt 吗？".into(),
                 });
             terminal.draw(|frame| draw_ui(frame, &mut state)).unwrap();

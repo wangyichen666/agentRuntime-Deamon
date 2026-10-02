@@ -2,15 +2,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
+#[cfg(test)]
 use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
 
 use super::DaemonState;
 use super::lifecycle::RuntimePaths;
-#[cfg(test)]
-use super::protocol::JsonRpcRequest;
 use super::protocol::{
     JsonRpcResponse, MAX_FRAME_BYTES, RequestId, ServerFrame, decode_request, encode_frame,
     server_frame_request_id,
@@ -19,10 +18,7 @@ use super::protocol::{
 use crate::client::DaemonClient;
 
 #[cfg(test)]
-pub(crate) struct InMemoryEnvelope {
-    pub request: JsonRpcRequest,
-    pub frames: mpsc::UnboundedSender<ServerFrame>,
-}
+use agent_daemon_client::InMemoryEnvelope;
 
 #[cfg(test)]
 pub struct InMemoryServer;
@@ -44,7 +40,7 @@ impl InMemoryServer {
                 let state = state.clone();
                 tokio::spawn(async move {
                     state
-                        .handle_request(envelope.request, envelope.frames)
+                        .handle_request(envelope.request, envelope.frames.into())
                         .await;
                 });
             }
@@ -118,6 +114,7 @@ pub async fn run_unix_server(
     connections.abort_all();
     while connections.join_next().await.is_some() {}
     let active = state
+        .run_coordinator
         .active
         .lock()
         .await
@@ -131,13 +128,17 @@ pub async fn run_unix_server(
             .cancel_request_in_session(&key.session_id, &key.request_id)
             .await;
     }
-    state.default_session.engine.stop_resources();
+    state
+        .session_supervisor
+        .default_session
+        .engine
+        .stop_resources();
     let aborted = state.join_owned(Duration::from_secs(5)).await;
     if aborted > 0 {
         tracing::warn!(aborted, "daemon 受管任务超时，已中止并标记未确认 run");
     }
-    state.active.lock().await.clear();
-    let uncertain = state.run_store.recover()?;
+    state.run_coordinator.active.lock().await.clear();
+    let uncertain = state.maintenance_store.recover()?;
     if uncertain > 0 {
         tracing::warn!(uncertain, "关闭时将未确认 run 标为 unknown_after_restart");
     }
@@ -148,9 +149,11 @@ pub async fn run_unix_server(
 
 async fn serve_unix_connection(stream: UnixStream, state: Arc<DaemonState>) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
-    let (frames, mut frame_receiver) = mpsc::unbounded_channel::<ServerFrame>();
+    let (frames, mut frame_receiver) = super::frames::frame_channel();
+    let mut overflow = frames.overflow_receiver();
     let mut writer_task = AbortOnDrop(tokio::spawn(async move {
-        while let Some(frame) = frame_receiver.recv().await {
+        loop {
+            let frame = tokio::select! {frame=frame_receiver.recv()=>match frame{Some(frame)=>frame,None=>break},_=overflow.changed()=>anyhow::bail!("消费者背压超限，请从 durable cursor 重订阅")};
             let encoded = match encode_frame(&frame) {
                 Ok(encoded) => encoded,
                 Err(error) => {
@@ -174,7 +177,8 @@ async fn serve_unix_connection(stream: UnixStream, state: Arc<DaemonState>) -> R
     let mut reader = BufReader::new(reader);
     loop {
         let mut line = Vec::new();
-        let read = reader
+        let read = (&mut reader)
+            .take((MAX_FRAME_BYTES + 2) as u64)
             .read_until(b'\n', &mut line)
             .await
             .context("读取 daemon 请求失败")?;
@@ -187,7 +191,7 @@ async fn serve_unix_connection(stream: UnixStream, state: Arc<DaemonState>) -> R
                 -32002,
                 format!("协议帧超过 {MAX_FRAME_BYTES} 字节限制"),
             )));
-            continue;
+            break;
         }
         let request = match decode_request(&line) {
             Ok(request) => request,
@@ -335,7 +339,8 @@ mod tests {
     #[tokio::test]
     async fn unknown_run_can_be_audited_and_reconciled_over_rpc() {
         let (state, session_path) = test_state().await;
-        let session_id = crate::storage::SessionId(state.default_session.id.clone());
+        let session_id =
+            crate::storage::SessionId(state.session_supervisor.default_session.id.clone());
         let crate::storage::Admission::New(run) = state
             .run_store
             .admit(
@@ -348,7 +353,7 @@ mod tests {
             panic!("new run")
         };
         assert!(state.run_store.try_start_queued(&run.run_id).unwrap());
-        assert_eq!(state.run_store.recover().unwrap(), 1);
+        assert_eq!(state.maintenance_store.recover().unwrap(), 1);
         let client = InMemoryServer::start(state.clone());
         let audit =
             crate::entry::cli::request_result(&client, "run.audit", json!({"run_id":run.run_id}))
@@ -382,7 +387,7 @@ mod tests {
             responses: Mutex::new(VecDeque::new()),
         });
         let (state, session_path) = state_with_provider(provider).await;
-        let session_id = state.default_session.id.clone();
+        let session_id = state.session_supervisor.default_session.id.clone();
         let crate::storage::Admission::New(run) = state
             .run_store
             .admit(
@@ -618,6 +623,92 @@ mod tests {
             responses: Mutex::new(VecDeque::from([Response::Text("回环回答".to_owned())])),
         }))
         .await
+    }
+
+    #[tokio::test]
+    async fn background_wait_timeout_is_not_terminal_and_stop_joins_exact_resource() {
+        let (state, path) = test_state().await;
+        let key = crate::storage::SessionId(state.session_supervisor.default_session.id.clone());
+        let snapshot = agent_core::RunSnapshot {
+            route: None,
+            tools: vec![],
+            cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+            permission_mode: "risk".into(),
+            sandbox_requested: "native".into(),
+            sandbox_effective: "native".into(),
+            sandbox_notice: None,
+            docker_image: None,
+            context_read_only: false,
+            context_token_budget: 1000,
+            context_policy_fingerprint: None,
+            tool_catalog_digest: "empty".into(),
+            memory_entry_budget: 8,
+            memory_token_budget: 1024,
+            max_tool_calls: None,
+            config_generation: 0,
+        };
+        let agent_core::Admission::New(run) = state
+            .run_store
+            .admit_run(
+                &agent_core::RunAdmission {
+                    session_key: key.clone(),
+                    expected_lifetime: Some(
+                        state.session_supervisor.default_session.lifetime.clone(),
+                    ),
+                    request_id: RequestId::String("resource-test".into()),
+                    input: "resource test".into(),
+                    mode: agent_core::AdmissionMode::Queue,
+                },
+                &snapshot,
+            )
+            .unwrap()
+        else {
+            panic!("new")
+        };
+        state.run_store.try_start_queued(&run.run_id).unwrap();
+        let owner = state.run_store.run_owner(&run.run_id).unwrap();
+        let resource = state
+            .start_background(owner.clone(), "printf ready; sleep 30".into())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let notified = state.run_coordinator.queue_notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if state
+                    .run_store
+                    .resource_logs(resource.id, 0, 20)
+                    .unwrap()
+                    .iter()
+                    .any(|(_, text)| text.contains("ready"))
+                {
+                    break;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .expect("后台进程必须先发布 ready 日志，才能验证 stop 后的日志保留");
+        let waited = state
+            .wait_resource(resource.id, Duration::from_millis(10))
+            .await
+            .unwrap();
+        assert_eq!(waited.state, "running");
+        let mut wrong = owner.clone();
+        wrong.run_generation.0 += 1;
+        assert!(state.stop_resource(&wrong, resource.id).await.is_err());
+        state.stop_resource(&owner, resource.id).await.unwrap();
+        let stopped = state
+            .wait_resource(resource.id, Duration::from_secs(3))
+            .await
+            .unwrap();
+        assert_eq!(stopped.state, "stopped");
+        let logs = state.run_store.resource_logs(resource.id, 0, 20).unwrap();
+        assert!(logs.iter().any(|(_, text)| text.contains("ready")));
+        state.shutdown.cancel();
+        state.join_owned(Duration::from_secs(3)).await;
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]

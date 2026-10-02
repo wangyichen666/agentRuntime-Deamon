@@ -6,6 +6,10 @@ use crate::session::SessionInfo;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SlashAction {
     Help,
+    Memory,
+    Context,
+    Resources,
+    Doctor,
     Status,
     Run,
     Subagents,
@@ -204,6 +208,38 @@ const COMMANDS: &[SlashCommand] = &[
         usage: "/exit",
         args: ArgSpec::None,
         action: SlashAction::Exit,
+    },
+    SlashCommand {
+        name: "memory",
+        aliases: &[],
+        help: "读取会话可见的记忆",
+        usage: "/memory <session_id>",
+        args: ArgSpec::AtLeastOne("session ID"),
+        action: SlashAction::Memory,
+    },
+    SlashCommand {
+        name: "context",
+        aliases: &[],
+        help: "读取上下文投影与源版本",
+        usage: "/context <session_id>",
+        args: ArgSpec::AtLeastOne("session ID"),
+        action: SlashAction::Context,
+    },
+    SlashCommand {
+        name: "resources",
+        aliases: &[],
+        help: "读取会话后台资源",
+        usage: "/resources <session_id>",
+        args: ArgSpec::AtLeastOne("session ID"),
+        action: SlashAction::Resources,
+    },
+    SlashCommand {
+        name: "doctor",
+        aliases: &[],
+        help: "读取运行时诊断",
+        usage: "/doctor",
+        args: ArgSpec::None,
+        action: SlashAction::Doctor,
     },
 ];
 
@@ -408,7 +444,7 @@ mod tests {
     fn suggests_all_commands_for_slash_and_filters_by_prefix() {
         let registry = SlashRegistry::builtin();
         assert_eq!(registry.suggestions("/").len(), registry.commands().len());
-        let matches = registry.suggestions("/do");
+        let matches = registry.suggestions("/dog");
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].name, "dogfood");
         assert!(registry.suggestions("/resume ").is_empty());

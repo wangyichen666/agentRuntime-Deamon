@@ -20,15 +20,12 @@ use serde_json::{Value, json};
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinSet;
 
-use crate::client::{DaemonClient, RpcStream};
-use crate::config::{ConfigStore, ProfileSummary};
-use crate::daemon::lifecycle::RuntimePaths;
-use crate::daemon::protocol::{
+use crate::entry::recovery;
+use agent_daemon_client::{DaemonClient, RpcStream};
+use agent_daemon_protocol::{
     EventKind, JsonRpcRequest, JsonRpcResponse, MAX_FRAME_BYTES, RequestId, ServerFrame,
     decode_request,
 };
-use crate::entry::recovery;
-use crate::provider::ProviderProfile;
 
 #[derive(Clone)]
 struct ApiState {
@@ -46,12 +43,7 @@ struct WorkspaceRouter {
 
 impl ApiState {
     fn active_model(&self) -> String {
-        ConfigStore::default()
-            .active_profile()
-            .ok()
-            .flatten()
-            .map(|profile| profile.model)
-            .unwrap_or_else(|| self.model.clone())
+        crate::bootstrap::active_model(&self.model)
     }
 }
 
@@ -90,9 +82,7 @@ impl WorkspaceRouter {
         }
 
         self.clients.lock().await.remove(&workspace);
-        let paths = RuntimePaths::for_workspace(&workspace)?;
-        paths.ensure_daemon(&workspace).await?;
-        let client = DaemonClient::connect_unix(&paths.socket).await?;
+        let client = crate::bootstrap::connect_workspace(&workspace).await?;
         self.clients
             .lock()
             .await
@@ -136,7 +126,7 @@ struct DirectoryQuery {
 
 #[derive(Deserialize)]
 struct ModelSaveRequest {
-    profile: ProviderProfile,
+    profile: Value,
     #[serde(default)]
     activate: bool,
     #[serde(default)]
@@ -533,7 +523,7 @@ async fn start_websocket_recovery(
         }
         send_ws_server_frame(
             outgoing,
-            ServerFrame::Event(crate::daemon::protocol::EventFrame::new(
+            ServerFrame::Event(agent_daemon_protocol::EventFrame::new(
                 RequestId::String("recovery".to_owned()),
                 EventKind::ApprovalRequired,
                 json!({"approval": approval}),
@@ -562,7 +552,7 @@ fn send_ws_server_frame(outgoing: &mpsc::UnboundedSender<WebSocketMessage>, fram
     let message = match serde_json::to_string(&frame) {
         Ok(message) if message.len() <= MAX_FRAME_BYTES => message,
         Ok(_) => serde_json::to_string(&ServerFrame::Response(JsonRpcResponse::failure(
-            crate::daemon::protocol::server_frame_request_id(&frame).clone(),
+            agent_daemon_protocol::server_frame_request_id(&frame).clone(),
             -32002,
             "WebSocket 响应超过帧大小限制",
         )))
@@ -618,36 +608,10 @@ async fn list_models(State(state): State<ApiState>, headers: HeaderMap) -> Respo
     if !is_authorized(&headers, state.bearer_token.as_deref()) {
         return api_error(StatusCode::UNAUTHORIZED, "Bearer Token 无效或缺失");
     }
-    let store = ConfigStore::default();
-    let config = match store.load() {
-        Ok(config) => config,
-        Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")),
-    };
-    let mut profiles = config
-        .profiles
-        .iter()
-        .map(ProfileSummary::from_profile)
-        .collect::<Vec<_>>();
-    let active_id = config
-        .active_profile
-        .clone()
-        .or_else(|| ProviderProfile::from_env().ok().map(|profile| profile.id));
-    if profiles.is_empty()
-        && let Ok(profile) = ProviderProfile::from_env()
-    {
-        profiles.push(ProfileSummary::from_profile(&profile));
+    match crate::bootstrap::list_models() {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")),
     }
-    Json(json!({
-        "active_id": active_id,
-        "profiles": profiles,
-        "config_path": store.path(),
-        "providers": [
-            {"api_type": "openai-chat", "label": "OpenAI 兼容"},
-            {"api_type": "anthropic-messages", "label": "Anthropic Messages"},
-            {"api_type": "ollama", "label": "Ollama 本地模型"},
-        ],
-    }))
-    .into_response()
 }
 
 async fn save_models(
@@ -659,7 +623,6 @@ async fn save_models(
         return api_error(StatusCode::UNAUTHORIZED, "Bearer Token 无效或缺失");
     }
     let requested_workspace = request.workspace.clone();
-    let store = ConfigStore::default();
     let profile = request.profile.clone();
     match state
         .workspaces
@@ -680,34 +643,19 @@ async fn save_models(
             let mut response = result;
             response["runtime_applied"] = json!(true);
             response["warning"] = Value::Null;
-            response["config_path"] = json!(store.path());
+            response["config_path"] = json!(crate::bootstrap::config_path());
             Json(response).into_response()
         }
         Err(error) => {
-            let config = match store.upsert(request.profile, request.activate) {
-                Ok(config) => config,
-                Err(error) => return api_error(StatusCode::BAD_REQUEST, format!("{error:#}")),
-            };
-            let Some(active_id) = config.active_profile.clone() else {
-                return api_error(StatusCode::INTERNAL_SERVER_ERROR, "保存后没有活动模型配置");
-            };
-            let active = config
-                .profiles
-                .iter()
-                .find(|profile| profile.id == active_id)
-                .cloned();
-            let Some(active) = active else {
-                return api_error(StatusCode::INTERNAL_SERVER_ERROR, "活动模型配置不存在");
-            };
-            Json(json!({
-                "changed": true,
-                "active_id": active.id,
-                "profile": ProfileSummary::from_profile(&active),
-                "runtime_applied": false,
-                "warning": format!("配置已保存，daemon 将在下次启动时应用：{error:#}"),
-                "config_path": store.path(),
-            }))
-            .into_response()
+            match crate::bootstrap::save_configuration(request.profile, request.activate) {
+                Ok(mut response) => {
+                    response["runtime_applied"] = json!(false);
+                    response["warning"] =
+                        json!(format!("配置已保存，daemon 将在下次启动时应用：{error:#}"));
+                    Json(response).into_response()
+                }
+                Err(error) => api_error(StatusCode::BAD_REQUEST, format!("{error:#}")),
+            }
         }
     }
 }
@@ -721,7 +669,6 @@ async fn activate_model(
         return api_error(StatusCode::UNAUTHORIZED, "Bearer Token 无效或缺失");
     }
     let requested_workspace = request.workspace.clone();
-    let store = ConfigStore::default();
     match state
         .workspaces
         .client_for(requested_workspace.as_deref())
@@ -741,24 +688,17 @@ async fn activate_model(
             let mut response = result;
             response["runtime_applied"] = json!(true);
             response["warning"] = Value::Null;
-            response["config_path"] = json!(store.path());
+            response["config_path"] = json!(crate::bootstrap::config_path());
             Json(response).into_response()
         }
-        Err(error) => {
-            let profile = match store.activate(&request.profile_id) {
-                Ok(profile) => profile,
-                Err(error) => return api_error(StatusCode::BAD_REQUEST, format!("{error:#}")),
-            };
-            Json(json!({
-                "changed": true,
-                "active_id": profile.id,
-                "profile": ProfileSummary::from_profile(&profile),
-                "runtime_applied": false,
-                "warning": format!("已保存为下次启动的活动模型：{error:#}"),
-                "config_path": store.path(),
-            }))
-            .into_response()
-        }
+        Err(error) => match crate::bootstrap::activate_configuration(&request.profile_id) {
+            Ok(mut response) => {
+                response["runtime_applied"] = json!(false);
+                response["warning"] = json!(format!("已保存为下次启动的活动模型：{error:#}"));
+                Json(response).into_response()
+            }
+            Err(error) => api_error(StatusCode::BAD_REQUEST, format!("{error:#}")),
+        },
     }
 }
 

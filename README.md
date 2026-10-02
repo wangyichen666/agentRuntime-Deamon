@@ -30,15 +30,17 @@
 
 很多 Agent 原型能“调用一次工具”，却很难稳定处理真实编码任务：长任务会失控、连接断开会丢状态、多个窗口会串会话、危险命令缺少统一边界，用户也看不出 Agent 究竟还在运行还是已经卡住。
 
-`my-agent` 把这些问题收拢到一个 Rust 单 crate 中：
+`my-agent` 用 Rust workspace 和工作区 daemon 管理这些能力；当前已提取 `core` 与 `daemon-protocol`，其余业务模块仍在根 package 中：
 
-- **一个状态真相**：每个工作区只有 daemon 持有运行时状态，所有入口共享同一协议。
+- **统一控制面**：每个工作区只有 daemon 管理 run、队列、交互和终态，所有入口共享同一协议。消息与执行上下文目前仍分布在 JSONL 和内存历史中，统一持久主链正在迁移。
 - **四类交互入口**：全屏 TUI、CLI、本地 HTTP/WebSocket、标准 ACP v1 stdio。
 - **可靠的长任务循环**：主任务没有固定轮次硬上限，但有进度检查、重复检测、工具失败熔断和显式取消。
-- **可恢复、可审计**：稳定 session、append-only JSONL、活动事件回放、按 session/request 过滤日志。
+- **可恢复、可审计**：稳定 session、append-only SQLite transcript、活动事件回放、按 session/request 过滤日志。
 - **个人版的安全克制**：灾难命令硬拒，高风险操作审批，Cron 无人值守时安全拒绝。
 
 > 想先看完整流程图和功能全景？打开 [项目系统说明](./docs/agent-system.html)。
+
+Agent Runtime 已接通 Wave 0–7：统一 daemon client、SQLite canonical transcript/lifetime、原子 TurnCommit、持久 compact projection、作用域 MemoryEngine、工具调度与后台资源、HTTPS MCP、secret 引用和 doctor。数据库按 v1→v12 前进迁移，升级前校验备份；原始 transcript 保留，压缩只替换模型输入投影。状态所有权见 [ADR 0001](./docs/adr/0001-runtime-state-ownership.md)，迁移、验收证据与部署限制见 [实施记录](./docs/changes/runtime-architecture.md)。
 
 ## 终端体验
 
@@ -67,7 +69,7 @@ TUI 默认继承当前终端主题，也可启用内置 `dark` / `light` 语义�
 | **三条记忆链路** | 独立 session JSONL、60%/85% 两级上下文摘要、带 TTL 的关键词/中文 bigram 长期记忆。 |
 | **Skill** | `.my-agent/skills/*.md` 使用 YAML frontmatter 与 semver，按当前请求稳定排序并按需加载正文。 |
 | **Cron / Heartbeat** | interval/五段 cron、独立 session、有限指数退避、无人值守安全拒绝；heartbeat 不调用模型。 |
-| **MCP stdio** | 本地 server 握手、工具发现、动态桥接、默认审批、错误隔离和子进程清理。 |
+| **MCP** | 本地 stdio 与远程 HTTPS Streamable HTTP；工具发现、冻结 catalog、默认审批、DNS 审查、预算与未知结果回执。 |
 | **多窗口隔离** | 每个 TUI/REPL/ACP 窗口拥有独立 session；历史、活动请求、审批、取消和订阅互不串线。 |
 | **Web Agent 工作台** | 默认首页专注实际开发：可浏览并切换本地工作目录、新建或继续 Agent 任务，按 WebSocket 实时查看思考与正文增量；正文支持安全 Markdown（含表格），思考结束后自动折叠，并处理审批或取消；工具调用与输出默认折叠、仍可展开查看。每个目录连接独立 daemon 与安全边界。 |
 | **Session 查看** | 独立页面搜索当前工作目录下由 Web、TUI、CLI、ACP 产生的 Session；列表按本地日期分组，可折叠/展开“今天”等日期，详情按页加载对话与链路，支持继续加载，超大单条内容会显示截断提示而不会阻塞整页。 |
@@ -177,7 +179,7 @@ my-agent
 | `my-agent serve --bind 127.0.0.1:8787` | 提供多工作区 Web Agent 工作台、Session 查看、OpenAI 兼容 HTTP/SSE 与 `/ws`。 |
 | `my-agent editor` | 启动标准 ACP v1 stdio server。 |
 | `my-agent status` | 查看当前工作区 daemon 与日志路径。 |
-| `my-agent sessions` | 列出稳定 session、摘要和运行状态。 |
+| `my-agent sessions` | 通过 daemon 列出稳定 session、摘要和运行状态；`--offline` 只读旧 JSONL 维护清单。 |
 | `my-agent logs --lines 100` | 查看最近 daemon 日志。 |
 | `my-agent logs --session … --request …` | 按 session/request 精确排障。 |
 | `my-agent stop` | 优雅停止当前工作区 daemon。 |
@@ -245,7 +247,7 @@ Cron：
 }
 ```
 
-保存后运行 `/mcp reload`。当前只支持可信的本地 stdio MCP server，不支持远程 streamable-http/SSE transport。
+保存后运行 `/mcp reload`。远程配置使用 `{"url":"https://mcp.example.com/mcp","bearer_env":"MCP_TOKEN","allow_private":false}`，不在 URL 或 JSON 中写 token。HTTPS 禁止重定向、代理和默认私网 DNS；确需私网时逐 server 显式设置 `allow_private:true`。本地 stdio 仅继承有限环境变量，配置 `env` 可使用 `env:NAME` 或 `keychain:account` 引用；旧敏感环境字段先写 secret store 并读回，再原子发布引用配置。
 
 </details>
 
@@ -299,7 +301,7 @@ Cron：
 
 MCP server 以当前用户权限运行，只应连接可信本地配置。内置文件读取上限 32 MiB；图片/PDF 另限 16 MiB；PDF 最多抽取 50 页和约 512K 字符，不做视觉渲染。
 
-Native backend 是软边界；Shell 命令及同用户进程仍能直接访问宿主文件。文件句柄检查能拒绝已检测到的路径替换，但无法提供容器级隔离。Docker backend 与后台进程登记尚未提供。
+Native backend 是软边界；Shell 命令及同用户进程仍能直接访问宿主文件。文件句柄检查能拒绝已检测到的路径替换，但无法提供容器级隔离。可选 Docker `exec` 使用预装镜像（默认 `alpine:3.21`），工作区只读、无网络、非 root、资源受限；缺镜像或 backend 时强隔离请求被拒绝。`chat.send.sandbox` 支持 native/docker/auto，auto 的降级说明在 terminal/readback 中显式返回。后台 `background_exec` 由 daemon 监督，只支持 Native；请求强隔离时拒绝启动。资源通过 `resources.list/read/logs/wait/stop` 读取或停止，等待超时不会伪造资源终态。
 
 ## 配置参考
 
@@ -335,7 +337,12 @@ Native backend 是软边界；Shell 命令及同用户进程仍能直接访问�
 
 ```text
 src/main.rs                Clap 子命令与启动分发
-src/client.rs              Unix / 内存 DaemonClient
+crates/core/               共享领域类型、ID、Provider 持久 facts
+crates/daemon-protocol/    版本化 RPC / DTO 与旧 wire 兼容
+crates/daemon-client/      Unix / 测试传输 DaemonClient、重连与 cursor readback
+crates/storage/            SQLite 控制 facts、委派与能力 ports
+src/bootstrap.rs           daemon 启动与配置组合根
+src/maintenance.rs         显式离线会话只读兼容入口
 src/daemon/                状态、协议、审批、运行时、生命周期、server
 src/entry/                 TUI（含独立 keymap）、CLI、Web/HTTP/WS、ACP 与恢复适配
 src/provider.rs            Provider 公共契约与 execution identity
@@ -343,11 +350,10 @@ src/provider/              OpenAI、Anthropic、Ollama 适配器
 src/tool_calls.rs          canonical tool-call assembler
 src/loop_engine.rs         ReAct、取消、并行波次、熔断与结果回填
 src/context.rs             上下文排序、Skill、估算与两级压缩
-src/session.rs             稳定 session、append-only JSONL 与结构化 trace
+src/session.rs             稳定 session、append-only SQLite transcript 与结构化 trace
 src/memory.rs              TTL 长期记忆与关键词/bigram 召回
 src/plan.rs                原子持久化计划
 src/daemon/delegation_tool.rs  模型工具到持久委派控制面的映射
-src/storage/delegation.rs     SQLite 委派树与结果领取状态
 src/skills.rs              版本化 Skill 索引与按需加载
 src/cron.rs                Cron、重试与 heartbeat
 src/mcp.rs                 MCP stdio 客户端与工具桥接
@@ -380,7 +386,7 @@ cargo deny check
 - 多租户与 RBAC
 - 容器或操作系统级沙箱
 - 向量数据库与自动 embedding 召回
-- 远程 MCP transport
+- 远程 MCP OAuth、多服务实际兼容性扩展
 - Windows Named Pipe
 
 ---
@@ -389,3 +395,15 @@ cargo deny check
   <strong>my-agent</strong> · Rust 构建 · daemon 驱动 · 本地优先<br>
   <a href="./docs/agent-system.html">查看完整系统说明</a>
 </p>
+
+### Runtime 诊断与持久事实
+
+`my-agent --workspace /path/to/project doctor` 通过统一 daemon RPC 报告 schema、integrity、排队/未知 run、orphaned resources、compact、维护失败和锁等待指标。`/context <session_id>`、`/memory <session_id>`、`/resources <session_id>` 在 CLI、TUI、ACP 中读取相同 durable facts；WebSocket 提供同一 RPC。
+
+`sessions.compact` 要求 `session_id/owner_run_id/operation_id/expected_revision`；重复 operation 读回已提交 receipt。`memory.store` 支持 session/project/global，后两者需要用户确认；global 只保存 semantic 事实。`context_read_only` 禁止 compact 安装、记忆写入/遗忘和自动摄入。资源重启后无法验证身份时标为 orphaned；人工 `resources.reconcile` 需要 exact owner、terminal_state 和 evidence，只记录核对，不按旧 PID kill。
+
+模型凭据仅持久保存 `env:NAME` 或系统 Keychain 引用。macOS 使用 Keychain；其他平台目前使用环境引用，系统凭据适配器不可用时拒绝新明文持久写入。迁移失败保留原配置读取能力；诊断、日志和 ProviderProfile Debug 不返回密钥正文。
+
+### Codex 源码对比与记忆改进
+
+[研究、取舍与开发计划](docs/research/codex-context-memory.md)：已落实当前轮次保护、压缩原文延续、完整记忆注入预算和有界 Episode 摄入；两阶段智能提炼/整合保留为后续独立计划。

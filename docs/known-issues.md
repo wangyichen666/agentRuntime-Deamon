@@ -1,5 +1,16 @@
 # 已知问题
 
+## Runtime 部署与验证边界（2026-10-02）
+
+Wave 0–7 主链与本地门禁已完成，schema v12；各阶段历史证据及最终验收见 [实施记录](./changes/runtime-architecture.md)。
+
+- Native 仍是软边界，不能阻止同 UID shell 访问宿主。Docker foreground exec 已接通；后台 Docker resource **未实现**，强隔离后台请求 fail closed。
+- 本机 Docker daemon 可连接，但缺少预装 `alpine:3.21`，未运行真实容器隔离成功路径；已验证不可用时拒绝请求。部署需要自行准备合适镜像，不会自动 pull。
+- 远程 MCP 本地 TLS/JSON/SSE 合同已验证；真实远端服务、OAuth 和跨服务互操作验收 **未实现**。目前授权使用环境 token 引用。
+- macOS Keychain 适配器已编译，自动化故障测试使用测试 secret store，未修改真实 Keychain。其他平台 native secret store **未实现**，使用 `env:NAME`。
+- token meter 是确定性估算器，使用同 lifetime/route/projection generation 的成功 usage 校准；不宣称等同各厂商 tokenizer。各候选 route 使用显式冻结的配置预算。
+- 已运行本地 workspace/MSRV/release/Web/离线依赖审计，GitHub Actions 与在线漏洞公告刷新未运行。
+
 > 本文件仅记录待处理问题；在用户明确要求“开始修复/开发”前，不修改相关实现。
 
 处理状态：已于 2026-09-12 修复并通过回归测试。

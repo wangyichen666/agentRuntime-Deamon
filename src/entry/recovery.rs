@@ -1,19 +1,10 @@
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::client::{DaemonClient, RpcStream};
-use crate::daemon::approval::PendingApprovalInfo;
-use crate::daemon::protocol::RequestId;
-use crate::provider::Message;
+use agent_daemon_client::{DaemonClient, RpcStream};
+use agent_daemon_protocol::RequestId;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct RecoverySnapshot {
-    pub session_id: String,
-    pub messages: Vec<Message>,
-    pub pending_approvals: Vec<PendingApprovalInfo>,
-    pub active_requests: Vec<RequestId>,
-}
+pub use agent_daemon_protocol::RecoverySnapshot;
 
 pub async fn load_snapshot(client: &DaemonClient) -> Result<RecoverySnapshot> {
     let value = crate::entry::cli::request_result(client, "session.load", json!({})).await?;
@@ -57,6 +48,7 @@ pub async fn subscribe(client: &DaemonClient, request_id: &RequestId) -> Result<
     client
         .request("agent.subscribe", json!({"request_id": request_id}))
         .await
+        .map_err(Into::into)
 }
 
 pub async fn subscribe_for_session(
@@ -70,4 +62,5 @@ pub async fn subscribe_for_session(
             json!({"request_id": request_id, "session_id": session_id}),
         )
         .await
+        .map_err(Into::into)
 }

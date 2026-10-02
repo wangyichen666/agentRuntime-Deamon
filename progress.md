@@ -366,3 +366,60 @@
 - [x] 浏览器冒烟：独立端口成功打开项目工作区、Session 历史和模型设置；编辑后“新建配置”清空旧 ID。临时服务与页面已关闭。
 - [x] 全量门禁：`node --check web/app.js`、Web 26/26、`cargo fmt --all -- --check`、严格 Clippy、Rust 201/201、`cargo build --release`、`git diff --check` 均通过。
 - [x] 本轮全部变更提交并推送到 `origin/main`。
+
+
+---
+
+# 实施日志
+
+## 2026-10-01：继续任务
+- 已读取工作区状态、上轮 change doc、client/handler/storage 依赖；启动 Wave 0 后基线测试。
+- 应用 planning-with-files 技能，计划文件位于项目根目录。
+- 当前实施 Wave 1；后续 Wave 2–7 待实施。
+
+- 228 项基线测试在 client/storage/core 提取后通过；新增 protocol v1/client 重连测试正在运行。
+- Web 配置和 workspace 启动已收口到 composition bootstrap，生产入口不再导入 daemon/provider/config concrete。
+- CLI 默认 sessions 只走 RPC；旧离线清单改为显式 sessions --offline maintenance。
+
+### Wave 1 完成交付（最终验证）
+
+- client/storage 为真实 workspace 实现，根 facade 仅 re-export；所有入口使用统一 client，启动与配置组装移到 bootstrap，离线 sessions 显式 maintenance 只读。
+- versioned v1/legacy 策略、完整请求 DTO、未知版本 fail closed；client 重连不重发 mutation，run owner/event cursor readback 有合同校验。
+- 最终 `cargo test --workspace --all-features`：237 项全部通过，无忽略；Clippy `--workspace --all-targets --all-features -- -D warnings` 退出 0。
+- MSRV 1.88 locked all-targets/all-features check、locked release、fmt、diff、Node 27 项与 JS syntax、cargo deny offline 四项全部退出 0。
+- schema 仍为 v5；无数据迁移、无新增 dual-write。Wave 2–7 **未实现**，只完成 Wave 2 写入路径盘点，不引入半接线 migration。
+- 已恢复此前误覆盖的三份长期日志；最终相对 Git 只有本轮追加，历史未删除。未提交或推送。
+
+### 2026-10-02：Wave 2 验证进度
+SQLite v6 已接线 lifetime/run generation、canonical transcript batch、tombstone、生命周期 receipt、fork、preferred session。在线与 cron 停止 JSONL append，SessionRuntime.history 移除。240 项 Rust 测试首次通过（含两后端 lifetime 合同、坏摘要 digest、真实删除重建/fork→重启→CLI/ACP/WS）；Clippy 首次发现 nonminimal_bool 与 helper 在测试模块后，正修复。
+
+### Wave 3 实施验证（2026-10-02）
+RunSnapshot、TurnState/RoundState 与原子 TurnCommit 已接入生产链路。工具整批预检、取消 join、崩溃闭合、计划 CAS 与权限冻结通过 workspace 回归（243 项 Rust 测试）；Clippy 无警告。后续 Wave 4–7 继续执行，尚未宣称完成。修复工具委派时过大的异步 future：在执行/监督边界 Box::pin；未增加线程栈或放宽门禁。
+
+### Wave 4 持久投影阶段验证（2026-10-02）
+提取 agent-context 无状态计量/验证；schema v8 支持 compact intent、source prefix CAS、projection head 与 context ledger。在线 ContextManager 从 canonical snapshot 读取投影，原始 transcript 不改写；L1 媒体投影降级、L2 工具结果投影裁剪、L3 摘要，取消/无收益拒绝，摘要失败可单独提交 prune_only/partial。workspace 245 项 Rust 测试与 Clippy 通过，包含并发后缀、竞争 head、delete/recreate 和重启遗留 intent。Wave 5 开始；手动 compact RPC、多入口 generation 合同及 ledger 校准还需在后续集成收尾，不宣称整套验收完成。
+
+### Wave 5 实施阶段验证（2026-10-02）
+agent-memory 提供 typed scope/layer/kind、可见性复核与确定性 ranking；SQLite v9 保存记忆、legacy quarantine 与 committed-turn ingest receipts。在线 remember/recall 不再写 JSONL；runtime bounded recall 独立检索分区，terminal 发布后单次有界摄入，维护失败不改 terminal。memory store/recall/list/forget/scope RPC 接通，context_read_only 同时阻止 memory 写入/forget/compact。248 项 Rust 测试及 Clippy 通过，覆盖过滤后 limit、TTL、全局确认、legacy 隔离、重启与迟到 lifetime fence。接下来推进 Wave 6，三入口集成合同及完成后维护诊断仍在最终集成清单。
+
+## 2026-10-02：Wave 2–7 最终验收完成
+
+- SQLite schema v12：canonical transcript/lifetime、atomic TurnCommit、tool pairs、plan、compact projection/source CAS、memory scope/ingest/forget receipts、background resources 和维护诊断全部接线。
+- SessionSupervisor/RunCoordinator 持实际锁、实例、冻结能力和任务；memory/context/resources 在 CLI、ACP、WS 三入口 kill/restart 后交叉读回一致。
+- 完整 JSON Schema、冲突 waves、有界 artifact 范围与流式完整性校验、后台 Native stop/join；Docker exec 的强隔离准入及 auto 显式降级。
+- MCP HTTPS/TLS/DNS pinning/完整 SSE/receipt/budgets；env/Keychain 生产适配与明文迁移读回/原子发布；doctor、queue/frame/list 背压、artifact GC、人工 orphan reconcile。
+- 最终命令全部退出 0：workspace all-features tests 261，Clippy -D warnings，Rust 1.88 all targets，release，fmt/diff，Web 27/语法，离线 cargo-deny。
+- 修正最后两项竞态/兼容：后台测试等待 durable ready 日志后停止，不依赖 10ms 调度；legacy chat DTO 保留 sandbox 字段，禁止静默丢弃政策；自动记忆摄入记录 lifetime+transcript seq 来源 ID。
+- 部署验证限制明确保留：本机 Docker 没有预装 alpine:3.21，未拉镜像；后台 Docker、其他平台 native secret adapter、OAuth 未实现；真实 Keychain/远端/GitHub CI/在线公告未验证。所有限制已写最终文档，未把这些路径描述为已验收。
+- 没有 commit/push，没有覆盖用户已有修改。
+
+## 2026-10-02 Codex 源码对比
+只读clone /tmp/codex-architecture-reference，官方HEAD固定。研究与实施计划已记录，开发前保留全部Wave改动；开始上下文与记忆三项改进。
+
+研究实施中发现的门禁问题：memory crate 新增 JSON 渲染依赖后，架构依赖白名单拒绝 serde_json；明确仅允许序列化依赖，继续禁止 storage/context/daemon 边。新增摄入测试首次误用了 TranscriptRepository trait 名，改为实际 TranscriptStore 后编译通过。没有放宽运行时 owner、CAS 或作用域门禁。
+
+## 本轮验证结果
+
+最终代码：`cargo test --workspace` 266通过、0失败/忽略（含9项真实daemon合同）；Web 27通过；Clippy workspace/all-targets/all-features `-D warnings`、Rust 1.88 locked check、release locked build、cargo fmt、git diff --check 全部通过。cargo deny offline 的 advisories/bans/licenses/sources 通过（使用缓存公告库，既有重复版本警告仍保留）。
+
+日志：`/tmp/codex-comparison-tests-final.log`、`/tmp/codex-comparison-clippy.log`、`/tmp/codex-comparison-msrv.log`、`/tmp/codex-comparison-release.log`、`/tmp/codex-comparison-web.log`、`/tmp/codex-comparison-deny.log`。未调用真实摘要服务，未证明提炼质量或成本收益；验证的是宿主上下文传递、预算、存储边界及现有合同。SQLite仍为v12，无迁移；原有Wave改动全部保留，未commit/push。

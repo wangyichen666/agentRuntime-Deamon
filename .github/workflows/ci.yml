@@ -22,9 +22,9 @@ jobs:
       - name: 格式检查
         run: cargo +stable fmt --all -- --check
       - name: 全量测试
-        run: cargo +stable test --locked --all-targets
+        run: cargo +stable test --locked --workspace --all-targets --all-features
       - name: 严格 Clippy
-        run: cargo +stable clippy --locked --all-targets --all-features -- -D warnings
+        run: cargo +stable clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: Release 构建
         run: cargo +stable build --locked --release
       - name: 提交差异空白检查
@@ -47,7 +47,7 @@ jobs:
           toolchain: 1.88.0
           rustflags: ""
       - name: Rust 1.88 全目标检查
-        run: cargo +1.88.0 check --locked --all-targets
+        run: cargo +1.88.0 check --locked --workspace --all-targets --all-features
 
   macos:
     runs-on: macos-latest
@@ -58,9 +58,9 @@ jobs:
           toolchain: stable
           rustflags: ""
       - name: macOS 全目标检查
-        run: cargo +stable check --locked --all-targets
+        run: cargo +stable check --locked --workspace --all-targets --all-features
       - name: macOS 测试
-        run: cargo +stable test --locked --all-targets
+        run: cargo +stable test --locked --workspace --all-targets --all-features
 
   web:
     runs-on: ubuntu-latest

@@ -857,3 +857,65 @@
 | 4. 回归与交付 | complete | 行为回归、Rust/JS 门禁、浏览器冒烟、提交推送 |
 
 规则：不将同一根因拆成虚假的多个问题；清单记录触发、根因、修复、验证。沿用现有三份记录文件，只追加本轮章节。
+
+
+---
+
+# Runtime Wave 1–7 实施计划
+
+## 目标与约束
+继续用户原需求：按顺序完成 Wave 1–7，保留现有修改；不得留下半接线双写或把骨架标为完成。中文文档与输出。事实依据仅当前仓库。Wave 0 已完成，228 项 Rust 测试为继续基线。
+
+## 阶段
+- [完成] Wave 1：提取实际 daemon-client；protocol DTO/versioned validation；storage 能力端口与真实实现接线；统一入口。
+- [完成] Wave 2：repository/lifetime/migration/transcript/lifecycle fence。
+- [完成] Wave 3：TurnCommit/tool closure/run owner。
+- [完成] Wave 4：durable context projection/CAS/meter。
+- [完成] Wave 5：memory scope/recall/ingest/fence。
+- [完成] Wave 6：descriptor/waves/background/Docker。
+- [完成] Wave 7：远程 MCP/secrets/doctor/发布门禁。
+
+## 决策
+先收口实际依赖，不引入无实现的 trait。新 client 不依赖 daemon concrete；测试内存传输 envelope 归 client。旧 wire 保留兼容策略，新增 protocol_version=1 严格校验。业务 mutation 不因连接重连自动重发。
+
+## 错误记录
+planning-with-files 的模板文件未随技能安装；已按 SKILL.md 的文件职责自行建立中文计划，无需模板继续工作。
+
+- 初次提取 storage 时重复的 inner doc comment 被放在 item 后导致 fmt 失败；已改为普通注释。
+- storage 提取首轮 check：port 缺少 SessionId/Value 导入、MutexGuard 借用需显式解引用、缺少 tracing；修复。
+- root 接线 check：维护调用应走 maintenance_store，入口需把 ClientError 转换为 anyhow；修复。
+- protocol 参数校验宏空字段调用需要显式逗号；已修正，228 项基线测试继续全部通过。
+
+- Wave 1 收口：实际 client/storage/DTO/version policy 全部接线，完整旧门禁保持。Wave 2 已核对在线 transcript/control 写入点，未引入半迁移或双写；Wave 2–7 仍待实施。
+
+## 2026-10-02：持续实现至 Wave 7
+用户要求不要在中间 wave 停止。按顺序收口并继续；保留所有历史与工作树修改。Wave 2 采用 SQLite 唯一 canonical transcript，JSONL 受控一次导入/备份，在线停止 JSONL append；事实全部共享同一 SQLite lane/事务。
+
+- Wave 2 错误与修复：schema 升为 v6 后旧版本测试期望更新到 6；首次回归会话预览选错助手消息（两项失败），保持旧断言并改回首条用户消息；提取事务 helper 后遗留 tx 名称已改为 db；新增 SessionLifecycle 方法的 trait import 补齐。
+
+- Wave 3 错误记录：TurnState 字段不能直接在格式字符串 capture，改显式参数；user-input operation 必须按 run namespace（两队列合同检出并修复）；recovery 现在将 receipt 结算为 terminal/outcome_unknown，旧回归改为核实该明确未知事实及不可宣称 batch success；plan 插入脚本锚点不匹配，中途只有 schema/core 改动，已逐段修复接线。
+
+### Wave 3 实施验证（2026-10-02）
+RunSnapshot、TurnState/RoundState 与原子 TurnCommit 已接入生产链路。工具整批预检、取消 join、崩溃闭合、计划 CAS 与权限冻结通过 workspace 回归（243 项 Rust 测试）；Clippy 无警告。后续 Wave 4–7 继续执行，尚未宣称完成。修复工具委派时过大的异步 future：在执行/监督边界 Box::pin；未增加线程栈或放宽门禁。
+
+### Wave 4 持久投影阶段验证（2026-10-02）
+提取 agent-context 无状态计量/验证；schema v8 支持 compact intent、source prefix CAS、projection head 与 context ledger。在线 ContextManager 从 canonical snapshot 读取投影，原始 transcript 不改写；L1 媒体投影降级、L2 工具结果投影裁剪、L3 摘要，取消/无收益拒绝，摘要失败可单独提交 prune_only/partial。workspace 245 项 Rust 测试与 Clippy 通过，包含并发后缀、竞争 head、delete/recreate 和重启遗留 intent。Wave 5 开始；手动 compact RPC、多入口 generation 合同及 ledger 校准还需在后续集成收尾，不宣称整套验收完成。
+
+### Wave 5 实施阶段验证（2026-10-02）
+agent-memory 提供 typed scope/layer/kind、可见性复核与确定性 ranking；SQLite v9 保存记忆、legacy quarantine 与 committed-turn ingest receipts。在线 remember/recall 不再写 JSONL；runtime bounded recall 独立检索分区，terminal 发布后单次有界摄入，维护失败不改 terminal。memory store/recall/list/forget/scope RPC 接通，context_read_only 同时阻止 memory 写入/forget/compact。248 项 Rust 测试及 Clippy 通过，覆盖过滤后 limit、TTL、全局确认、legacy 隔离、重启与迟到 lifetime fence。接下来推进 Wave 6，三入口集成合同及完成后维护诊断仍在最终集成清单。
+
+### Wave 6–7 收口与错误修复（2026-10-02）
+
+完整 JSON Schema、资源冲突 waves、artifact 预览/范围读取/保留期回收、后台 Native 监督、可选 Docker exec 接通；SessionSupervisor/RunCoordinator 持有实际运行时锁、实例和任务。HTTPS MCP 重新解析并 pin DNS、禁止代理/重定向、完整 SSE event、身份/响应预算；Keychain/env 引用与迁移失败保留；doctor、显式 orphan reconcile、queue/frame/list 背压。三入口 compact/memory/restart/CAS/read-only 合同通过。
+
+修复记录：上下文取消泛型边界遗留旧变量；新增 schema 字段误匹配 ContextProjection（修正构造，不放宽断言）；维护 trait 导入缺失；slash 新增项挤占旧菜单排序（移至旧项后，前缀测试使用 /dog）；FrameSender 错误携带大帧（改小型 typed error）；完整摘要检验发现默认非流式 Provider adapter 未发 ProtocolDone（补 adapter 的真实完成语义）；全量并发临时目录超过 macOS socket 路径上限（缩短名称，未延长超时）；memory forget 加 v12 receipt，重试返回同一结果且不复活已遗忘 operation。新增 MIT-0 仅对 borrow-or-share@0.2.4 登记许可例外。
+
+### 最终完成
+
+Wave 1–7 均完成当前主链，本地 schema v12；261 项 Rust/27 项 Web 测试、严格 Clippy、MSRV 1.88、release、fmt/diff、离线 cargo-deny 通过。完整证据和未实现的可选后端范围记录在 docs/changes/runtime-architecture.md 与 docs/known-issues.md。未提交或推送。
+
+## Codex 对比与改进（2026-10-02）
+- [x] 固定官方源码提交，比较历史、压缩、记忆读写与整合。
+- [x] 记录取舍与实施计划：docs/research/codex-context-memory.md。
+- [x] 实施当前轮次保护、原文锚点、完整记忆预算、有界摄入与空结果回执。
+- [x] 回归测试与门禁，记录实际证据。

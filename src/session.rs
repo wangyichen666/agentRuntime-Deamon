@@ -1,6 +1,5 @@
 use std::env;
 use std::ffi::OsStr;
-use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -92,40 +91,7 @@ pub enum SessionTraceRecord {
     },
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionStatus {
-    #[default]
-    Idle,
-    Running,
-    Waiting,
-}
-
-impl fmt::Display for SessionStatus {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Idle => "idle",
-            Self::Running => "running",
-            Self::Waiting => "waiting",
-        })
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct SessionInfo {
-    pub id: String,
-    pub path: PathBuf,
-    pub active: bool,
-    pub message_count: usize,
-    pub modified_at: Option<u64>,
-    pub preview: Option<String>,
-    #[serde(default)]
-    pub status: SessionStatus,
-    #[serde(default)]
-    pub active_requests: usize,
-    #[serde(default)]
-    pub updated_at: Option<u64>,
-}
+pub use agent_core::{SessionInfo, SessionStatus};
 
 pub struct SessionStore {
     base_path: PathBuf,
@@ -133,6 +99,7 @@ pub struct SessionStore {
     current_id_cache: std::sync::RwLock<String>,
     turn_lock: Mutex<()>,
     trace_lock: Mutex<()>,
+    trace_override: Option<PathBuf>,
 }
 
 impl SessionStore {
@@ -161,6 +128,7 @@ impl SessionStore {
             current_id_cache: std::sync::RwLock::new(current_id),
             turn_lock: Mutex::new(()),
             trace_lock: Mutex::new(()),
+            trace_override: None,
         }
     }
 
@@ -195,6 +163,20 @@ impl SessionStore {
         let bytes = tokio::fs::read(path)
             .await
             .with_context(|| format!("读取会话失败: {}", path.display()))?;
+        // 一次导入前保存原始字节（包含坏尾），不覆写既有备份。
+        let backup = path.with_extension("jsonl.pre-repository.backup");
+        if !backup.exists() {
+            let mut file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&backup)
+                .await?;
+            file.write_all(&bytes).await?;
+            file.sync_all().await?;
+            let restored = tokio::fs::read(&backup).await?;
+            anyhow::ensure!(restored == bytes, "会话迁移备份校验失败");
+        }
+
         let content = String::from_utf8_lossy(&bytes);
         let lines = content.lines().collect::<Vec<&str>>();
         let has_complete_last_line = bytes.last().is_none_or(|byte: &u8| *byte == b'\n');
@@ -226,6 +208,7 @@ impl SessionStore {
         Ok(messages)
     }
 
+    #[cfg(test)]
     pub async fn append(&self, message: &Message) -> Result<()> {
         let path = self.current_path.read().await.clone();
         if let Some(parent) = path.parent() {
@@ -314,6 +297,9 @@ impl SessionStore {
     }
 
     async fn trace_path_for_current(&self) -> PathBuf {
+        if let Some(path) = &self.trace_override {
+            return path.clone();
+        }
         let path = self.current_path.read().await;
         Self::trace_path(&path)
     }
@@ -500,7 +486,27 @@ impl SessionStore {
             current_id_cache: std::sync::RwLock::new(current_id),
             turn_lock: Mutex::new(()),
             trace_lock: Mutex::new(()),
+            trace_override: None,
         }
+    }
+
+    pub(crate) fn with_trace_lifetime(
+        &self,
+        lifetime: &agent_core::SessionLifetimeId,
+    ) -> Result<Self> {
+        anyhow::ensure!(
+            lifetime.0.len() == 32 && lifetime.0.bytes().all(|b| b.is_ascii_hexdigit()),
+            "非法 trace lifetime"
+        );
+        let mut store = self.open_known_session(&self.current_id_sync())?;
+        store.trace_override = Some(
+            self.base_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("traces")
+                .join(format!("{}.jsonl", lifetime.0)),
+        );
+        Ok(store)
     }
 
     fn session_path(&self, session_id: &str) -> PathBuf {
@@ -521,6 +527,24 @@ impl SessionStore {
             return Err(SessionError::InvalidSessionId(session_id.to_owned()).into());
         }
         Ok(())
+    }
+
+    pub(crate) fn session_key_for_operation(&self, operation: &str) -> String {
+        use sha2::{Digest, Sha256};
+        let stem = self
+            .base_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("session");
+        let extension = self
+            .base_path
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("jsonl");
+        format!(
+            "{stem}-{:x}.{extension}",
+            Sha256::digest(operation.as_bytes())
+        )
     }
 
     fn new_session_id(&self) -> Result<String> {

@@ -748,3 +748,37 @@
 | 47–50 | CLI 单次斜杠命令失败留在 REPL，取消结果为 false 时报告失败；TUI 提交失败恢复草稿与原会话显示，任务流断开有限重新订阅。Rust 新增订阅失效不可误报完成回归，既有 daemon 断流重连测试继续通过。 |
 
 完整门禁与提交信息见 `progress.md` 本轮记录。浏览器冒烟使用独立端口和临时 Ollama 环境配置，未触发模型推理；结束后关闭临时服务与页面。
+
+
+---
+
+# 发现
+
+- HEAD 仍为 2f204df；Wave 0 修改未提交，全部保留。
+- 当前 client 仅依赖协议，测试模式反向依赖 daemon::server::InMemoryEnvelope；应迁移 envelope 到 client 测试传输能力。
+- handler 中 20 余请求 DTO 尚未归 protocol；ModelSaveParams 的 ProviderProfile 为配置值，可用 generic DTO 避免协议依赖 provider 实现。
+- storage 现存 RunStore 可直接实现 query/mutation 能力端口；不能仅放置未来 SessionRepository 空接口。
+- 稳定状态仍是 SQLite v5 与 JSONL；本轮不得把提取 client/端口误称为 lifetime 集成。
+
+- SQLite 和 client 已各自形成 workspace crate；控制面与工具审计改用 ControlRepository trait object，人工 reconcile/recover 使用独立 MaintenanceRepository。
+- ClientError 保留 RPC/resync typed data，提供显式重连与有界 cursor 读回；不会重放 mutation。
+- 已移出 handler 请求 DTO，protocol_version=1 拒绝未知字段，旧格式经兼容归一化再走同一 handler。
+
+### Wave 1 最终事实与下一阶段边界
+
+237 项 Rust 合同覆盖显式重连无 mutation 重放、run/event owner、稳定 cursor 连续分页、typed resync snapshot、v1 未知字段/嵌套 profile/未知版本拒绝、旧协议兼容、真实 daemon 重启与三个入口一致性。schema 仍 v5，业务消息 owner 未改变。
+
+Wave 2 盘点：daemon 的 session_runtime/session_snapshot/session_infos 与 LoopEngine::record 仍直接使用 JSONL；SessionRuntime.history 是长期执行输入，ContextManager::prepare 原地压缩它。下一 wave 必须在受控备份/导入之后同时切换准入身份、持久 snapshot、transcript 写入和生命周期事务 fence；仅 ALTER TABLE 增加 lifetime 不能提供隔离。当前这些 Wave 2 保证均 **未实现**。
+
+### Wave 2 实际接线
+
+旧 sessions 表保留兼容，session_heads 持有 incarnation；runs 的内部 idempotency key 由 lifetime + 原 request id 编码，wire request id 单独保存，不把内部 lifetime 发往旧公开 DTO。相同公开 key 重建可重用 request id，但 run id/generation 不复用。SQLite triggers 守护 event/interaction/tool/attempt/queue/delegation 的迟到写入，transcript/生命周期显式事务 fence。clear 也开启新 incarnation，原始 transcript 留在旧 lifetime 审计，不删除 project/global 数据。在线和 cron 均停止 JSONL append，legacy append 只留测试 fixture。
+
+## Wave 2–7 最终事实与边界
+
+全部主链本地验收通过。真正防止“删后迟到回调”的是同一 SQLite lane 内的 exact lifetime/owner CAS，运行时 task map 和超时不构成授权。compact 的 candidate、source proof、receipt/generation 各自持久化，原始 transcript 不改写。memory 先在 SQL 过滤 scope/TTL/global 确认，再 bounded ranking 与分区注入；forget 的 v12 receipt 保护重试和避免复活。usage 校准只用成功 committed turn、相同 provider identity/model/generation 的 ledger。
+
+最终完整测试 261 Rust + 27 Web。Docker daemon 存在但缺 alpine:3.21，强隔离不可用时拒绝已验证；没有把容器成功隔离、真实 Keychain/远端服务/在线公告或 GitHub CI 宣称已验证。三份规划与最终实施文档保留各 wave 历史证据。
+
+## Codex 对比发现
+官方参考8d44977aa2fb9ae1b128660668dc5b36966613fa。Codex retained user inputs、独立有界memory fragment、租约式两阶段提炼值得参考；本项目 CAS/SQLite/scoped receipts 保留。本轮发现压缩可能切当前轮、记忆包装漏计、Episode总量无界。详见docs/research/codex-context-memory.md。

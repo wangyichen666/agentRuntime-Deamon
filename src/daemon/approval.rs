@@ -5,9 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Result, bail};
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{Mutex, oneshot};
 
 use super::protocol::{EventFrame, EventKind, RequestId, ServerFrame};
 use crate::safety::Approval;
@@ -17,12 +16,7 @@ tokio::task_local! {
     static ACTIVE_APPROVAL_CONTEXT: ApprovalContext;
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct PendingApprovalInfo {
-    pub id: String,
-    pub request_id: RequestId,
-    pub prompt: String,
-}
+pub use agent_core::PendingApprovalInfo;
 
 #[derive(Clone, Default)]
 pub struct ApprovalBroker {
@@ -39,7 +33,7 @@ struct ApprovalBrokerInner {
 struct ApprovalContext {
     request_id: RequestId,
     session_id: Option<String>,
-    events: mpsc::UnboundedSender<ServerFrame>,
+    events: crate::daemon::frames::FrameSender,
 }
 
 struct PendingApproval {
@@ -54,10 +48,10 @@ impl ApprovalBroker {
     }
 
     #[cfg(test)]
-    pub async fn with_context<F>(
+    pub(crate) async fn with_context<F>(
         &self,
         request_id: RequestId,
-        events: mpsc::UnboundedSender<ServerFrame>,
+        events: crate::daemon::frames::FrameSender,
         future: F,
     ) -> F::Output
     where
@@ -75,11 +69,11 @@ impl ApprovalBroker {
             .await
     }
 
-    pub async fn with_session_context<F>(
+    pub(crate) async fn with_session_context<F>(
         &self,
         session_id: impl Into<String>,
         request_id: RequestId,
-        events: mpsc::UnboundedSender<ServerFrame>,
+        events: crate::daemon::frames::FrameSender,
         future: F,
     ) -> F::Output
     where
@@ -232,7 +226,7 @@ mod tests {
     #[tokio::test]
     async fn publishes_and_resolves_approval() {
         let broker = ApprovalBroker::new();
-        let (events, mut receiver) = mpsc::unbounded_channel();
+        let (events, mut receiver) = crate::daemon::frames::frame_channel();
         let requesting = broker.clone();
         let task = tokio::spawn(async move {
             requesting
@@ -256,8 +250,8 @@ mod tests {
     #[tokio::test]
     async fn concurrent_requests_keep_their_own_event_context() {
         let broker = ApprovalBroker::new();
-        let (first_events, mut first_receiver) = mpsc::unbounded_channel();
-        let (second_events, mut second_receiver) = mpsc::unbounded_channel();
+        let (first_events, mut first_receiver) = crate::daemon::frames::frame_channel();
+        let (second_events, mut second_receiver) = crate::daemon::frames::frame_channel();
         let first_broker = broker.clone();
         let first = tokio::spawn(async move {
             first_broker
@@ -302,8 +296,8 @@ mod tests {
     #[tokio::test]
     async fn cancellation_is_scoped_to_session_even_when_request_ids_repeat() {
         let broker = ApprovalBroker::new();
-        let (first_events, mut first_receiver) = mpsc::unbounded_channel();
-        let (second_events, mut second_receiver) = mpsc::unbounded_channel();
+        let (first_events, mut first_receiver) = crate::daemon::frames::frame_channel();
+        let (second_events, mut second_receiver) = crate::daemon::frames::frame_channel();
         let first_broker = broker.clone();
         let first = tokio::spawn(async move {
             first_broker

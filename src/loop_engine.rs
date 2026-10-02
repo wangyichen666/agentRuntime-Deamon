@@ -18,7 +18,9 @@ use crate::provider::{
     TimeoutPolicy, ToolCall,
 };
 use crate::session::{SessionStore, SessionTraceRecord};
-use crate::storage::{RunId, RunStore, RuntimeError};
+#[cfg(test)]
+use crate::storage::RunStore;
+use crate::storage::{ControlRepository, RunId, RuntimeError};
 use crate::tool_calls::ToolCallAssembler;
 use crate::tools::{Tool, ToolCancellation, ToolOutput, ToolRegistry};
 
@@ -28,18 +30,42 @@ tokio::task_local! { static TOOL_CALL_ID: String; }
 
 #[derive(Clone)]
 struct ToolAuditContext {
-    store: Arc<RunStore>,
+    store: Arc<dyn ControlRepository>,
     run_id: RunId,
+    owner: Option<agent_core::ExactOwner>,
+    next_message: Arc<AtomicU64>,
 }
 
 pub async fn with_tool_audit<F: std::future::Future>(
-    store: Arc<RunStore>,
+    store: Arc<dyn ControlRepository>,
     run_id: RunId,
     future: F,
 ) -> F::Output {
+    let owner = store.run_owner(&run_id).ok();
     TOOL_AUDIT
-        .scope(ToolAuditContext { store, run_id }, future)
+        .scope(
+            ToolAuditContext {
+                store,
+                run_id,
+                owner,
+                next_message: Arc::new(AtomicU64::new(0)),
+            },
+            future,
+        )
         .await
+}
+
+pub(crate) fn current_session_repository()
+-> Option<(Arc<dyn ControlRepository>, agent_core::ExactOwner)> {
+    TOOL_AUDIT
+        .try_with(|audit| {
+            audit
+                .owner
+                .clone()
+                .map(|owner| (audit.store.clone(), owner))
+        })
+        .ok()
+        .flatten()
 }
 
 pub(crate) fn current_tool_owner() -> Option<(RunId, String)> {
@@ -181,6 +207,15 @@ impl LoopEngine {
         }
     }
 
+    pub fn freeze_tools(&self) -> Result<Self> {
+        let mut engine = self.clone();
+        engine.tools = self.tools.frozen()?;
+        Ok(engine)
+    }
+    pub fn tool_specs(&self) -> Vec<crate::provider::ToolSpec> {
+        self.tools.specs()
+    }
+
     pub fn for_session(&self, session: Arc<SessionStore>) -> Self {
         Self {
             provider: self.provider.clone(),
@@ -219,6 +254,14 @@ impl LoopEngine {
         copy
     }
 
+    pub fn context_policy_fingerprint(&self) -> String {
+        self.context.fingerprint()
+    }
+    pub fn with_frozen_context(&self, fingerprint: &str) -> Result<Self> {
+        let mut next = self.clone();
+        next.context = self.context.with_frozen_policy(fingerprint)?;
+        Ok(next)
+    }
     pub fn with_route(&self, route: FrozenRoute) -> Self {
         let mut copy = self.clone();
         let primary = route.primary();
@@ -264,9 +307,14 @@ impl LoopEngine {
             })
             .await;
         }
-        let result = self
-            .run_turn_inner(history, input, events, cancellation, request_id.as_deref())
-            .await;
+        let result = crate::safety::with_approval_cache(Box::pin(self.run_turn_inner(
+            history,
+            input,
+            events,
+            cancellation,
+            request_id.as_deref(),
+        )))
+        .await;
         if let Some(request_id) = request_id {
             self.record_trace(SessionTraceRecord::TurnCompleted {
                 timestamp_ms: unix_time_ms(),
@@ -310,12 +358,10 @@ impl LoopEngine {
         let mut transient_messages = Vec::new();
         let mut repeat_detector = RepeatDetector::default();
         let mut repetition_reminder = false;
-        let mut consecutive_tool_failures = 0usize;
-        let mut estimated_total_tokens = 0u64;
-
-        let mut round = 0usize;
+        let mut turn_state = agent_core::TurnState::default();
         loop {
-            round = round.saturating_add(1);
+            turn_state.round = turn_state.round.saturating_add(1);
+            let round = turn_state.round;
             if self
                 .round_limit
                 .is_some_and(|round_limit| round > round_limit)
@@ -335,7 +381,12 @@ impl LoopEngine {
                 history_messages = history.len(),
                 "开始 ReAct 轮次"
             );
-            let mut request_messages = self.context.prepare(history, &specs).await?;
+            let mut request_messages = self
+                .prepare_context(history, &specs, &cancellation, None)
+                .await?;
+            if let Some(memory) = self.recall_memory_segment(history)? {
+                insert_retrieved(&mut request_messages, memory);
+            }
             request_messages.extend(transient_messages.clone());
             if progress_checkpoint {
                 info!(round, "长任务越过进度检查点，将继续执行");
@@ -356,16 +407,8 @@ impl LoopEngine {
                 )
                 .await?;
             if let Some(budget) = self.total_token_budget {
-                let estimate_input = request_messages
-                    .iter()
-                    .map(|message| {
-                        message
-                            .content
-                            .as_deref()
-                            .map_or(0, crate::context::estimate_text_tokens)
-                            as u64
-                    })
-                    .sum::<u64>();
+                let estimate_input =
+                    agent_context::TokenEstimator.request(&request_messages, &specs)? as u64;
                 let estimate_output = match &output.response {
                     Response::Text(text) => crate::context::estimate_text_tokens(text) as u64,
                     Response::ToolCalls(calls) => calls
@@ -376,7 +419,8 @@ impl LoopEngine {
                         .sum(),
                     Response::ToolAssemblyFailed(_) => 0,
                 };
-                estimated_total_tokens = estimated_total_tokens
+                turn_state.estimated_total_tokens = turn_state
+                    .estimated_total_tokens
                     .saturating_add(estimate_input.saturating_add(estimate_output));
                 let usage = TOOL_AUDIT
                     .try_with(|audit| audit.store.provider_usage(&audit.run_id))
@@ -388,7 +432,7 @@ impl LoopEngine {
                         .unwrap_or(0)
                         .saturating_add(usage.output_tokens.unwrap_or(0))
                 });
-                if measured.max(estimated_total_tokens) > budget
+                if measured.max(turn_state.estimated_total_tokens) > budget
                     && !matches!(output.response, Response::Text(_))
                 {
                     bail!("子 Agent token 预算已耗尽：上限 {budget}");
@@ -411,7 +455,8 @@ impl LoopEngine {
                 }
                 Response::ToolCalls(calls) => {
                     if calls.is_empty() {
-                        consecutive_tool_failures = consecutive_tool_failures.saturating_add(1);
+                        turn_state.consecutive_tool_failures =
+                            turn_state.consecutive_tool_failures.saturating_add(1);
                         let error = "模型返回了空工具调用列表";
                         self.record(
                             history,
@@ -425,19 +470,21 @@ impl LoopEngine {
                         .await?;
                         warn!(
                             round,
-                            consecutive_tool_failures,
+                            turn_state.consecutive_tool_failures,
                             threshold = MAX_CONSECUTIVE_TOOL_FAILURES,
                             "模型返回空工具调用列表"
                         );
-                        if consecutive_tool_failures >= MAX_CONSECUTIVE_TOOL_FAILURES {
+                        if turn_state.consecutive_tool_failures >= MAX_CONSECUTIVE_TOOL_FAILURES {
                             bail!(
-                                "连续 {consecutive_tool_failures} 次收到空工具调用，已停止无效重试"
+                                "连续 {} 次收到空工具调用，已停止无效重试",
+                                turn_state.consecutive_tool_failures
                             );
                         }
                         continue;
                     }
                     if let Err(error) = self.tools.admit_all(&calls) {
-                        consecutive_tool_failures = consecutive_tool_failures.saturating_add(1);
+                        turn_state.consecutive_tool_failures =
+                            turn_state.consecutive_tool_failures.saturating_add(1);
                         self.record(
                             history,
                             Message::text(
@@ -452,55 +499,99 @@ impl LoopEngine {
                         .await?;
                         warn!(
                             round,
-                            consecutive_tool_failures,
+                            turn_state.consecutive_tool_failures,
                             threshold = MAX_CONSECUTIVE_TOOL_FAILURES,
                             "工具调用准入失败"
                         );
-                        if consecutive_tool_failures >= MAX_CONSECUTIVE_TOOL_FAILURES {
+                        if turn_state.consecutive_tool_failures >= MAX_CONSECUTIVE_TOOL_FAILURES {
                             bail!(
-                                "连续 {consecutive_tool_failures} 次工具调用无效，已停止自动重试。最近错误：{error}"
+                                "连续 {} 次工具调用无效，已停止自动重试。最近错误：{error}",
+                                turn_state.consecutive_tool_failures
                             );
                         }
                         continue;
+                    }
+                    if let Err(error) = self.tools.preflight_all(&calls, round).await {
+                        turn_state.consecutive_tool_failures =
+                            turn_state.consecutive_tool_failures.saturating_add(1);
+                        let reason = format!("整批预检拒绝，未启动任何副作用：{error}");
+                        if let Ok(audit) = TOOL_AUDIT.try_with(Clone::clone) {
+                            let owner = audit
+                                .owner
+                                .as_ref()
+                                .ok_or_else(|| anyhow::anyhow!("缺少拒绝批次 owner"))?;
+                            history.extend(
+                                audit
+                                    .store
+                                    .reject_tool_batch(owner, round, &calls, &reason)?,
+                            );
+                        } else {
+                            self.record(history, Message::assistant_tool_calls(calls.clone()))
+                                .await?;
+                            for call in &calls {
+                                self.record(history,Message::tool_result(call,serde_json::json!({"outcome":"not_executed","reason":reason}).to_string())).await?;
+                            }
+                        }
+                        if turn_state.consecutive_tool_failures >= MAX_CONSECUTIVE_TOOL_FAILURES {
+                            return Err(RuntimeError::ToolAdmission(reason).into());
+                        }
+                        continue;
+                    }
+                    if cancellation.is_cancelled() {
+                        return Err(RuntimeError::Cancelled.into());
                     }
                     let audit = TOOL_AUDIT.try_with(Clone::clone).ok();
                     if let Some(audit) = &audit {
                         let prepared = calls
                             .iter()
                             .map(|call| {
-                                let effect = if self.tools.is_read_only(&call.name) {
-                                    "read"
-                                } else {
-                                    "external_side_effect"
+                                let descriptor = self.tools.descriptor(call)?;
+                                let effect = match descriptor.effect {
+                                    agent_core::ToolEffect::Read => "read",
+                                    agent_core::ToolEffect::Write => "write",
+                                    agent_core::ToolEffect::External => "external_side_effect",
                                 };
                                 let digest = format!(
                                     "{:x}",
                                     Sha256::digest(call.arguments.to_string().as_bytes())
                                 );
-                                (call.clone(), effect.to_owned(), digest, false)
+                                Ok((
+                                    call.clone(),
+                                    effect.to_owned(),
+                                    digest,
+                                    matches!(descriptor.replay, agent_core::ReplayPolicy::Safe),
+                                ))
                             })
-                            .collect::<Vec<_>>();
-                        audit
-                            .store
-                            .prepare_tool_batch(&audit.run_id, round, &prepared)?;
+                            .collect::<Result<Vec<_>>>()?;
+                        audit.store.prepare_owned_tool_batch(
+                            audit
+                                .owner
+                                .as_ref()
+                                .ok_or_else(|| anyhow::anyhow!("缺少 batch owner"))?,
+                            round,
+                            &prepared,
+                            &calls
+                                .iter()
+                                .map(|call| self.tools.descriptor(call))
+                                .collect::<Result<Vec<_>>>()?,
+                        )?;
                     }
-                    self.record(
-                        history,
-                        Message::assistant_tool_calls_with_thinking(calls.clone(), output.thinking),
-                    )
-                    .await?;
-                    let execute = self.execute_in_waves(
-                        &calls,
-                        events.clone(),
-                        &cancellation,
-                        round,
-                        trace_request_id,
-                    );
-                    tokio::pin!(execute);
-                    let results = tokio::select! {
-                        results = &mut execute => results?,
-                        _ = cancellation.cancelled() => return Err(RuntimeError::Cancelled.into()),
+                    let mut round_state = agent_core::RoundState {
+                        tool_calls: calls.clone(),
+                        closed_exchange: vec![Message::assistant_tool_calls_with_thinking(
+                            calls.clone(),
+                            output.thinking,
+                        )],
                     };
+                    let results = self
+                        .execute_in_waves(
+                            &round_state.tool_calls,
+                            events.clone(),
+                            &cancellation,
+                            round,
+                            trace_request_id,
+                        )
+                        .await?;
                     let round_failures = results.iter().filter(|result| result.failed).count();
                     let last_error = results
                         .iter()
@@ -509,9 +600,25 @@ impl LoopEngine {
                         .map(str::to_owned);
                     let mut fingerprints = Vec::with_capacity(results.len());
                     for result in results {
-                        self.record(history, result.message).await?;
+                        round_state.closed_exchange.push(result.message);
                         transient_messages.extend(result.transient_messages);
                         fingerprints.push(result.fingerprint);
+                    }
+                    if let Some(audit) = &audit {
+                        let owner = audit
+                            .owner
+                            .as_ref()
+                            .ok_or_else(|| anyhow::anyhow!("缺少 tool batch owner"))?;
+                        audit.store.close_tool_exchange(
+                            owner,
+                            round,
+                            &round_state.closed_exchange,
+                        )?;
+                        history.extend(round_state.closed_exchange);
+                    } else {
+                        for message in round_state.closed_exchange {
+                            self.record(history, message).await?;
+                        }
                     }
                     if let Some(audit) = &audit {
                         audit.store.finish_tool_batch(&audit.run_id, round)?;
@@ -526,27 +633,30 @@ impl LoopEngine {
                         );
                     }
                     if round_failures == 0 {
-                        consecutive_tool_failures = 0;
+                        turn_state.consecutive_tool_failures = 0;
                     } else {
-                        consecutive_tool_failures =
-                            consecutive_tool_failures.saturating_add(round_failures);
+                        turn_state.consecutive_tool_failures = turn_state
+                            .consecutive_tool_failures
+                            .saturating_add(round_failures);
                         warn!(
                             round,
                             round_failures,
-                            consecutive_tool_failures,
+                            turn_state.consecutive_tool_failures,
                             threshold = MAX_CONSECUTIVE_TOOL_FAILURES,
                             "工具执行失败"
                         );
-                        if consecutive_tool_failures >= MAX_CONSECUTIVE_TOOL_FAILURES {
+                        if turn_state.consecutive_tool_failures >= MAX_CONSECUTIVE_TOOL_FAILURES {
                             let detail = last_error.unwrap_or_else(|| "未提供错误详情".to_owned());
                             bail!(
-                                "连续 {consecutive_tool_failures} 次工具执行失败，已停止自动重试。最近错误：{detail}"
+                                "连续 {} 次工具执行失败，已停止自动重试。最近错误：{detail}",
+                                turn_state.consecutive_tool_failures
                             );
                         }
                     }
                 }
                 Response::ToolAssemblyFailed(error) => {
-                    consecutive_tool_failures = consecutive_tool_failures.saturating_add(1);
+                    turn_state.consecutive_tool_failures =
+                        turn_state.consecutive_tool_failures.saturating_add(1);
                     warn!(code = %error.code, message = %error.message, "工具调用装配失败，整轮拒绝");
                     self.record(
                         history,
@@ -561,19 +671,263 @@ impl LoopEngine {
                     .await?;
                     warn!(
                         round,
-                        consecutive_tool_failures,
+                        turn_state.consecutive_tool_failures,
                         threshold = MAX_CONSECUTIVE_TOOL_FAILURES,
                         "工具调用装配失败"
                     );
-                    if consecutive_tool_failures >= MAX_CONSECUTIVE_TOOL_FAILURES {
+                    if turn_state.consecutive_tool_failures >= MAX_CONSECUTIVE_TOOL_FAILURES {
                         bail!(
-                            "连续 {consecutive_tool_failures} 次工具调用装配失败，已停止自动重试。最近错误：{}",
+                            "连续 {} 次工具调用装配失败，已停止自动重试。最近错误：{}",
+                            turn_state.consecutive_tool_failures,
                             error.message
                         );
                     }
                 }
             }
         }
+    }
+
+    pub(crate) async fn compact_session(
+        &self,
+        cancellation: &CancellationToken,
+        operation: &str,
+    ) -> Result<()> {
+        self.prepare_context(&[], &self.tools.specs(), cancellation, Some(operation))
+            .await?;
+        Ok(())
+    }
+    async fn prepare_context(
+        &self,
+        history: &[Message],
+        tools: &[crate::provider::ToolSpec],
+        cancellation: &CancellationToken,
+        operation: Option<&str>,
+    ) -> Result<Vec<Message>> {
+        let Some((store, owner)) = current_session_repository() else {
+            let mut projected = history.to_vec();
+            let before = self.context.compose(&projected).await;
+            if self
+                .context
+                .should_compact(agent_context::TokenEstimator.request(&before, tools)?)
+            {
+                if let Some((replacement, _)) = self
+                    .context
+                    .compact_candidate(&projected, cancellation.cancelled(), false)
+                    .await?
+                {
+                    projected = replacement;
+                }
+            }
+            return Ok(self.context.compose(&projected).await);
+        };
+        if let Some(operation) = operation {
+            if store.compact_result(&owner, operation, None)?.is_some() {
+                let fresh = store.session_snapshot(&owner.session_key)?;
+                return Ok(self
+                    .context
+                    .compose(&store.context_projection(&fresh)?.messages)
+                    .await);
+            }
+        }
+        let snapshot = store.session_snapshot(&owner.session_key)?;
+        let projection = store.context_projection(&snapshot)?;
+        let mut projected = projection.messages;
+        let before = self.context.compose(&projected).await;
+        let read_only = store
+            .run_snapshot(&owner.run_id)?
+            .is_some_and(|s| s.context_read_only);
+        if !read_only
+            && (operation.is_some()
+                || self
+                    .context
+                    .should_compact(agent_context::TokenEstimator.request(&before, tools)?))
+        {
+            let source = agent_core::ContextSource {
+                lifetime: snapshot.lifetime,
+                source_start: agent_core::TranscriptSeq(0),
+                pressure_route: self
+                    .route
+                    .as_ref()
+                    .and_then(|r| r.snapshot.candidates.first())
+                    .map_or("default", |c| c.model.as_str())
+                    .into(),
+                summary_route: self
+                    .route
+                    .as_ref()
+                    .and_then(|r| r.snapshot.candidates.first())
+                    .map_or("default", |c| c.model.as_str())
+                    .into(),
+                source_end: snapshot.revision,
+                prefix_digest: agent_context::digest(&snapshot.messages)?,
+                generation: projection.generation,
+                policy_fingerprint: self.context.fingerprint(),
+            };
+            let intent = agent_core::CompactIntent {
+                operation: operation.map_or_else(
+                    || {
+                        format!(
+                            "{}:compact:{}:{}",
+                            owner.run_id.0,
+                            source.generation.0,
+                            NEXT_ATTEMPT_ID.fetch_add(1, Ordering::Relaxed)
+                        )
+                    },
+                    str::to_owned,
+                ),
+                owner,
+                source,
+            };
+            store.begin_compact(&intent)?;
+            match self
+                .context
+                .compact_candidate(&projected, cancellation.cancelled(), operation.is_some())
+                .await
+            {
+                Ok(Some((replacement, mode))) => {
+                    store.settle_compact(&intent, Some(&replacement), &mode)?;
+                }
+                Ok(None) => {
+                    store.settle_compact(&intent, None, "no_gain")?;
+                }
+                Err(error) => {
+                    store.settle_compact(&intent, None, "summary_failed")?;
+                    if cancellation.is_cancelled() {
+                        return Err(RuntimeError::Cancelled.into());
+                    }
+                    return Err(error);
+                }
+            }
+            let fresh = store.session_snapshot(&intent.owner.session_key)?;
+            projected = store.context_projection(&fresh)?.messages;
+        } else if read_only && operation.is_some() {
+            bail!("context_read_only 禁止 compact 安装");
+        }
+        Ok(self.context.compose(&projected).await)
+    }
+
+    fn recall_memory_segment(&self, history: &[Message]) -> Result<Option<Message>> {
+        let Some((repository, owner)) = current_session_repository() else {
+            return Ok(None);
+        };
+        let visibility = crate::memory::visibility_for(&*repository, &owner)?;
+        let snapshot = repository.run_snapshot(&owner.run_id)?;
+        let entry_budget = snapshot.as_ref().map_or(8, |s| s.memory_entry_budget);
+        let token_budget = snapshot.as_ref().map_or(1024, |s| s.memory_token_budget);
+        let query = history
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::User)
+            .and_then(|m| m.content.as_deref())
+            .unwrap_or_default();
+        use agent_memory::MemoryEngine;
+        let reader = crate::memory::ScopedMemoryReader { repository };
+        let now = unix_time_ms() / 1000;
+        let entries = reader.recall(&visibility, query, 20, now)?;
+        let segment = agent_memory::render_context(
+            &entries,
+            &visibility,
+            now,
+            entry_budget,
+            token_budget,
+            |text| agent_context::TokenEstimator.messages(&[Message::text(Role::System, text)]),
+        )?;
+        Ok(segment.map(|text| Message::text(Role::System, text)))
+    }
+
+    fn record_context_envelope(
+        &self,
+        messages: &[Message],
+        specs: &[crate::provider::ToolSpec],
+        round: usize,
+        route: &str,
+        candidate_index: usize,
+    ) -> Result<()> {
+        if let Some((store, owner)) = current_session_repository() {
+            let snapshot = store.session_snapshot(&owner.session_key)?;
+            let estimate = agent_context::TokenEstimator;
+            let mut stable_tokens = estimate.request(&[], specs)? as u64;
+            let (mut history_tokens, mut retrieved_tokens, mut overlay_tokens) = (0u64, 0u64, 0u64);
+            let turn_start = messages
+                .iter()
+                .rposition(|m| m.role == Role::User)
+                .unwrap_or(messages.len());
+            for (index, message) in messages.iter().enumerate() {
+                let count = estimate.messages(std::slice::from_ref(message)) as u64;
+                let text = message.content.as_deref().unwrap_or_default();
+                if message.role == Role::System && text.starts_with("[retrieved_") {
+                    retrieved_tokens += count;
+                } else if message.role == Role::System && text.starts_with("[turn_overlay]") {
+                    overlay_tokens += count;
+                } else if message.role == Role::System
+                    && (index == 0 || text.starts_with("项目规则（AGENTS.md）"))
+                {
+                    stable_tokens += count;
+                } else if index >= turn_start {
+                    overlay_tokens += count;
+                } else {
+                    history_tokens += count;
+                }
+            }
+            let estimated = stable_tokens + history_tokens + retrieved_tokens + overlay_tokens;
+            let provider_identity = self
+                .route
+                .as_ref()
+                .and_then(|r| r.snapshot.candidates.get(candidate_index))
+                .map(|c| serde_json::to_vec(c).map(|bytes| format!("{:x}", Sha256::digest(bytes))))
+                .transpose()?
+                .unwrap_or_else(|| "default".into());
+            let calibrated = store
+                .context_anchor(
+                    &owner,
+                    snapshot.projection_generation,
+                    route,
+                    &provider_identity,
+                )?
+                .map_or(estimated, |(actual, prior)| {
+                    estimated.saturating_add(actual.saturating_sub(prior))
+                });
+            let budget = self
+                .route
+                .as_ref()
+                .map_or(self.context.token_budget(), |r| {
+                    r.snapshot.context_policy.token_budget
+                }) as u64;
+            let output_reserve = (budget / 10).clamp(1, 4096);
+            if calibrated.saturating_add(output_reserve) > budget {
+                bail!(
+                    "完整请求超出冻结的上下文预算：input={calibrated}, reserve={output_reserve}, budget={budget}"
+                );
+            }
+            let envelope = agent_core::ContextEnvelope {
+                source: agent_core::ContextSource {
+                    lifetime: snapshot.lifetime,
+                    source_start: agent_core::TranscriptSeq(0),
+                    pressure_route: route.into(),
+                    summary_route: self
+                        .route
+                        .as_ref()
+                        .and_then(|r| r.snapshot.candidates.first())
+                        .map_or("default", |c| c.model.as_str())
+                        .into(),
+                    source_end: snapshot.revision,
+                    prefix_digest: agent_context::digest(&snapshot.messages)?,
+                    generation: snapshot.projection_generation,
+                    policy_fingerprint: self.context.fingerprint(),
+                },
+                route: route.into(),
+                provider_identity,
+                tool_catalog_digest: format!("{:x}", Sha256::digest(serde_json::to_vec(specs)?)),
+                stable_tokens,
+                history_tokens,
+                retrieved_tokens,
+                overlay_tokens,
+                calibrated_input_tokens: calibrated,
+                output_reserve,
+                budget,
+            };
+            store.record_context(&owner, round, &envelope)?;
+        }
+        Ok(())
     }
 
     async fn request_model(
@@ -588,6 +942,18 @@ impl LoopEngine {
         if cancellation.is_cancelled() {
             return Err(RuntimeError::Cancelled.into());
         }
+        self.record_context_envelope(
+            messages,
+            specs,
+            round,
+            self.route.as_ref().map_or("default", |r| {
+                r.snapshot
+                    .candidates
+                    .first()
+                    .map_or("default", |c| c.model.as_str())
+            }),
+            0,
+        )?;
         let Some(route) = &self.route else {
             return self
                 .request_model_once(
@@ -614,6 +980,13 @@ impl LoopEngine {
             .zip(&route.providers)
             .enumerate()
         {
+            self.record_context_envelope(
+                &request_messages,
+                specs,
+                round,
+                &candidate.model,
+                candidate_index,
+            )?;
             let circuit_key = candidate.circuit_key();
             if route.circuit.acquire(&circuit_key) == crate::provider::CircuitState::Open {
                 if let Ok(audit) = TOOL_AUDIT.try_with(Clone::clone) {
@@ -757,7 +1130,30 @@ impl LoopEngine {
                 let safe = !observation.stream_committed && !observation.tool_call_seen;
                 if error.kind == ProviderErrorKind::ContextOverflow && !compacted && safe {
                     compacted = true;
-                    if let Ok(Some(smaller)) =
+                    if let Some((store, owner)) = current_session_repository() {
+                        let readonly = store
+                            .run_snapshot(&owner.run_id)?
+                            .is_some_and(|s| s.context_read_only);
+                        if !readonly {
+                            let operation =
+                                format!("{}:overflow:{round}:{candidate_index}", owner.run_id.0);
+                            let mut rebuilt = self
+                                .prepare_context(&[], specs, cancellation, Some(&operation))
+                                .await?;
+                            if let Some(memory) = self.recall_memory_segment(messages)? {
+                                insert_retrieved(&mut rebuilt, memory);
+                            }
+                            self.record_context_envelope(
+                                &rebuilt,
+                                specs,
+                                round,
+                                &candidate.model,
+                                candidate_index,
+                            )?;
+                            request_messages = rebuilt;
+                            continue;
+                        }
+                    } else if let Ok(Some(smaller)) =
                         self.context.compact_for_overflow(&request_messages).await
                     {
                         request_messages = smaller;
@@ -1017,8 +1413,32 @@ impl LoopEngine {
     }
 
     async fn record(&self, history: &mut Vec<Message>, message: Message) -> Result<()> {
-        if let Some(session) = &self.session {
-            session.append(&message).await?;
+        if let Ok(audit) = TOOL_AUDIT.try_with(Clone::clone) {
+            let owner = audit
+                .owner
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("缺少 exact run owner"))?;
+            let sequence = audit.next_message.fetch_add(1, Ordering::Relaxed);
+            if message.role == Role::Assistant && message.tool_calls.is_empty() {
+                audit.store.stage_assistant(owner, &message)?;
+            } else {
+                let operation = if message.role == Role::User && sequence == 0 {
+                    "user-input".to_owned()
+                } else {
+                    format!("message-{sequence}")
+                };
+                audit
+                    .store
+                    .append_transcript(owner, &operation, std::slice::from_ref(&message))?;
+                if operation == "user-input" && history.last() == Some(&message) {
+                    return Ok(());
+                }
+            }
+        } else if let Some(_session) = &self.session {
+            #[cfg(test)]
+            _session.append(&message).await?;
+            #[cfg(not(test))]
+            anyhow::bail!("持久 runtime 缺少 exact owner；拒绝脱离 repository 写消息");
         }
         history.push(message);
         Ok(())
@@ -1041,41 +1461,20 @@ impl LoopEngine {
         trace_request_id: Option<&str>,
     ) -> Result<Vec<ToolExecution>> {
         let mut results = Vec::with_capacity(calls.len());
-        let mut cursor = 0;
-        while cursor < calls.len() {
-            if self.tools.is_read_only(&calls[cursor].name) {
-                let mut end = cursor + 1;
-                while end < calls.len() && self.tools.is_read_only(&calls[end].name) {
-                    end += 1;
-                }
-                let batch = stream::iter(calls[cursor..end].to_vec())
-                    .map(|call: ToolCall| {
-                        let events = events.clone();
-                        async move {
-                            self.execute_one(&call, events, cancellation, round, trace_request_id)
-                                .await
-                        }
-                    })
-                    .buffered(8)
-                    .collect::<Vec<Result<ToolExecution>>>()
-                    .await
-                    .into_iter()
-                    .collect::<Result<Vec<_>>>()?;
-                results.extend(batch);
-                cursor = end;
-            } else {
-                results.push(
-                    self.execute_one(
-                        &calls[cursor],
-                        events.clone(),
-                        cancellation,
-                        round,
-                        trace_request_id,
-                    )
-                    .await?,
-                );
-                cursor += 1;
-            }
+        for wave in self.tools.scheduled_waves(calls)? {
+            let batch = stream::iter(wave.into_iter().map(|i| calls[i].clone()))
+                .map(|call| {
+                    let events = events.clone();
+                    async move {
+                        self.execute_one(&call, events, cancellation, round, trace_request_id)
+                            .await
+                    }
+                })
+                .buffered(8)
+                .collect::<Vec<Result<ToolExecution>>>()
+                .await;
+            // 所有已启动 future 都 join 后才传播错误，避免 detached 副作用。
+            results.extend(batch.into_iter().collect::<Result<Vec<_>>>()?);
         }
         Ok(results)
     }
@@ -1088,6 +1487,9 @@ impl LoopEngine {
         round: usize,
         trace_request_id: Option<&str>,
     ) -> Result<ToolExecution> {
+        if cancellation.is_cancelled() {
+            return Err(RuntimeError::Cancelled.into());
+        }
         let started_at = Instant::now();
         let audit = TOOL_AUDIT.try_with(Clone::clone).ok();
         if let Some(audit) = &audit {
@@ -1118,36 +1520,57 @@ impl LoopEngine {
             })
             .await;
         }
-        let (result, failed, error_message) = match TOOL_CALL_ID
+        let (mut result, failed, error_message, outcome_unknown) = match TOOL_CALL_ID
             .scope(
                 call.id.clone(),
-                self.tools.execute_with_cancellation(
-                    &call.name,
-                    call.arguments.clone(),
-                    cancellation,
+                crate::safety::with_action_identity(
+                    crate::safety::action_identity(round, call),
+                    self.tools.execute_with_cancellation(
+                        &call.name,
+                        call.arguments.clone(),
+                        cancellation,
+                    ),
                 ),
             )
             .await
         {
-            Ok(output) => (output, false, None),
+            Ok(output) => (output, false, None, false),
             Err(error) => {
                 warn!(tool = %call.name, %error, "工具执行失败，将错误回填给模型");
+                let outcome_unknown = error
+                    .downcast_ref::<agent_core::ToolOutcomeUnknown>()
+                    .is_some();
                 let error_message = format!("工具执行错误: {error:#}");
                 (
                     ToolOutput::text(error_message.clone()),
                     true,
                     Some(error_message),
+                    outcome_unknown,
                 )
             }
         };
         if let Some(audit) = &audit {
-            let artifact_ref = audit.store.store_tool_output(&result.content)?;
-            let output_preview = result.content.chars().take(4096).collect::<String>();
+            let artifact_ref = audit.store.store_owned_output(
+                audit
+                    .owner
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("缺少 artifact owner"))?,
+                &result.content,
+            )?;
+            let original_bytes = result.content.len();
+            let descriptor = self.tools.descriptor(call)?;
+            let original_digest = format!("{:x}", Sha256::digest(result.content.as_bytes()));
+            if result.content.len() > descriptor.output_budget.min(16384) {
+                result.content = format!(
+                    "{}\n[artifact_ref={artifact_ref};sha256={original_digest};大结果可通过 artifacts.read 分页读取]",
+                    result.content.chars().take(4096).collect::<String>()
+                );
+            }
             audit.store.finish_tool(&audit.run_id, round, &call.id,
-                if failed { "tool_error" } else { "success" }, Some(&artifact_ref),
-                &serde_json::json!({"success": !failed, "output": output_preview, "output_truncated": result.content.chars().count() > 4096,
-                    "output_sha256": format!("{:x}", Sha256::digest(result.content.as_bytes())),
-                    "error": error_message, "output_bytes": result.content.len(),
+                if outcome_unknown {"outcome_unknown"} else if failed { "tool_error" } else { "success" }, Some(&artifact_ref),
+                &serde_json::json!({"success": !failed, "output": result.content.chars().take(16384).collect::<String>(), "output_truncated": original_bytes > result.content.len(),
+                    "output_sha256": original_digest,
+                    "error": error_message, "output_bytes": original_bytes,
                     "duration_ms": started_at.elapsed().as_millis() as u64}))?;
         }
         emit(
@@ -1395,6 +1818,23 @@ impl RepeatDetector {
         }
         self.count
     }
+}
+
+fn insert_retrieved(messages: &mut Vec<Message>, memory: Message) {
+    let index = messages
+        .iter()
+        .rposition(|m| m.role == Role::User)
+        .unwrap_or_else(|| {
+            messages
+                .iter()
+                .position(|m| {
+                    m.content
+                        .as_deref()
+                        .is_some_and(|s| s.starts_with("[turn_overlay]"))
+                })
+                .unwrap_or(messages.len())
+        });
+    messages.insert(index, memory);
 }
 
 fn fingerprint_json(value: &serde_json::Value) -> u64 {

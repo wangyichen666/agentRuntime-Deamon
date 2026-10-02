@@ -37,7 +37,6 @@ const REQUEST_CANCELLED: i64 = -32800;
 const REQUEST_CONFLICT: i64 = -32001;
 const WEB_PAGE_MAX_BYTES: usize = MAX_FRAME_BYTES - 256 * 1024;
 const WEB_PAGE_MAX_ITEM_BYTES: usize = 256 * 1024;
-const WEB_PAGE_DEFAULT_LIMIT: usize = 80;
 const WEB_PAGE_MAX_LIMIT: usize = 200;
 
 struct AbortTimer(tokio::task::JoinHandle<()>);
@@ -48,186 +47,89 @@ impl Drop for AbortTimer {
     }
 }
 
-#[derive(Deserialize)]
-struct ChatSendParams {
-    message: String,
-    #[serde(default)]
-    session_id: Option<String>,
-    #[serde(default)]
-    admission_mode: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct ApprovalRespondParams {
-    #[serde(alias = "interaction_id")]
-    approval_id: String,
-    #[serde(default)]
-    approved: Option<bool>,
-    #[serde(default)]
-    session_id: Option<String>,
-    #[serde(default)]
-    owner_run_id: Option<RunId>,
-    #[serde(default)]
-    revision: Option<i64>,
-}
-
-#[derive(Deserialize)]
-struct InteractionReadParams {
-    interaction_id: InteractionId,
-}
-
-#[derive(Deserialize)]
-struct CancelParams {
-    #[serde(default)]
-    request_id: Option<RequestId>,
-    #[serde(default)]
-    run_id: Option<RunId>,
-    #[serde(default)]
-    session_id: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct SubscribeParams {
-    request_id: RequestId,
-    #[serde(default)]
-    session_id: Option<String>,
-    #[serde(default)]
-    after_seq: Option<EventSeq>,
-}
-
-#[derive(Deserialize)]
-struct RunReadParams {
-    run_id: RunId,
-}
-
-#[derive(Deserialize)]
-struct SpawnSubagentParams {
-    parent_session_id: SessionId,
-    parent_run_id: RunId,
-    spawn_key: String,
-    task: String,
-    #[serde(default)]
-    tools: Option<Vec<String>>,
-    #[serde(default)]
-    max_rounds: Option<i64>,
-    #[serde(default)]
-    max_tokens: Option<i64>,
-    #[serde(default)]
-    max_tool_calls: Option<i64>,
-    #[serde(default)]
-    timeout_ms: Option<i64>,
-}
-
-#[derive(Deserialize)]
-struct SubagentScopeParams {
-    parent_run_id: RunId,
-    child_run_id: RunId,
-}
-
-#[derive(Deserialize)]
-struct SubagentListParams {
-    root_run_id: RunId,
-}
-
-#[derive(Deserialize)]
-struct WaitSubagentsParams {
-    parent_run_id: RunId,
-    child_run_ids: Vec<RunId>,
-    #[serde(default)]
-    timeout_ms: Option<u64>,
-    #[serde(default)]
-    after_seq: Option<EventSeq>,
-}
-
-#[derive(Deserialize)]
-struct SubagentResultParams {
-    parent_run_id: RunId,
-    child_run_id: RunId,
-    owner: String,
-    revision: i64,
-}
-
-#[derive(Deserialize)]
-struct RunReconcileParams {
-    session_id: SessionId,
-    run_id: RunId,
-    expected_last_seq: EventSeq,
-    status: RunStatus,
-    #[serde(default)]
-    content: Option<String>,
-    evidence: String,
-}
-
-#[derive(Deserialize)]
-struct QueueItemParams {
-    session_id: String,
-    run_id: RunId,
-}
-
-#[derive(Deserialize)]
-struct RunEventsParams {
-    run_id: RunId,
-    #[serde(default)]
-    after_seq: Option<EventSeq>,
-    #[serde(default)]
-    limit: Option<usize>,
-}
-
-#[derive(Deserialize)]
-struct SessionResumeParams {
-    session_id: String,
-}
-
-#[derive(Deserialize)]
-struct SessionPageParams {
-    session_id: String,
-    #[serde(default)]
-    offset: usize,
-    #[serde(default = "default_web_page_limit")]
-    limit: usize,
-}
-
-#[derive(Deserialize)]
-struct PermissionModeParams {
-    mode: String,
-}
-
-#[derive(Deserialize)]
-struct ModelUseParams {
-    profile_id: String,
-}
-
-#[derive(Deserialize)]
-struct ModelSaveParams {
-    profile: ProviderProfile,
-    #[serde(default)]
-    activate: bool,
-}
-
-fn default_web_page_limit() -> usize {
-    WEB_PAGE_DEFAULT_LIMIT
-}
-
-#[derive(Deserialize, Default)]
-struct SessionSelectorParams {
-    #[serde(default)]
-    session_id: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct SlashExecuteParams {
-    line: String,
-    #[serde(default)]
-    session_id: Option<String>,
-}
+use agent_daemon_protocol::params::*;
+type ModelSaveParams = agent_daemon_protocol::params::ModelSaveParams<ProviderProfile>;
 
 impl DaemonState {
-    pub async fn handle_request(
+    pub(crate) async fn handle_request(
         self: Arc<Self>,
         request: JsonRpcRequest,
-        frames: mpsc::UnboundedSender<ServerFrame>,
+        frames: super::frames::FrameSender,
     ) {
+        let request = match agent_daemon_protocol::normalize_request(request.clone()) {
+            Ok(request) => request,
+            Err(error) => {
+                send_result(
+                    &frames,
+                    request.id,
+                    Err((INVALID_PARAMS, error.to_string())),
+                );
+                return;
+            }
+        };
         match request.method.as_str() {
+            "memory.store" | "memory.recall" | "memory.list" | "memory.forget" | "memory.scope" => {
+                let result = self.memory_command(&request.method, &request.params).await;
+                send_result(&frames, request.id, result);
+            }
+            "resources.reconcile" => {
+                let result = match parse_params::<ResourceReconcileParams>(&request.params) {
+                    Ok(params) => {
+                        let owner = self.run_store.run_owner(&params.owner_run_id);
+                        match owner {
+                            Ok(owner) if owner.session_key.0 == params.session_id => self
+                                .run_store
+                                .reconcile_resource(
+                                    &owner,
+                                    params.resource_id,
+                                    &params.terminal_state,
+                                    &params.evidence,
+                                )
+                                .map(|r| json!({"resource":r,"kill_sent":false}))
+                                .map_err(|e| (REQUEST_CONFLICT, e.to_string())),
+                            _ => Err((REQUEST_CONFLICT, "resource reconcile owner 不匹配".into())),
+                        }
+                    }
+                    Err(e) => Err((INVALID_PARAMS, e)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "resources.list" | "resources.read" | "resources.logs" | "resources.wait"
+            | "resources.stop" => {
+                let result = match parse_params::<ResourceParams>(&request.params) {
+                    Ok(params) => self.resource_command(&request.method, params).await,
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "artifacts.read" => {
+                use base64::Engine;
+                let result = match parse_params::<ArtifactReadParams>(&request.params) {
+                    Ok(params) => {
+                        let owner = self.run_store.run_owner(&params.run_id);
+                        match owner {
+                            Ok(owner) if owner.session_key.0==params.session_id=>self.run_store.read_run_artifact(&owner,&params.artifact_ref,params.offset,params.limit).map(|bytes|json!({"data_base64":base64::engine::general_purpose::STANDARD.encode(&bytes),"offset":params.offset,"cursor":params.offset+bytes.len() as u64,"has_more":bytes.len()==params.limit.clamp(1,16384)})).map_err(|e|(REQUEST_CONFLICT,e.to_string())),
+                            _=>Err((REQUEST_CONFLICT,"artifact owner 不匹配".into())),
+                        }
+                    }
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "runtime.doctor" => {
+                let result=self.maintenance_store.health_report().map_err(|e|(INTERNAL_ERROR,e.to_string())).map(|storage| {
+                    let profiles=self.config_store.load().map(|c|c.profiles.iter().map(ProfileSummary::from_profile).collect::<Vec<_>>()).unwrap_or_default();
+                    json!({"storage":storage,"profiles":profiles,"native_boundary":"soft","mcp_pending_limit":64,"mcp_response_bytes":262144,"remote_mcp":"HTTPS, DNS pinning, redirects disabled"})
+                });
+                send_result(&frames, request.id, result);
+            }
+            "session.compact" => {
+                let result = match parse_params::<SessionCompactParams>(&request.params) {
+                    Ok(params) => self.session_compact(params).await,
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
+                send_result(&frames, request.id, result);
+            }
             "chat.send" => self.handle_chat_send(request, frames).await,
             "session.load" => {
                 let result = match parse_params::<SessionSelectorParams>(&request.params) {
@@ -244,11 +146,34 @@ impl DaemonState {
                 send_result(&frames, request.id, result);
             }
             "session.list" => {
-                let result = self.session_list().await;
+                let result = match parse_params::<SessionListParams>(&request.params) {
+                    Ok(params) => self.session_list(params).await,
+                    Err(e) => Err((INVALID_PARAMS, e)),
+                };
                 send_result(&frames, request.id, result);
             }
             "session.new" => {
-                let result = self.session_new().await;
+                let result = match parse_params::<SessionCreateParams>(&request.params) {
+                    Ok(params) => self.session_create(params).await,
+                    Err(e) => Err((INVALID_PARAMS, e)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "session.clear" | "session.delete" => {
+                let result = match parse_params::<SessionEndParams>(&request.params) {
+                    Ok(params) => {
+                        self.session_end(params, request.method == "session.delete")
+                            .await
+                    }
+                    Err(e) => Err((INVALID_PARAMS, e)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "session.fork" => {
+                let result = match parse_params::<SessionForkParams>(&request.params) {
+                    Ok(params) => self.session_fork(params).await,
+                    Err(e) => Err((INVALID_PARAMS, e)),
+                };
                 send_result(&frames, request.id, result);
             }
             "session.resume" => {
@@ -463,8 +388,14 @@ impl DaemonState {
                             .read_run(&params.run_id)
                             .map_err(|error| (INTERNAL_ERROR, error.to_string()))
                             .and_then(|run| {
-                                run.map(|run| json!(run))
-                                    .ok_or((INVALID_PARAMS, "run 不存在".into()))
+                                let run = run.ok_or((INVALID_PARAMS, "run 不存在".into()))?;
+                                let snapshot = self
+                                    .run_store
+                                    .run_snapshot(&run.run_id)
+                                    .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+                                let mut fact = json!(run);
+                                fact["snapshot"] = json!(snapshot);
+                                Ok(fact)
                             })
                     });
                 send_result(&frames, request.id, result);
@@ -514,6 +445,7 @@ impl DaemonState {
                 let result = match parse_params::<RunReconcileParams>(&request.params) {
                     Ok(params) => {
                         let active = self
+                            .run_coordinator
                             .active
                             .lock()
                             .await
@@ -522,7 +454,7 @@ impl DaemonState {
                         if active {
                             Err((REQUEST_CONFLICT, "run 仍有活动执行体".into()))
                         } else {
-                            self.run_store
+                            self.maintenance_store
                                 .reconcile_unknown(
                                     &params.run_id,
                                     &params.session_id,
@@ -733,7 +665,7 @@ impl DaemonState {
         let deadline_ms = parent_delegation
             .as_ref()
             .map_or(deadline_ms, |record| deadline_ms.min(record.deadline_ms));
-        let guard = self.control_lock.lock().await;
+        let guard = self.session_supervisor.control_lock.lock().await;
         let duplicate = self
             .run_store
             .delegation_by_spawn_key(&params.parent_run_id, &params.spawn_key)
@@ -744,7 +676,7 @@ impl DaemonState {
                 session_id: parent.session_id.0.clone(),
                 request_id: parent.request_id.clone(),
             };
-            let active = self.active.lock().await;
+            let active = self.run_coordinator.active.lock().await;
             if active.get(&key).is_none_or(|request| {
                 request.run_id != parent.run_id || request.cancellation.is_cancelled()
             }) {
@@ -772,13 +704,12 @@ impl DaemonState {
         self.notify_delegation_parent(&child, EventKind::DelegationSpawned)
             .await;
         if child.status == RunStatus::Queued {
-            let request = JsonRpcRequest {
-                jsonrpc: "2.0".into(),
-                id: RequestId::String(format!("delegation:{}", child.child_session_id.0)),
-                method: "chat.send".into(),
-                params: json!({"session_id": child.child_session_id, "message": params.task}),
-            };
-            let (frames, _receiver) = mpsc::unbounded_channel();
+            let request = JsonRpcRequest::new(
+                RequestId::String(format!("delegation:{}", child.child_session_id.0)),
+                "chat.send",
+                json!({"session_id": child.child_session_id, "message": params.task}),
+            );
+            let (frames, _receiver) = super::frames::frame_channel();
             let state = self.clone();
             let accepted = self
                 .spawn_owned(async move {
@@ -863,7 +794,7 @@ impl DaemonState {
             session_id: parent.session_id.0,
             request_id: parent.request_id.clone(),
         };
-        let mut active = self.active.lock().await;
+        let mut active = self.run_coordinator.active.lock().await;
         if let Some(active) = active.get_mut(&key) {
             active.publish_external(
                 parent.request_id,
@@ -897,7 +828,7 @@ impl DaemonState {
     async fn handle_chat_send(
         self: Arc<Self>,
         request: JsonRpcRequest,
-        frames: mpsc::UnboundedSender<ServerFrame>,
+        frames: super::frames::FrameSender,
     ) {
         if self.shutdown.is_cancelled() {
             send_result(
@@ -923,6 +854,7 @@ impl DaemonState {
             }
         };
 
+        let admission_barrier = self.session_supervisor.control_lock.lock().await;
         let session = match self.session_runtime(params.session_id.as_deref()).await {
             Ok(session) => session,
             Err(error) => {
@@ -994,12 +926,88 @@ impl DaemonState {
             .provider_manager
             .as_ref()
             .map(|manager| manager.freeze(session.engine.token_budget()));
-        let admitted = match self.run_store.admit_with_route(
-            SessionId(session_id.clone()),
-            request.id.clone(),
-            &params.message,
-            mode,
-            frozen_route.as_ref().map(|route| &route.snapshot),
+        let frozen_engine = match session.engine.freeze_tools() {
+            Ok(engine) => engine,
+            Err(e) => {
+                send_result(&frames, request.id, Err((INTERNAL_ERROR, e.to_string())));
+                return;
+            }
+        };
+        let requested = params.sandbox.as_deref().unwrap_or("native");
+        let (effective, notice) = match requested {
+            "native" => ("native", None),
+            "docker" | "auto" => {
+                if crate::tools::NativeSandbox::docker_available().await {
+                    ("docker", None)
+                } else if requested == "auto" {
+                    (
+                        "native",
+                        Some("Docker 不可用，auto 明确降级为 Native 软边界".to_owned()),
+                    )
+                } else {
+                    send_result(
+                        &frames,
+                        request.id,
+                        Err((
+                            INVALID_PARAMS,
+                            "Docker backend 或预装镜像不可用，强隔离请求被拒绝".into(),
+                        )),
+                    );
+                    return;
+                }
+            }
+            _ => {
+                send_result(
+                    &frames,
+                    request.id,
+                    Err((INVALID_PARAMS, "sandbox 必须为 native/docker/auto".into())),
+                );
+                return;
+            }
+        };
+        let snapshot = agent_core::RunSnapshot {
+            route: frozen_route.as_ref().map(|r| r.snapshot.clone()),
+            tools: frozen_engine.tool_specs(),
+            cwd: self.safety.as_ref().map_or_else(
+                || ".".into(),
+                |s| s.workspace().to_string_lossy().into_owned(),
+            ),
+            permission_mode: self
+                .safety
+                .as_ref()
+                .map_or("risk", |s| s.mode().key())
+                .into(),
+            sandbox_requested: requested.into(),
+            sandbox_effective: effective.into(),
+            sandbox_notice: notice,
+            docker_image: (effective == "docker").then(|| {
+                std::env::var("MY_AGENT_DOCKER_IMAGE").unwrap_or_else(|_| "alpine:3.21".into())
+            }),
+            context_read_only: params.context_read_only,
+            context_token_budget: frozen_engine.token_budget(),
+            context_policy_fingerprint: Some(frozen_engine.context_policy_fingerprint()),
+            tool_catalog_digest: format!(
+                "{:x}",
+                sha2::Sha256::digest(
+                    serde_json::to_vec(&frozen_engine.tool_specs()).unwrap_or_default()
+                )
+            ),
+            memory_entry_budget: 8,
+            memory_token_budget: 1024,
+            max_tool_calls: delegation.as_ref().map(|d| d.max_tool_calls as u64),
+            config_generation: frozen_route
+                .as_ref()
+                .map_or(0, |r| r.snapshot.config_generation),
+        };
+        let admitted = match self.run_store.admit_run(
+            &agent_core::RunAdmission {
+                session_key: SessionId(session_id.clone()),
+                expected_lifetime: Some(session.lifetime.clone()),
+                request_id: request.id.clone(),
+                input: params.message.clone(),
+                mode,
+            },
+            &snapshot,
         ) {
             Ok(admitted) => admitted,
             Err(error) => {
@@ -1014,8 +1022,14 @@ impl DaemonState {
         };
         let run_record = match admitted {
             Admission::New(run) => {
+                self.run_coordinator
+                    .frozen_engines
+                    .lock()
+                    .await
+                    .insert(run.run_id.clone(), frozen_engine);
                 if let Some(route) = frozen_route {
-                    self.frozen_routes
+                    self.run_coordinator
+                        .frozen_routes
                         .lock()
                         .await
                         .insert(run.run_id.clone(), route);
@@ -1057,7 +1071,7 @@ impl DaemonState {
             request_id: request.id.clone(),
         };
         let cancellation = CancellationToken::new();
-        let mut active = self.active.lock().await;
+        let mut active = self.run_coordinator.active.lock().await;
         if active.contains_key(&active_key) {
             drop(active);
             send_result(
@@ -1075,12 +1089,22 @@ impl DaemonState {
                 .with_origin(frames.clone()),
         );
         drop(active);
-        self.queue_notify.notify_waiters();
+        drop(admission_barrier);
+        self.run_coordinator.queue_notify.notify_waiters();
         loop {
-            let notified = self.queue_notify.notified();
+            let notified = self.run_coordinator.queue_notify.notified();
             if cancellation.is_cancelled() {
-                self.active.lock().await.remove(&active_key);
-                self.frozen_routes.lock().await.remove(&run_record.run_id);
+                self.run_coordinator.active.lock().await.remove(&active_key);
+                self.run_coordinator
+                    .frozen_routes
+                    .lock()
+                    .await
+                    .remove(&run_record.run_id);
+                self.run_coordinator
+                    .frozen_engines
+                    .lock()
+                    .await
+                    .remove(&run_record.run_id);
                 send_result(
                     &frames,
                     request.id,
@@ -1092,7 +1116,7 @@ impl DaemonState {
                 Ok(true) => break,
                 Ok(false) => {}
                 Err(error) => {
-                    self.active.lock().await.remove(&active_key);
+                    self.run_coordinator.active.lock().await.remove(&active_key);
                     send_result(
                         &frames,
                         request.id,
@@ -1105,13 +1129,18 @@ impl DaemonState {
                 _ = notified => {},
                 _ = cancellation.cancelled() => {},
                 _ = self.shutdown.cancelled() => {
-                    self.active.lock().await.remove(&active_key);
+                    self.run_coordinator.active.lock().await.remove(&active_key);
                     return;
                 }
             }
         }
 
-        let route = if let Some(route) = self.frozen_routes.lock().await.remove(&run_record.run_id)
+        let route = if let Some(route) = self
+            .run_coordinator
+            .frozen_routes
+            .lock()
+            .await
+            .remove(&run_record.run_id)
         {
             Some(route)
         } else {
@@ -1135,7 +1164,7 @@ impl DaemonState {
                                 None,
                                 Some((-32002, "冻结 Provider 配置无法恢复")),
                             );
-                            self.active.lock().await.remove(&active_key);
+                            self.run_coordinator.active.lock().await.remove(&active_key);
                             send_result(
                                 &frames,
                                 request.id,
@@ -1150,7 +1179,7 @@ impl DaemonState {
                 }
                 Ok(None) => None,
                 Err(error) => {
-                    self.active.lock().await.remove(&active_key);
+                    self.run_coordinator.active.lock().await.remove(&active_key);
                     send_result(
                         &frames,
                         request.id,
@@ -1160,9 +1189,75 @@ impl DaemonState {
                 }
             }
         };
-        let mut run_engine = route
-            .map(|route| session.engine.with_route(route))
+        let engine = self
+            .run_coordinator
+            .frozen_engines
+            .lock()
+            .await
+            .remove(&run_record.run_id)
             .unwrap_or_else(|| (*session.engine).clone());
+        let mut run_engine = route
+            .map(|route| engine.with_route(route))
+            .unwrap_or(engine);
+        let run_snapshot = match self.run_store.run_snapshot(&run_record.run_id) {
+            Ok(value) => value,
+            Err(e) => {
+                send_result(&frames, request.id, Err((INTERNAL_ERROR, e.to_string())));
+                self.run_coordinator.active.lock().await.remove(&active_key);
+                return;
+            }
+        };
+        if let Some(snapshot) = &run_snapshot
+            && snapshot.tools != run_engine.tool_specs()
+        {
+            let _ = self.run_store.finish(
+                &run_record.run_id,
+                RunStatus::Failed,
+                None,
+                Some((INTERNAL_ERROR, "冻结 tool catalog 无法恢复")),
+            );
+            send_result(
+                &frames,
+                request.id,
+                Err((INTERNAL_ERROR, "冻结 tool catalog 无法恢复".into())),
+            );
+            self.run_coordinator.active.lock().await.remove(&active_key);
+            self.run_coordinator.queue_notify.notify_waiters();
+            return;
+        }
+        if let Some(fingerprint) = run_snapshot
+            .as_ref()
+            .and_then(|s| s.context_policy_fingerprint.as_deref())
+        {
+            match run_engine.with_frozen_context(fingerprint) {
+                Ok(engine) => run_engine = engine,
+                Err(error) => {
+                    let _ = self.run_store.finish(
+                        &run_record.run_id,
+                        RunStatus::Failed,
+                        None,
+                        Some((INTERNAL_ERROR, "冻结 context policy 无法恢复")),
+                    );
+                    self.run_coordinator.active.lock().await.remove(&active_key);
+                    self.run_coordinator.queue_notify.notify_waiters();
+                    send_result(
+                        &frames,
+                        request.id,
+                        Err((INTERNAL_ERROR, error.to_string())),
+                    );
+                    return;
+                }
+            }
+        }
+        let frozen_mode = run_snapshot
+            .as_ref()
+            .and_then(|s| SafetyMode::parse(&s.permission_mode))
+            .or_else(|| {
+                delegation
+                    .as_ref()
+                    .and_then(|child| SafetyMode::parse(&child.permission_mode))
+            })
+            .unwrap_or(SafetyMode::RiskApproval);
         if let Some(child) = &delegation {
             run_engine = match run_engine.for_delegation(
                 &child.tools,
@@ -1177,7 +1272,7 @@ impl DaemonState {
                         None,
                         Some((INTERNAL_ERROR, "子 Agent 能力无法恢复")),
                     );
-                    self.active.lock().await.remove(&active_key);
+                    self.run_coordinator.active.lock().await.remove(&active_key);
                     send_result(
                         &frames,
                         request.id,
@@ -1188,32 +1283,39 @@ impl DaemonState {
             };
         }
         let (agent_events, mut event_receiver) = mpsc::unbounded_channel();
-        let (approval_events, mut approval_receiver) = mpsc::unbounded_channel();
+        let (approval_events, mut approval_receiver) = super::frames::frame_channel();
         let trace_request_id = request_id_label(&request.id);
         let turn_span = info_span!(
             "agent_turn",
             session_id = %session_id,
             request_id = ?request.id,
         );
-        let run = crate::loop_engine::with_tool_audit(
-            self.run_store.clone(),
-            run_record.run_id.clone(),
-            self.approvals.with_session_context(
-                session_id.clone(),
-                request.id.clone(),
-                approval_events,
-                async {
-                    let mut history = session.history.lock().await;
-                    run_engine
-                        .run_turn_with_events_for_request(
-                            &mut history,
-                            params.message,
-                            Some(agent_events),
-                            cancellation.clone(),
-                            Some(trace_request_id),
-                        )
-                        .await
-                },
+        let run = crate::safety::with_frozen_mode(
+            frozen_mode,
+            crate::loop_engine::with_tool_audit(
+                self.run_store.clone(),
+                run_record.run_id.clone(),
+                self.approvals.with_session_context(
+                    session_id.clone(),
+                    request.id.clone(),
+                    approval_events,
+                    async {
+                        let _writer = session.writer.lock().await;
+                        let mut history = self
+                            .run_store
+                            .session_snapshot(&SessionId(session.id.clone()))?
+                            .messages;
+                        run_engine
+                            .run_turn_with_events_for_request(
+                                &mut history,
+                                params.message,
+                                Some(agent_events),
+                                cancellation.clone(),
+                                Some(trace_request_id),
+                            )
+                            .await
+                    },
+                ),
             ),
         )
         .instrument(turn_span);
@@ -1266,6 +1368,7 @@ impl DaemonState {
         }
 
         let storage_error = self
+            .run_coordinator
             .active
             .lock()
             .await
@@ -1277,7 +1380,7 @@ impl DaemonState {
                 Err((REQUEST_CANCELLED, "请求已取消".to_owned()))
             }
             (None, Ok(content)) => Ok(
-                json!({"content": content, "run_id": run_record.run_id, "turn_id": run_record.turn_id}),
+                json!({"content": content, "run_id": run_record.run_id, "turn_id": run_record.turn_id,"sandbox_requested":run_snapshot.as_ref().map(|s|&s.sandbox_requested),"sandbox_effective":run_snapshot.as_ref().map(|s|&s.sandbox_effective),"sandbox_notice":run_snapshot.as_ref().and_then(|s|s.sandbox_notice.as_ref())}),
             ),
             (None, Err(ref error))
                 if cancellation.is_cancelled()
@@ -1303,12 +1406,19 @@ impl DaemonState {
             .as_ref()
             .err()
             .map(|(code, message)| (*code, message.as_str()));
-        let committed = match self.run_store.finish(
-            &run_record.run_id,
-            terminal_status,
-            content,
-            error,
-        ) {
+        let owner = match self.run_store.run_owner(&run_record.run_id) {
+            Ok(owner) => owner,
+            Err(e) => {
+                send_result(&frames, request.id, Err((INTERNAL_ERROR, e.to_string())));
+                return;
+            }
+        };
+        let committed = match self.run_store.commit_turn(&agent_core::TurnCommit {
+            owner,
+            status: terminal_status,
+            content: content.map(str::to_owned),
+            error: error.map(|(code, msg)| (code, msg.to_owned())),
+        }) {
             Ok(committed) => committed,
             Err(storage_error) => {
                 tracing::error!(run_id = %run_record.run_id.0, error = %storage_error, "提交 run 终态失败");
@@ -1317,7 +1427,7 @@ impl DaemonState {
                     request.id,
                     Err((INTERNAL_ERROR, format!("持久化终态失败: {storage_error}"))),
                 );
-                self.active.lock().await.remove(&active_key);
+                self.run_coordinator.active.lock().await.remove(&active_key);
                 return;
             }
         };
@@ -1360,8 +1470,205 @@ impl DaemonState {
             ActiveRequestUpdate::Terminal(response),
         )
         .await;
-        self.active.lock().await.remove(&active_key);
-        self.queue_notify.notify_waiters();
+        self.run_coordinator.active.lock().await.remove(&active_key);
+        self.run_coordinator.queue_notify.notify_waiters();
+        // 完成后维护是单独成功位；失败不能修改已发布 terminal。单次最多摄入一个 turn。
+        if committed.status == RunStatus::Completed {
+            if let Ok(owner) = self.run_store.run_owner(&committed.run_id) {
+                let readonly = self
+                    .run_store
+                    .run_snapshot(&owner.run_id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|s| s.context_read_only);
+                let outcome = if readonly {
+                    "skipped_read_only"
+                } else {
+                    match self.run_store.ingest_committed_turn(&owner) {
+                        Ok(()) => "completed",
+                        Err(error) => {
+                            tracing::warn!(run_id=%committed.run_id.0,error=%error,"完成后 memory 维护未写入");
+                            "failed"
+                        }
+                    }
+                };
+                if let Err(error) =
+                    self.maintenance_store
+                        .record_maintenance(&owner, "memory_ingest", outcome)
+                {
+                    tracing::warn!(error=%error,"维护诊断已被 lifetime fence 拒绝");
+                }
+            }
+        }
+    }
+
+    async fn resource_command(
+        &self,
+        method: &str,
+        params: ResourceParams,
+    ) -> Result<Value, (i64, String)> {
+        let session = self.session_runtime(Some(&params.session_id)).await?;
+        let fail = |e: RuntimeError| (REQUEST_CONFLICT, e.to_string());
+        if method == "resources.list" {
+            let entries = self
+                .run_store
+                .list_resources(
+                    &session.lifetime,
+                    agent_core::ResourceId(params.after_cursor),
+                    params.limit,
+                )
+                .map_err(fail)?;
+            return Ok(json!({"cursor":entries.last().map(|r|r.id),"resources":entries}));
+        }
+        let id = params
+            .resource_id
+            .ok_or_else(|| (INVALID_PARAMS, "缺少 resource_id".into()))?;
+        let record = self.run_store.read_resource(id).map_err(fail)?;
+        if record.owner.session_key.0 != params.session_id
+            || record.owner.session_lifetime_id != session.lifetime
+        {
+            return Err((REQUEST_CONFLICT, "resource stale owner".into()));
+        }
+        match method {
+            "resources.read"=>Ok(json!({"resource":record})),
+            "resources.logs"=>Ok(json!({"logs":self.run_store.resource_logs(id,params.after_cursor,params.limit).map_err(fail)?,"cursor":record.log_cursor})),
+            "resources.wait"=>self.wait_resource(id,std::time::Duration::from_millis(params.timeout_ms.min(60000))).await.map(|r|json!({"resource":r,"timed_out":matches!(r.state.as_str(),"starting"|"running"|"stopping")})).map_err(|e|(INTERNAL_ERROR,e.to_string())),
+            "resources.stop"=>{
+                if params.owner_run_id.as_ref()!=Some(&record.owner.run_id){return Err((REQUEST_CONFLICT,"stop 要求 exact owner_run_id".into()));}
+                self.stop_resource(&record.owner,id).await.map(|r|json!({"resource":r})).map_err(|e|(INTERNAL_ERROR,e.to_string()))
+            }
+            _=>Err((METHOD_NOT_FOUND,"未知 resources 方法".into())),
+        }
+    }
+
+    async fn memory_command(&self, method: &str, value: &Value) -> Result<Value, (i64, String)> {
+        let session_id = value
+            .get("session_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| (INVALID_PARAMS, "缺少 session_id".into()))?;
+        let session = self.session_runtime(Some(session_id)).await?;
+        let project = self.safety.as_ref().map_or_else(
+            || "".into(),
+            |s| s.workspace().to_string_lossy().into_owned(),
+        );
+        let visibility = agent_core::MemoryVisibility {
+            lifetime: session.lifetime.clone(),
+            project: project.clone(),
+            allow_confirmed_global: true,
+        };
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |time| time.as_secs());
+        let fail = |e: RuntimeError| (REQUEST_CONFLICT, e.to_string());
+        match method {
+            "memory.scope" => Ok(
+                json!({"session_id":session_id,"scopes":["session","project","confirmed_global"],"legacy_visible":false}),
+            ),
+            "memory.recall" | "memory.list" => {
+                let params: MemoryReadParams =
+                    parse_params(value).map_err(|e| (INVALID_PARAMS, e))?;
+                let mut entries = if method == "memory.list" {
+                    self.run_store
+                        .memory_page(
+                            &visibility,
+                            params.after_id.as_deref(),
+                            params.limit.clamp(1, 100) + 1,
+                        )
+                        .map_err(fail)?
+                } else {
+                    agent_memory::rank(
+                        self.run_store
+                            .memory_candidates(&visibility)
+                            .map_err(fail)?,
+                        &visibility,
+                        &params.query,
+                        params.limit.clamp(1, 100) + 1,
+                        now,
+                    )
+                };
+                entries.retain(|e| visibility.allows(e, now));
+                let total = entries.len();
+                entries.truncate(params.limit.clamp(1, 100));
+                let mut bytes = 0;
+                let mut end = 0;
+                for entry in &entries {
+                    let size = serde_json::to_vec(entry)
+                        .map_err(|e| (INTERNAL_ERROR, e.to_string()))?
+                        .len();
+                    if bytes + size > 256 * 1024 {
+                        break;
+                    }
+                    bytes += size;
+                    end += 1;
+                }
+                entries.truncate(end);
+                let has_more = total > entries.len();
+                let cursor = entries.last().map(|e| e.id.clone());
+                Ok(
+                    json!({"entries":entries,"cursor":cursor,"has_more":has_more,"session_id":session_id}),
+                )
+            }
+            "memory.store" => {
+                let params: MemoryStoreParams =
+                    parse_params(value).map_err(|e| (INVALID_PARAMS, e))?;
+                let owner = self
+                    .run_store
+                    .run_owner(&params.owner_run_id)
+                    .map_err(fail)?;
+                if owner.session_key.0 != session_id
+                    || owner.session_lifetime_id != session.lifetime
+                {
+                    return Err((REQUEST_CONFLICT, "memory stale owner".into()));
+                }
+                let scope = match params.scope.as_deref().unwrap_or("session") {
+                    "session" => agent_core::MemoryScope::Session(session.lifetime.clone()),
+                    "project" if params.confirmed_by_user => {
+                        agent_core::MemoryScope::Project(project)
+                    }
+                    "global" if params.confirmed_by_user => agent_core::MemoryScope::Global,
+                    _ => return Err((INVALID_PARAMS, "跨会话 scope 要求用户显式确认".into())),
+                };
+                if params.operation_id.is_empty() || params.operation_id.len() > 256 {
+                    return Err((INVALID_PARAMS, "memory operation_id 无效".into()));
+                }
+                let entry = agent_core::MemoryRecord {
+                    id: format!("rpc:{}:{}", owner.run_id.0, params.operation_id),
+                    layer: agent_core::MemoryLayer::Semantic,
+                    scope,
+                    kind: agent_core::MemoryKind::Explicit,
+                    content_digest: format!("{:x}", Sha256::digest(params.content.as_bytes())),
+                    content: params.content,
+                    source: Some(owner.clone()),
+                    source_message_ids: vec![],
+                    event_time: now,
+                    created_at: now,
+                    updated_at: now,
+                    expires_at: params
+                        .ttl_days
+                        .map(|days| now.saturating_add(days.saturating_mul(86400))),
+                    confidence: 100,
+                    confirmed_by_user: params.confirmed_by_user,
+                    revision: 0,
+                };
+                let saved = self.run_store.store_memory(&owner, &entry).map_err(fail)?;
+                Ok(json!({"entry":saved}))
+            }
+            "memory.forget" => {
+                let params: MemoryForgetParams =
+                    parse_params(value).map_err(|e| (INVALID_PARAMS, e))?;
+                let owner = self
+                    .run_store
+                    .run_owner(&params.owner_run_id)
+                    .map_err(fail)?;
+                if owner.session_key.0 != session_id {
+                    return Err((REQUEST_CONFLICT, "memory owner session 不匹配".into()));
+                }
+                Ok(
+                    json!({"forgotten":self.run_store.forget_memory(&owner,&visibility,&params.memory_id,params.revision).map_err(fail)?}),
+                )
+            }
+            _ => Err((METHOD_NOT_FOUND, "未知 memory 方法".into())),
+        }
     }
 
     async fn session_runtime(
@@ -1370,12 +1677,38 @@ impl DaemonState {
     ) -> Result<Arc<SessionRuntime>, (i64, String)> {
         let session_id = match requested_id {
             Some(session_id) => session_id.to_owned(),
-            None => self.legacy_session_id.lock().await.clone(),
+            None => self
+                .session_supervisor
+                .legacy_session_id
+                .lock()
+                .await
+                .clone(),
         };
-        if session_id == self.default_session.id {
-            return Ok(self.default_session.clone());
+        let metadata = self
+            .run_store
+            .session_metadata(&SessionId(session_id.clone()))
+            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+        if metadata.as_ref().is_some_and(|m| m.deleted) {
+            return Err((INVALID_PARAMS, "session 已删除".into()));
         }
-        if let Some(runtime) = self.sessions.lock().await.get(&session_id).cloned() {
+        if session_id == self.session_supervisor.default_session.id
+            && metadata
+                .as_ref()
+                .is_some_and(|m| m.lifetime == self.session_supervisor.default_session.lifetime)
+        {
+            return Ok(self.session_supervisor.default_session.clone());
+        }
+        if let Some(runtime) = self
+            .session_supervisor
+            .sessions
+            .lock()
+            .await
+            .get(&session_id)
+            .cloned()
+            && metadata
+                .as_ref()
+                .is_some_and(|m| m.lifetime == runtime.lifetime)
+        {
             return Ok(runtime);
         }
         let store = match self.session.open_session(&session_id) {
@@ -1394,11 +1727,29 @@ impl DaemonState {
             }
         };
         let store = Arc::new(store);
-        let history = store
-            .load()
-            .await
-            .map_err(|error| (INTERNAL_ERROR, format!("{error:#}")))?;
-        let mut engine = self.default_session.engine.for_session(store.clone());
+        if metadata.as_ref().is_none_or(|m| !m.legacy_imported) {
+            let history = store
+                .load()
+                .await
+                .map_err(|e| (INTERNAL_ERROR, format!("{e:#}")))?;
+            self.run_store
+                .import_legacy(&SessionId(session_id.clone()), &history)
+                .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+        }
+        let snapshot = self
+            .run_store
+            .session_snapshot(&SessionId(session_id.clone()))
+            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+        let store = Arc::new(
+            store
+                .with_trace_lifetime(&snapshot.lifetime)
+                .map_err(|e| (INTERNAL_ERROR, e.to_string()))?,
+        );
+        let mut engine = self
+            .session_supervisor
+            .default_session
+            .engine
+            .for_session(store.clone());
         if let Some(child) = self
             .run_store
             .delegation_for_session(&session_id)
@@ -1416,40 +1767,196 @@ impl DaemonState {
         let runtime = Arc::new(SessionRuntime {
             id: session_id.clone(),
             engine: Arc::new(engine),
-            history: Mutex::new(history),
+            lifetime: snapshot.lifetime,
+            writer: Mutex::new(()),
             store,
         });
-        let mut sessions = self.sessions.lock().await;
-        Ok(sessions
-            .entry(session_id)
-            .or_insert_with(|| runtime.clone())
-            .clone())
+        let mut sessions = self.session_supervisor.sessions.lock().await;
+        sessions.insert(session_id, runtime.clone());
+        Ok(runtime)
     }
 
     async fn session_new(&self) -> Result<Value, (i64, String)> {
-        let (session_id, store) = self
-            .session
-            .create_isolated_session()
-            .map_err(|error| (INTERNAL_ERROR, format!("{error:#}")))?;
-        let store = Arc::new(store);
-        let runtime = Arc::new(SessionRuntime {
-            id: session_id.clone(),
-            engine: Arc::new(self.default_session.engine.for_session(store.clone())),
-            history: Mutex::new(Vec::new()),
-            store,
-        });
-        self.sessions
+        self.session_create(SessionCreateParams::default()).await
+    }
+
+    async fn session_create(&self, params: SessionCreateParams) -> Result<Value, (i64, String)> {
+        let _barrier = self.session_supervisor.control_lock.lock().await;
+        let (session_id, _) = match params.session_id {
+            Some(key) => (
+                key.clone(),
+                self.session
+                    .open_known_session(&key)
+                    .map_err(|e| (INVALID_PARAMS, e.to_string()))?,
+            ),
+            None => {
+                if let Some(operation) = params.operation_id.as_deref() {
+                    let key = self.session.session_key_for_operation(operation);
+                    (
+                        key.clone(),
+                        self.session
+                            .open_known_session(&key)
+                            .map_err(|e| (INVALID_PARAMS, e.to_string()))?,
+                    )
+                } else {
+                    self.session
+                        .create_isolated_session()
+                        .map_err(|e| (INTERNAL_ERROR, e.to_string()))?
+                }
+            }
+        };
+        let operation = params
+            .operation_id
+            .unwrap_or_else(|| format!("create:{session_id}"));
+        self.run_store
+            .execute_lifecycle(
+                &agent_core::SessionCommand::Create {
+                    key: SessionId(session_id.clone()),
+                },
+                None,
+                &operation,
+            )
+            .map_err(|e| (REQUEST_CONFLICT, e.to_string()))?;
+        self.run_store
+            .set_preferred_session(&SessionId(session_id.clone()))
+            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+        *self.session_supervisor.legacy_session_id.lock().await = session_id.clone();
+        Ok(
+            json!({"created":true,"session_id":session_id,"messages":[],"pending_approvals":[],"active_requests":[]}),
+        )
+    }
+
+    async fn session_end(
+        &self,
+        params: SessionEndParams,
+        delete: bool,
+    ) -> Result<Value, (i64, String)> {
+        let _barrier = self.session_supervisor.control_lock.lock().await;
+        let key = SessionId(params.session_id.clone());
+        let meta = self
+            .run_store
+            .session_metadata(&key)
+            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?
+            .ok_or((INVALID_PARAMS, "session 不存在".into()))?;
+        if self
+            .run_coordinator
+            .active
             .lock()
             .await
-            .insert(session_id.clone(), runtime);
-        *self.legacy_session_id.lock().await = session_id.clone();
-        Ok(json!({
-            "created": true,
-            "session_id": session_id,
-            "messages": [],
-            "pending_approvals": [],
-            "active_requests": [],
-        }))
+            .keys()
+            .any(|k| k.session_id == params.session_id)
+        {
+            return Err((
+                REQUEST_CONFLICT,
+                "session 正在执行，必须先精确 cancel 并等待结算".into(),
+            ));
+        }
+        self.run_store
+            .execute_lifecycle(
+                &agent_core::SessionCommand::End {
+                    key: key.clone(),
+                    delete,
+                },
+                Some(&meta.lifetime),
+                &params.operation_id,
+            )
+            .map_err(|e| (REQUEST_CONFLICT, e.to_string()))?;
+        self.session_supervisor
+            .sessions
+            .lock()
+            .await
+            .remove(&params.session_id);
+        Ok(json!({"session_id":params.session_id,"deleted":delete,"cleared":!delete}))
+    }
+
+    async fn session_compact(&self, params: SessionCompactParams) -> Result<Value, (i64, String)> {
+        let session = self.session_runtime(Some(&params.session_id)).await?;
+        let _writer = session
+            .writer
+            .try_lock()
+            .map_err(|_| (REQUEST_CONFLICT, "session 正在执行，请稍后 compact".into()))?;
+        let snapshot = self
+            .run_store
+            .session_snapshot(&SessionId(params.session_id.clone()))
+            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+        let owner = self
+            .run_store
+            .run_owner(&params.owner_run_id)
+            .map_err(|e| (INVALID_PARAMS, e.to_string()))?;
+        if owner.session_key.0 != params.session_id || owner.session_lifetime_id != session.lifetime
+        {
+            return Err((REQUEST_CONFLICT, "compact owner 不匹配".into()));
+        }
+        if params.operation_id.is_empty() || params.operation_id.len() > 256 {
+            return Err((INVALID_PARAMS, "compact operation_id 无效".into()));
+        }
+        if let Some(generation) = self
+            .run_store
+            .compact_result(&owner, &params.operation_id, Some(params.expected_revision))
+            .map_err(|e| (REQUEST_CONFLICT, e.to_string()))?
+        {
+            return Ok(
+                json!({"session_id":params.session_id,"projection_generation":generation,"transcript_revision":params.expected_revision,"replayed":true}),
+            );
+        }
+        if snapshot.revision != params.expected_revision {
+            return Err((REQUEST_CONFLICT, "compact source revision 已变化".into()));
+        }
+        let frozen = self
+            .run_store
+            .run_snapshot(&owner.run_id)
+            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+        let mut engine = (*session.engine).clone();
+        if let Some(fingerprint) = frozen
+            .as_ref()
+            .and_then(|s| s.context_policy_fingerprint.as_deref())
+        {
+            engine = engine
+                .with_frozen_context(fingerprint)
+                .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+        }
+        crate::loop_engine::with_tool_audit(
+            self.run_store.clone(),
+            owner.run_id.clone(),
+            engine.compact_session(&self.shutdown, &params.operation_id),
+        )
+        .await
+        .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+        let snapshot = self
+            .run_store
+            .session_snapshot(&SessionId(params.session_id.clone()))
+            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+        Ok(
+            json!({"session_id":params.session_id,"projection_generation":snapshot.projection_generation,"transcript_revision":snapshot.revision}),
+        )
+    }
+
+    async fn session_fork(&self, params: SessionForkParams) -> Result<Value, (i64, String)> {
+        let _barrier = self.session_supervisor.control_lock.lock().await;
+        self.session
+            .open_known_session(&params.target_session_id)
+            .map_err(|e| (INVALID_PARAMS, e.to_string()))?;
+        let source = SessionId(params.session_id);
+        let target = SessionId(params.target_session_id);
+        let source_lifetime = self
+            .run_store
+            .session_metadata(&source)
+            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?
+            .filter(|m| !m.deleted)
+            .ok_or_else(|| (INVALID_PARAMS, "fork source 不存在".into()))?
+            .lifetime;
+        self.run_store
+            .execute_lifecycle(
+                &agent_core::SessionCommand::Fork {
+                    source,
+                    target: target.clone(),
+                    revision: params.expected_revision,
+                },
+                Some(&source_lifetime),
+                &params.operation_id,
+            )
+            .map_err(|e| (REQUEST_CONFLICT, e.to_string()))?;
+        Ok(json!({"forked":true,"session_id":target}))
     }
 
     async fn session_load(&self, session_id: Option<&str>) -> Result<Value, (i64, String)> {
@@ -1459,25 +1966,68 @@ impl DaemonState {
 
     async fn session_load_page(&self, params: SessionPageParams) -> Result<Value, (i64, String)> {
         let runtime = self.session_runtime(Some(&params.session_id)).await?;
-        let history = runtime
-            .store
-            .load()
-            .await
-            .map_err(|error| (INTERNAL_ERROR, format!("{error:#}")))?;
+        let snapshot = self
+            .run_store
+            .session_snapshot(&SessionId(runtime.id.clone()))
+            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+        let history = snapshot.messages;
         let total_messages = history.len();
+        let mut start = params.offset.min(total_messages);
         let limit = params.limit.clamp(1, WEB_PAGE_MAX_LIMIT);
-        let (messages, has_more) = bounded_json_page(
-            history.into_iter().skip(params.offset),
-            limit,
-            "消息过大，已截断；可缩小加载范围查看其余 Session 内容",
-        );
+        let mut end = start.saturating_add(limit).min(total_messages);
+        for &(batch_start, batch_end) in &snapshot.batch_ranges {
+            if (batch_start as usize) < start && start < (batch_end as usize) {
+                start = batch_start as usize;
+            }
+            if (batch_start as usize) < end && end < (batch_end as usize) {
+                end = batch_end as usize;
+            }
+        }
+        let page = history
+            .into_iter()
+            .skip(start)
+            .take(end - start)
+            .collect::<Vec<_>>();
+        let paired = page
+            .iter()
+            .any(|m| !m.tool_calls.is_empty() || m.role == crate::provider::Role::Tool);
+        if paired
+            && serde_json::to_vec(&page)
+                .map_err(|e| (INTERNAL_ERROR, e.to_string()))?
+                .len()
+                > MAX_FRAME_BYTES / 2
+        {
+            return Err((
+                INVALID_PARAMS,
+                "完整 tool batch 超过读取预算；需 artifact readback".into(),
+            ));
+        }
+        let (messages, truncated_page) = if paired {
+            (
+                page.iter()
+                    .map(serde_json::to_value)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| (INTERNAL_ERROR, e.to_string()))?,
+                false,
+            )
+        } else {
+            bounded_json_page(
+                page.into_iter(),
+                end - start,
+                "消息过大，已截断；可缩小加载范围查看其余 Session 内容",
+            )
+        };
+        let has_more = truncated_page || end < total_messages;
         let (active_requests, approvals, status) = self.session_activity(&runtime.id).await?;
         Ok(json!({
             "session_id": runtime.id,
             "messages": messages,
-            "offset": params.offset,
+            "offset": start,
+            "cursor": end,
             "limit": limit,
             "total_messages": total_messages,
+            "projection_generation":snapshot.projection_generation,
+            "transcript_revision":snapshot.revision,
             "has_more": has_more,
             "pending_approvals": approvals,
             "active_requests": active_requests,
@@ -1486,15 +2036,14 @@ impl DaemonState {
     }
 
     async fn session_snapshot(&self, session_id: &str) -> Result<Value, (i64, String)> {
-        // 活动 turn（尤其是等待人工审批时）会长期持有内存历史锁。恢复端必须仍能
-        // 立即读取快照，因此以每条消息均已 flush 的 append-only 会话文件为来源。
+        // 读 durable snapshot 不等待执行 permit；审批中的 turn 不阻塞恢复入口。
         let runtime = self.session_runtime(Some(session_id)).await?;
-        let history = runtime
-            .store
-            .load()
-            .await
-            .map_err(|error| (INTERNAL_ERROR, format!("{error:#}")))?;
-        let active = self.active.lock().await;
+        let snapshot = self
+            .run_store
+            .session_snapshot(&SessionId(runtime.id.clone()))
+            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+        let history = snapshot.messages;
+        let active = self.run_coordinator.active.lock().await;
         let active_requests = active
             .keys()
             .filter(|key| key.session_id == session_id)
@@ -1523,14 +2072,26 @@ impl DaemonState {
         Ok(json!({
             "session_id": session_id,
             "messages": history,
+            "transcript_revision": snapshot.revision,
+            "projection_generation": snapshot.projection_generation,
             "pending_approvals": approvals,
             "active_requests": active_requests,
             "status": status,
         }))
     }
 
-    async fn session_list(&self) -> Result<Value, (i64, String)> {
-        Ok(json!({"sessions": self.session_infos().await?}))
+    async fn session_list(&self, params: SessionListParams) -> Result<Value, (i64, String)> {
+        let limit = params.limit.clamp(1, 1000);
+        let mut metadata = self
+            .run_store
+            .session_metadata_page(params.after_id.as_deref(), limit + 1)
+            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+        let has_more = metadata.len() > limit;
+        metadata.truncate(limit);
+        let cursor = metadata.last().map(|m| m.key.0.clone());
+        Ok(
+            json!({"sessions": self.session_infos_from(metadata).await?,"cursor":cursor,"has_more":has_more}),
+        )
     }
 
     async fn session_trace(&self, session_id: &str) -> Result<Value, (i64, String)> {
@@ -1574,7 +2135,7 @@ impl DaemonState {
         &self,
         session_id: &str,
     ) -> Result<(Vec<RequestId>, Vec<PendingApprovalInfo>, &'static str), (i64, String)> {
-        let active = self.active.lock().await;
+        let active = self.run_coordinator.active.lock().await;
         let active_requests = active
             .keys()
             .filter(|key| key.session_id == session_id)
@@ -1758,16 +2319,45 @@ impl DaemonState {
     }
 
     async fn session_infos(&self) -> Result<Vec<crate::session::SessionInfo>, (i64, String)> {
-        let mut sessions = self
-            .session
-            .list_sessions()
+        let metadata = self
+            .run_store
+            .session_metadata_list()
+            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+        self.session_infos_from(metadata).await
+    }
+    async fn session_infos_from(
+        &self,
+        metadata: Vec<agent_core::SessionMetadata>,
+    ) -> Result<Vec<crate::session::SessionInfo>, (i64, String)> {
+        let mut sessions = metadata
+            .into_iter()
+            .map(|meta| {
+                Ok(crate::session::SessionInfo {
+                    id: meta.key.0.clone(),
+                    path: self.session.path_for_session(&meta.key.0),
+                    active: false,
+                    message_count: meta.revision.0 as usize,
+                    modified_at: Some((meta.updated_at_ms / 1000).max(0) as u64),
+                    preview: self
+                        .run_store
+                        .session_preview(&meta.key, &meta.lifetime)
+                        .map_err(|e| (INTERNAL_ERROR, e.to_string()))?,
+                    status: SessionStatus::Idle,
+                    active_requests: 0,
+                    updated_at: Some((meta.updated_at_ms / 1000).max(0) as u64),
+                })
+            })
+            .collect::<Result<Vec<_>, (i64, String)>>()?;
+        let current_id = self
+            .session_supervisor
+            .legacy_session_id
+            .lock()
             .await
-            .map_err(|error| (INTERNAL_ERROR, format!("{error:#}")))?;
-        let current_id = self.legacy_session_id.lock().await.clone();
+            .clone();
         for session in &mut sessions {
             session.active = session.id == current_id;
         }
-        let active_counts = self.active.lock().await.keys().fold(
+        let active_counts = self.run_coordinator.active.lock().await.keys().fold(
             HashMap::<String, usize>::new(),
             |mut counts, key| {
                 *counts.entry(key.session_id.clone()).or_default() += 1;
@@ -1786,55 +2376,6 @@ impl DaemonState {
                 SessionStatus::Idle
             };
             session.updated_at = session.modified_at;
-        }
-        let runtimes = self
-            .sessions
-            .lock()
-            .await
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        for runtime in runtimes {
-            if sessions.iter().any(|session| session.id == runtime.id) {
-                continue;
-            }
-            sessions.push(crate::session::SessionInfo {
-                id: runtime.id.clone(),
-                path: runtime.store.path_for_session(&runtime.id),
-                active: runtime.id == current_id,
-                message_count: 0,
-                modified_at: None,
-                preview: None,
-                status: if pending_sessions.contains(&runtime.id) {
-                    SessionStatus::Waiting
-                } else if active_counts.get(&runtime.id).copied().unwrap_or(0) > 0 {
-                    SessionStatus::Running
-                } else {
-                    SessionStatus::Idle
-                },
-                active_requests: active_counts.get(&runtime.id).copied().unwrap_or(0),
-                updated_at: None,
-            });
-        }
-        if !sessions.iter().any(|session| session.id == current_id) {
-            let active_requests = active_counts.get(&current_id).copied().unwrap_or(0);
-            sessions.push(crate::session::SessionInfo {
-                id: current_id.clone(),
-                path: self.session.path_for_session(&current_id),
-                active: true,
-                message_count: 0,
-                modified_at: None,
-                preview: None,
-                status: if pending_sessions.contains(&current_id) {
-                    SessionStatus::Waiting
-                } else if active_requests > 0 {
-                    SessionStatus::Running
-                } else {
-                    SessionStatus::Idle
-                },
-                active_requests,
-                updated_at: None,
-            });
         }
         sessions.sort_by(|left, right| {
             right
@@ -1867,6 +2408,50 @@ impl DaemonState {
             SlashParse::Command(invocation) => match invocation.action {
                 SlashAction::Help => SlashResponse::Text {
                     content: registry.help(),
+                },
+                SlashAction::Memory | SlashAction::Context | SlashAction::Resources => {
+                    if invocation.args.len() != 1 {
+                        return Err((INVALID_PARAMS, "需要一个 session ID".into()));
+                    }
+                    let key = &invocation.args[0];
+                    let fact = match invocation.action {
+                        SlashAction::Memory => {
+                            self.memory_command(
+                                "memory.list",
+                                &json!({"session_id":key,"limit":100}),
+                            )
+                            .await?
+                        }
+                        SlashAction::Context => {
+                            let snapshot = self
+                                .run_store
+                                .session_snapshot(&SessionId(key.clone()))
+                                .map_err(|e| (INVALID_PARAMS, e.to_string()))?;
+                            let projection = self
+                                .run_store
+                                .context_projection(&snapshot)
+                                .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+                            json!({"session_id":key,"lifetime":snapshot.lifetime,"transcript_revision":snapshot.revision,"projection_generation":projection.generation,"projected_messages":projection.messages.len()})
+                        }
+                        _ => {
+                            let snapshot = self
+                                .run_store
+                                .session_snapshot(&SessionId(key.clone()))
+                                .map_err(|e| (INVALID_PARAMS, e.to_string()))?;
+                            json!({"session_id":key,"resources":self.run_store.list_resources(&snapshot.lifetime, agent_core::ResourceId(0), 100).map_err(|e|(INTERNAL_ERROR,e.to_string()))?})
+                        }
+                    };
+                    SlashResponse::Text {
+                        content: serde_json::to_string(&fact)
+                            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?,
+                    }
+                }
+                SlashAction::Doctor => SlashResponse::Text {
+                    content: self
+                        .maintenance_store
+                        .health_report()
+                        .map_err(|e| (INTERNAL_ERROR, e.to_string()))?
+                        .to_string(),
                 },
                 SlashAction::Status => {
                     let current_session = self.session_runtime(session_id).await?;
@@ -2369,7 +2954,7 @@ impl DaemonState {
     async fn handle_subscribe(
         self: Arc<Self>,
         request: JsonRpcRequest,
-        frames: mpsc::UnboundedSender<ServerFrame>,
+        frames: super::frames::FrameSender,
     ) {
         let params = match parse_params::<SubscribeParams>(&request.params) {
             Ok(params) => params,
@@ -2379,6 +2964,7 @@ impl DaemonState {
             }
         };
         let matches = self
+            .run_coordinator
             .active
             .lock()
             .await
@@ -2546,7 +3132,7 @@ impl DaemonState {
 
     async fn publish_update(
         &self,
-        frames: &mpsc::UnboundedSender<ServerFrame>,
+        frames: &super::frames::FrameSender,
         active_key: &ActiveKey,
         mut update: ActiveRequestUpdate,
     ) {
@@ -2560,6 +3146,7 @@ impl DaemonState {
             return; // The final content and terminal become visible after one SQLite commit.
         }
         let run_id = self
+            .run_coordinator
             .active
             .lock()
             .await
@@ -2593,7 +3180,9 @@ impl DaemonState {
                 }
                 Err(error) => {
                     tracing::error!(run_id = %run_id.0, %error, "持久化事件失败");
-                    if let Some(active) = self.active.lock().await.get_mut(active_key) {
+                    if let Some(active) =
+                        self.run_coordinator.active.lock().await.get_mut(active_key)
+                    {
                         active.storage_error = Some(error.to_string());
                         active.cancellation.cancel();
                     }
@@ -2601,7 +3190,7 @@ impl DaemonState {
                 }
             }
         }
-        if let Some(active) = self.active.lock().await.get_mut(active_key) {
+        if let Some(active) = self.run_coordinator.active.lock().await.get_mut(active_key) {
             active.publish(update.clone());
         }
         let _ = frames.send(update.to_frame(active_key.request_id.clone()));
@@ -2609,11 +3198,12 @@ impl DaemonState {
 
     async fn publish_committed_completion(
         &self,
-        frames: &mpsc::UnboundedSender<ServerFrame>,
+        frames: &super::frames::FrameSender,
         active_key: &ActiveKey,
         content: &str,
     ) {
         let Some(active) = self
+            .run_coordinator
             .active
             .lock()
             .await
@@ -2634,7 +3224,7 @@ impl DaemonState {
             run_id: Some(active),
             seq,
         };
-        if let Some(active) = self.active.lock().await.get_mut(active_key) {
+        if let Some(active) = self.run_coordinator.active.lock().await.get_mut(active_key) {
             active.publish(update.clone());
         }
         let _ = frames.send(update.to_frame(active_key.request_id.clone()));
@@ -2652,7 +3242,7 @@ impl DaemonState {
                 .approved
                 .ok_or((INVALID_PARAMS, "缺少 approved".into()))?
         };
-        let _guard = self.control_lock.lock().await;
+        let _guard = self.session_supervisor.control_lock.lock().await;
         let id = InteractionId(params.approval_id);
         let current = self
             .run_store
@@ -2713,9 +3303,16 @@ impl DaemonState {
             .session
             .open_known_session(&run.session_id.0)
             .map_err(|error| (INTERNAL_ERROR, format!("JSONL 读取失败: {error:#}")))?;
-        let (messages, jsonl_error) = match store.load().await {
+        let owner = self
+            .run_store
+            .run_owner(run_id)
+            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+        let store = store
+            .with_trace_lifetime(&owner.session_lifetime_id)
+            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+        let (messages, jsonl_error) = match self.run_store.run_messages(run_id) {
             Ok(messages) => (messages, None),
-            Err(error) => (Vec::new(), Some(format!("{error:#}"))),
+            Err(e) => (Vec::new(), Some(e.to_string())),
         };
         let matching_assistant = run.content.as_ref().is_some_and(|content| {
             messages.iter().any(|message| {
@@ -2767,7 +3364,7 @@ impl DaemonState {
         } else if run.status == RunStatus::Completed
             && (!matching_assistant || jsonl_error.is_some())
         {
-            "jsonl_missing_or_diverged"
+            "transcript_missing_or_diverged"
         } else if run.status == RunStatus::UnknownAfterRestart {
             "control_state_unknown"
         } else {
@@ -2776,6 +3373,7 @@ impl DaemonState {
         Ok(
             json!({"run_id": run_id, "session_id": run.session_id, "control_status": run.status,
             "last_seq": run.last_seq, "diagnostic": diagnostic,
+            "snapshot":self.run_store.run_snapshot(run_id).map_err(|e|(INTERNAL_ERROR,e.to_string()))?,
             "jsonl_matching_assistant": matching_assistant,
             "incomplete_tool_receipts": incomplete,
             "jsonl_is_authoritative": false,
@@ -2818,6 +3416,22 @@ impl DaemonState {
                 break;
             }
         }
+        for run in &owned {
+            if let Ok(owner) = self.run_store.run_owner(run) {
+                if let Ok(resources) = self.run_store.list_resources(
+                    &owner.session_lifetime_id,
+                    agent_core::ResourceId(0),
+                    100,
+                ) {
+                    for resource in resources.into_iter().filter(|r| {
+                        &r.owner.run_id == run
+                            && matches!(r.state.as_str(), "starting" | "running" | "stopping")
+                    }) {
+                        let _ = self.stop_resource(&resource.owner, resource.id).await;
+                    }
+                }
+            }
+        }
         for (child_run_id, child_session_id) in targets {
             let _ = self
                 .cancel_one(CancelParams {
@@ -2831,7 +3445,7 @@ impl DaemonState {
     }
 
     async fn cancel_one(&self, params: CancelParams) -> Result<Value, (i64, String)> {
-        let _guard = self.control_lock.lock().await;
+        let _guard = self.session_supervisor.control_lock.lock().await;
         let mut run = if let Some(run_id) = params.run_id {
             let session_id = params
                 .session_id
@@ -2868,14 +3482,14 @@ impl DaemonState {
                     session_id: run.session_id.0.clone(),
                     request_id: run.request_id.clone(),
                 };
-                if let Some(active) = self.active.lock().await.get_mut(&key) {
+                if let Some(active) = self.run_coordinator.active.lock().await.get_mut(&key) {
                     active.publish(ActiveRequestUpdate::Terminal(Err((
                         REQUEST_CANCELLED,
                         "请求已取消".into(),
                     ))));
                     active.cancellation.cancel();
                 }
-                self.queue_notify.notify_waiters();
+                self.run_coordinator.queue_notify.notify_waiters();
             }
             if removed {
                 return Ok(json!({"cancelled": true, "run_id": run.run_id, "status": "queued"}));
@@ -2897,6 +3511,7 @@ impl DaemonState {
             request_id: run.request_id.clone(),
         };
         let token = self
+            .run_coordinator
             .active
             .lock()
             .await
@@ -3189,7 +3804,7 @@ fn request_id_label(request_id: &RequestId) -> String {
 }
 
 fn send_result(
-    frames: &mpsc::UnboundedSender<ServerFrame>,
+    frames: &super::frames::FrameSender,
     id: RequestId,
     result: Result<Value, (i64, String)>,
 ) {

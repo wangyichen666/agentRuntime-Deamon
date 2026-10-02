@@ -10,8 +10,6 @@ mod route;
 pub(crate) mod wire_tests;
 
 use std::env;
-use std::fmt;
-use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 
@@ -20,17 +18,16 @@ use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use tokio::sync::mpsc;
 
 pub use anthropic::AnthropicProvider;
 pub use attempt::{AttemptStatus, ProviderAttempt, ProviderUsage};
 pub use circuit::{CircuitBreaker, CircuitState};
-pub use error::{ProviderDiagnostic, ProviderError, ProviderErrorKind, TimeoutPhase};
+pub use error::{ProviderError, ProviderErrorKind, TimeoutPhase};
 pub use ollama::OllamaProvider;
 pub use openai::OpenAiProvider;
 pub use retry::{RetryDecision, RetryPolicy};
-pub use route::{ContextPolicySnapshot, FrozenRoute, RouteCandidate, RouteSnapshot, TimeoutPolicy};
+pub use route::{ContextPolicySnapshot, FrozenRoute, RouteSnapshot, TimeoutPolicy};
 
 async fn checked_response(mut response: reqwest::Response) -> Result<reqwest::Response> {
     if response.status().is_success() {
@@ -63,126 +60,7 @@ fn stream_transport_error(error: reqwest::Error) -> ProviderError {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum Role {
-    System,
-    User,
-    Assistant,
-    Tool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct Message {
-    pub role: Role,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tool_calls: Vec<ToolCall>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub image_urls: Vec<String>,
-}
-
-impl Message {
-    pub fn text(role: Role, content: impl Into<String>) -> Self {
-        Self {
-            role,
-            content: Some(content.into()),
-            thinking: None,
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            name: None,
-            image_urls: Vec::new(),
-        }
-    }
-
-    pub fn assistant_tool_calls(calls: Vec<ToolCall>) -> Self {
-        Self {
-            role: Role::Assistant,
-            content: None,
-            thinking: None,
-            tool_calls: calls,
-            tool_call_id: None,
-            name: None,
-            image_urls: Vec::new(),
-        }
-    }
-
-    pub fn tool_result(call: &ToolCall, content: impl Into<String>) -> Self {
-        Self {
-            role: Role::Tool,
-            content: Some(content.into()),
-            thinking: None,
-            tool_calls: Vec::new(),
-            tool_call_id: Some(call.id.clone()),
-            name: Some(call.name.clone()),
-            image_urls: Vec::new(),
-        }
-    }
-
-    pub fn user_with_images(content: impl Into<String>, image_urls: Vec<String>) -> Self {
-        Self {
-            role: Role::User,
-            content: Some(content.into()),
-            thinking: None,
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            name: None,
-            image_urls,
-        }
-    }
-
-    pub fn assistant_with_thinking(content: impl Into<String>, thinking: Option<String>) -> Self {
-        Self {
-            role: Role::Assistant,
-            content: Some(content.into()),
-            thinking,
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            name: None,
-            image_urls: Vec::new(),
-        }
-    }
-
-    pub fn assistant_tool_calls_with_thinking(
-        calls: Vec<ToolCall>,
-        thinking: Option<String>,
-    ) -> Self {
-        if thinking.is_none() {
-            return Self::assistant_tool_calls(calls);
-        }
-        Self {
-            role: Role::Assistant,
-            content: None,
-            thinking,
-            tool_calls: calls,
-            tool_call_id: None,
-            name: None,
-            image_urls: Vec::new(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct ToolCall {
-    /// Agent 内部 execution identity。provider 出站前必须还原 wire id，禁止原样发送。
-    pub id: String,
-    pub name: String,
-    pub arguments: Value,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct ToolSpec {
-    pub name: String,
-    pub description: String,
-    pub parameters: Value,
-}
+pub use agent_core::{Message, Role, ToolCall, ToolSpec};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Response {
@@ -191,17 +69,13 @@ pub enum Response {
     ToolAssemblyFailed(ToolCallStreamError),
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, Hash, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "kebab-case")]
-pub enum ApiType {
-    OpenaiChat,
-    AnthropicMessages,
-    Ollama,
-}
+pub use agent_core::ApiType;
+#[cfg(test)]
+pub use agent_core::RouteCandidate;
 
-/// 一个可持久化的模型连接配置。API key 只在本地配置文件和进程内保存，
+/// 一个可持久化的模型连接配置。api_key 在配置中保存 env:/keychain: 引用，
 /// 对外展示时应使用 `config::ProfileSummary`，不要把密钥序列化返回给 Web。
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ProviderProfile {
     #[serde(default)]
     pub id: String,
@@ -215,10 +89,21 @@ pub struct ProviderProfile {
     pub model: String,
 }
 
+impl std::fmt::Debug for ProviderProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderProfile")
+            .field("id", &self.id)
+            .field("api_type", &self.api_type)
+            .field("model", &self.model)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[已隐藏]"))
+            .finish()
+    }
+}
+
 impl ProviderProfile {
     #[allow(dead_code)]
     pub fn from_env() -> Result<Self> {
-        let api_type = ApiType::from_env()?;
+        let api_type = api_type_from_env()?;
         let api_key = env::var("OPENAI_API_KEY")
             .ok()
             .filter(|value| !value.trim().is_empty());
@@ -258,8 +143,11 @@ impl ProviderProfile {
         if self.base_url.trim().is_empty() {
             bail!("服务地址不能为空");
         }
-        let url = reqwest::Url::parse(&self.base_url)
-            .with_context(|| format!("服务地址不是合法 URL：{}", self.base_url))?;
+        let url =
+            reqwest::Url::parse(&self.base_url).context("服务地址不是合法 URL，已隐藏正文")?;
+        if !url.username().is_empty() || url.password().is_some() || url.query().is_some() {
+            bail!("服务地址不得包含凭据或 query，请使用 secret 引用");
+        }
         if !matches!(url.scheme(), "http" | "https") {
             bail!("服务地址必须使用 http:// 或 https://");
         }
@@ -349,7 +237,7 @@ impl ProviderManager {
             snapshot: RouteSnapshot {
                 candidates: candidates
                     .iter()
-                    .map(|item| RouteCandidate::from_profile(&item.profile))
+                    .map(|item| route::candidate_from_profile(&item.profile))
                     .collect(),
                 retry_policy: RetryPolicy::default(),
                 timeout_policy: TimeoutPolicy::default(),
@@ -399,40 +287,11 @@ impl Provider for ProviderManager {
     }
 }
 
-impl ApiType {
-    pub fn from_env() -> Result<Self> {
-        match env::var("API_TYPE") {
-            Ok(value) => value.parse(),
-            Err(env::VarError::NotPresent) => Ok(Self::OpenaiChat),
-            Err(error) => Err(error).context("读取环境变量 API_TYPE 失败"),
-        }
-    }
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::OpenaiChat => "openai-chat",
-            Self::AnthropicMessages => "anthropic-messages",
-            Self::Ollama => "ollama",
-        }
-    }
-}
-
-impl fmt::Display for ApiType {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-impl FromStr for ApiType {
-    type Err = anyhow::Error;
-
-    fn from_str(value: &str) -> Result<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "openai-chat" => Ok(Self::OpenaiChat),
-            "anthropic-messages" => Ok(Self::AnthropicMessages),
-            "ollama" => Ok(Self::Ollama),
-            _ => bail!("API_TYPE 必须是 openai-chat、anthropic-messages 或 ollama"),
-        }
+pub fn api_type_from_env() -> Result<ApiType> {
+    match env::var("API_TYPE") {
+        Ok(value) => Ok(value.parse()?),
+        Err(env::VarError::NotPresent) => Ok(ApiType::OpenaiChat),
+        Err(error) => Err(error).context("读取环境变量 API_TYPE 失败"),
     }
 }
 
@@ -598,7 +457,8 @@ pub trait Provider: Send + Sync {
         events: mpsc::UnboundedSender<ProviderEvent>,
     ) -> Result<()> {
         let response = self.chat(messages, tools).await?;
-        emit_legacy_response(response, self.api_type(), &events)
+        emit_legacy_response(response, self.api_type(), &events)?;
+        send_event(&events, ProviderEvent::ProtocolDone)
     }
 }
 
@@ -666,12 +526,22 @@ pub fn build_provider_from_profile(profile: &ProviderProfile) -> Result<Box<dyn 
     profile.validate()?;
     match profile.api_type {
         ApiType::OpenaiChat => Ok(Box::new(OpenAiProvider::new(
-            profile.api_key.clone().unwrap_or_default(),
+            profile
+                .api_key
+                .as_deref()
+                .map(crate::secrets::resolve)
+                .transpose()?
+                .unwrap_or_default(),
             profile.base_url.clone(),
             profile.model.clone(),
         ))),
         ApiType::AnthropicMessages => Ok(Box::new(AnthropicProvider::new(
-            profile.api_key.clone().unwrap_or_default(),
+            profile
+                .api_key
+                .as_deref()
+                .map(crate::secrets::resolve)
+                .transpose()?
+                .unwrap_or_default(),
             profile.base_url.clone(),
             profile.model.clone(),
         ))),

@@ -111,6 +111,29 @@ impl Tool for ReadFileTool {
         true
     }
 
+    fn descriptor(&self, args: &Value) -> Result<agent_core::ToolDescriptor> {
+        let path = args
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("缺少 path"))?;
+        let path = self.safety.resolve_path(std::path::Path::new(path))?;
+        let mut descriptor = agent_core::ToolDescriptor::read();
+        descriptor.effect = agent_core::ToolEffect::Read;
+        descriptor.replay = agent_core::ReplayPolicy::Safe;
+        descriptor.approval_required = false;
+        descriptor.resources.push(agent_core::ResourceAccess {
+            key: format!("file:{}", path.display()),
+            mode: agent_core::AccessMode::Read,
+        });
+        Ok(descriptor)
+    }
+    async fn preflight(&self, args: &Value) -> Result<()> {
+        let args: ReadArgs = serde_json::from_value(args.clone())?;
+        self.safety
+            .authorize_file(&args.path, PathIntent::Read)
+            .await?;
+        Ok(())
+    }
     async fn execute(&self, args: Value) -> Result<String> {
         self.read(args)
             .await

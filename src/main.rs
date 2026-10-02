@@ -1,3 +1,4 @@
+mod bootstrap;
 mod client;
 mod config;
 mod context;
@@ -5,11 +6,14 @@ mod cron;
 mod daemon;
 mod entry;
 mod loop_engine;
+mod maintenance;
 mod mcp;
+mod mcp_http;
 mod memory;
 mod plan;
 mod provider;
 mod safety;
+mod secrets;
 mod session;
 mod skills;
 mod slash;
@@ -30,7 +34,6 @@ use entry::editor::run_acp_server;
 use entry::serve::run_http_server_optional;
 use entry::tui::run_tui;
 use serde_json::json;
-use session::SessionStore;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -66,10 +69,15 @@ enum Command {
     Daemon,
     #[command(about = "查看当前工作区 daemon 状态")]
     Status,
+    #[command(about = "读取 daemon 的存储、恢复与凭据来源诊断")]
+    Doctor,
     #[command(about = "优雅停止当前工作区 daemon")]
     Stop,
     #[command(about = "列出当前工作区会话")]
-    Sessions,
+    Sessions {
+        #[arg(long, help = "通过离线 maintenance 读取旧会话清单")]
+        offline: bool,
+    },
     #[command(about = "查看当前工作区 daemon 日志")]
     Logs {
         #[arg(long, default_value_t = 100, help = "显示最近多少行")]
@@ -107,8 +115,18 @@ async fn main() -> Result<()> {
         Command::Editor => run_editor_command(&workspace).await,
         Command::Daemon => run_daemon_command(&workspace).await,
         Command::Status => run_status_command(&workspace).await,
+        Command::Doctor => {
+            let client = bootstrap::connect_workspace(&workspace).await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &request_result(&client, "runtime.doctor", json!({})).await?
+                )?
+            );
+            Ok(())
+        }
         Command::Stop => run_stop_command(&workspace).await,
-        Command::Sessions => run_sessions_command(&workspace).await,
+        Command::Sessions { offline } => run_sessions_command(&workspace, offline).await,
         Command::Logs {
             lines,
             session,
@@ -229,20 +247,15 @@ async fn run_stop_command(workspace: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn run_sessions_command(workspace: &Path) -> Result<()> {
-    let paths = RuntimePaths::for_workspace(workspace)?;
-    if matches!(paths.status().await, DaemonStatus::Ready { .. }) {
-        let client = client::DaemonClient::connect_unix(&paths.socket).await?;
-        return print_sessions(&client).await;
+async fn run_sessions_command(workspace: &Path, offline: bool) -> Result<()> {
+    if offline {
+        let sessions = maintenance::legacy_session_listing(workspace).await?;
+        println!("离线 maintenance：以下为旧格式会话快照：");
+        print_session_list(&sessions);
+        return Ok(());
     }
-    let store = SessionStore::from_env(workspace);
-    let sessions = store
-        .list_sessions()
-        .await
-        .context("读取本地会话清单失败")?;
-    println!("daemon 未运行，以下为本地会话快照：");
-    print_session_list(&sessions);
-    Ok(())
+    let client = bootstrap::connect_workspace(workspace).await?;
+    print_sessions(&client).await
 }
 
 async fn run_logs_command(

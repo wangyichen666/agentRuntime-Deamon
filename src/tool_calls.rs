@@ -5,10 +5,26 @@ use crate::provider::{
     ToolCallStreamError, ToolSpec,
 };
 
+#[cfg(test)]
 pub async fn collect_provider_response(
     provider: &dyn Provider,
     messages: &[Message],
     tools: &[ToolSpec],
+) -> anyhow::Result<Response> {
+    collect_response(provider, messages, tools, false).await
+}
+pub async fn collect_complete_provider_response(
+    provider: &dyn Provider,
+    messages: &[Message],
+    tools: &[ToolSpec],
+) -> anyhow::Result<Response> {
+    collect_response(provider, messages, tools, true).await
+}
+async fn collect_response(
+    provider: &dyn Provider,
+    messages: &[Message],
+    tools: &[ToolSpec],
+    require_complete: bool,
 ) -> anyhow::Result<Response> {
     let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let request = provider.chat_stream(messages, tools, events);
@@ -30,6 +46,9 @@ pub async fn collect_provider_response(
     while let Ok(event) = receiver.try_recv() {
         assembler.accept(event);
     }
+    if require_complete && (!assembler.protocol_done || assembler.output_truncated) {
+        anyhow::bail!("摘要响应未完整结束或达到输出上限，拒绝安装");
+    }
     Ok(assembler.finish())
 }
 
@@ -40,6 +59,7 @@ pub struct ToolCallAssembler {
     order: Vec<ExecutionIdentity>,
     failure: Option<ToolCallStreamError>,
     output_truncated: bool,
+    protocol_done: bool,
 }
 
 struct PendingCall {
@@ -59,9 +79,11 @@ impl ToolCallAssembler {
             };
         }
         match event {
-            ProviderEvent::ResponseStarted
-            | ProviderEvent::ProtocolDone
-            | ProviderEvent::Usage(_) => None,
+            ProviderEvent::ResponseStarted | ProviderEvent::Usage(_) => None,
+            ProviderEvent::ProtocolDone => {
+                self.protocol_done = true;
+                None
+            }
             ProviderEvent::TextDelta(delta) => {
                 self.text.push_str(&delta);
                 Some(delta)

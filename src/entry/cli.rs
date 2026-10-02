@@ -5,11 +5,13 @@ use std::io::Write;
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
-use crate::client::{DaemonClient, RpcStream};
-use crate::daemon::protocol::{EventKind, RequestId, ServerFrame};
 use crate::entry::recovery;
-use crate::provider::Role;
 use crate::slash::SlashResponse;
+use agent_core::Role;
+use agent_daemon_client::DaemonClient;
+#[cfg(test)]
+use agent_daemon_client::RpcStream;
+use agent_daemon_protocol::{EventKind, RequestId, ServerFrame};
 
 #[cfg(test)]
 async fn recover_connection_with<F>(client: &DaemonClient, mut decide: F) -> Result<()>
@@ -186,7 +188,7 @@ pub async fn print_sessions(client: &DaemonClient) -> Result<()> {
     Ok(())
 }
 
-pub fn print_session_list(sessions: &[crate::session::SessionInfo]) {
+pub fn print_session_list(sessions: &[agent_core::SessionInfo]) {
     if sessions.is_empty() {
         println!("暂无会话记录。");
         return;
@@ -304,20 +306,10 @@ async fn respond_to_approval(client: &DaemonClient, data: &Value) -> Result<()> 
 }
 
 pub async fn request_result(client: &DaemonClient, method: &str, params: Value) -> Result<Value> {
-    let stream = client.request(method, params).await?;
-    require_result(stream).await
-}
-
-async fn require_result(mut stream: RpcStream) -> Result<Value> {
-    while let Some(frame) = stream.next().await {
-        if let ServerFrame::Response(response) = frame {
-            if let Some(error) = response.error {
-                bail!("daemon RPC {}: {}", error.code, error.message);
-            }
-            return response.result.context("daemon 响应缺少 result");
-        }
-    }
-    bail!("daemon 在返回响应前断开")
+    client
+        .request_result(method, params)
+        .await
+        .map_err(Into::into)
 }
 
 fn ask_approval(prompt: &str) -> Result<bool> {
@@ -427,7 +419,6 @@ mod tests {
     use crate::context::{ContextConfig, ContextManager};
     use crate::daemon::DaemonState;
     use crate::daemon::approval::ApprovalBroker;
-    use crate::daemon::protocol::{EventKind, RequestId};
     use crate::daemon::server::InMemoryServer;
     use crate::loop_engine::LoopEngine;
     use crate::plan::PlanStore;
@@ -435,6 +426,7 @@ mod tests {
     use crate::safety::Approval;
     use crate::session::SessionStore;
     use crate::tools::{Tool, ToolRegistry};
+    use agent_daemon_protocol::{EventKind, RequestId};
 
     static NEXT_TEST: AtomicUsize = AtomicUsize::new(0);
 

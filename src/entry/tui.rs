@@ -15,13 +15,13 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::text::Line;
 use serde_json::json;
 
-use crate::client::{DaemonClient, RpcStream};
-use crate::daemon::approval::PendingApprovalInfo;
-use crate::daemon::protocol::{EventKind, RequestId, ServerFrame};
 use crate::entry::recovery;
-use crate::provider::{Message, Role};
-use crate::session::SessionInfo;
 use crate::slash::{SlashAction, SlashCommand, SlashParse, SlashRegistry, SlashResponse};
+use agent_core::PendingApprovalInfo;
+use agent_core::SessionInfo;
+use agent_core::{Message, Role};
+use agent_daemon_client::{DaemonClient, RpcStream};
+use agent_daemon_protocol::{EventKind, RequestId, ServerFrame};
 
 type TuiTerminal = Terminal<CrosstermBackend<Stdout>>;
 
@@ -1239,13 +1239,13 @@ mod tests {
     use crate::context::{ContextConfig, ContextManager};
     use crate::daemon::DaemonState;
     use crate::daemon::approval::ApprovalBroker;
-    use crate::daemon::protocol::{EventFrame, JsonRpcResponse};
     use crate::daemon::server::InMemoryServer;
     use crate::loop_engine::LoopEngine;
     use crate::plan::PlanStore;
     use crate::provider::{Provider, Response, ToolSpec};
     use crate::session::SessionStore;
     use crate::tools::ToolRegistry;
+    use agent_daemon_protocol::{EventFrame, JsonRpcResponse};
 
     static NEXT_TEST: AtomicUsize = AtomicUsize::new(0);
 
@@ -1299,7 +1299,7 @@ mod tests {
         state.complete_selected_slash();
         assert_eq!(state.input.text(), "/status");
 
-        state.input.replace("/do");
+        state.input.replace("/dog");
         state.reset_slash_selection();
         assert_eq!(state.slash_suggestions().len(), 1);
         state.complete_selected_slash();

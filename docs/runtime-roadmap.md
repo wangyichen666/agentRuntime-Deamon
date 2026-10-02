@@ -1,6 +1,10 @@
 # 本地 Agent Runtime 路线图
 
-更新日期：2026-09-26。本文件只记录已实现的行为与待办，不把下一阶段设计当作现有保证。
+更新日期：2026-10-02。本文件只记录已实现的行为与待办，不把下一阶段设计当作现有保证。
+
+## 当前重构顺序：Wave 0–7
+
+Wave 0–7 主链已实现并通过本地门禁，当前 schema v12。实际 owner 分为 daemon SessionSupervisor/RunCoordinator、SQLite repository、无会话私有状态的 ContextEngine 与作用域 MemoryEngine；Native/Docker exec 和后台 Native resources 共用 exact owner。旧 JSONL 只受控导入一次，在线不双写。迁移、故障与三入口重启证据见 [实施记录](./changes/runtime-architecture.md)，状态合同见 [ADR](./adr/0001-runtime-state-ownership.md)。下文 P 阶段保留为旧实现历史，其中 JSONL owner 和未实现项以本段及最新 known-issues 为准。
 
 ## 阶段与状态
 
@@ -45,12 +49,12 @@ P5 保持本地优先的边界：尚无向活动 child 发送新消息或 termin
 
 ## 事实所有权
 
-- daemon 的 `RunStore`（`src/storage/`）拥有 run/turn 状态、队列位置、工具回执、事件顺序、interaction revision、取消和终态。SQLite 位于工作区 `.my-agent/runtime.sqlite3`，WAL 启用。schema migration 只前进，不删除旧数据。
+- daemon 的 `RunStore`（`crates/storage/`）拥有 run/turn 状态、队列位置、工具回执、事件顺序、interaction revision、取消和终态。SQLite 位于工作区 `.my-agent/runtime.sqlite3`，WAL 启用。schema migration 只前进，不删除旧数据。
 - `SessionStore` 继续写 JSONL 对话与 trace，供旧客户端、审计和导出使用。旧 JSONL 不迁移、不删除。SQLite 不会把旧 JSONL 自动重解释为已确认 run。
 - `ActiveRequest` 的 broadcast 只降低活动订阅延迟；`agent.subscribe` 先读 SQLite 事件，再接内存通知，并按 seq 去重。内存 `ApprovalBroker` 只唤醒活的执行体，SQLite interaction 才是控制事实。`run.read`、`run.events`、`run.tools` 可在 daemon 重启后读取。
 - Provider、工具、上下文继续属于 `LoopEngine`；它在工具副作用前写回执，完成后再发送工具事件。安全决策属于 `SafetyPolicy` 与工具准入。TUI 的队列数来自 `queue.list`，入口只映射协议与展示，不存在第二个权威队列。
 
-依赖方向：`entry → daemon/control → loop_engine → provider/tools/context`；`daemon → storage`；`tools → safety`。`storage` 只依赖协议中的兼容 `RequestId`，不依赖入口。未来稳定后再考虑拆 crate。
+当前已落实依赖方向：`entry → daemon-client → daemon-protocol → core`；`daemon → storage ports`；`loop_engine → storage ports/provider/tools/context`；`storage → core`；`tools → safety`。daemon/runtime/context 等剩余物理提取按后续 wave 推进。
 
 ## 本轮状态与协议
 

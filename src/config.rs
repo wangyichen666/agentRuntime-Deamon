@@ -31,6 +31,7 @@ pub struct ProfileSummary {
     pub base_url: String,
     pub model: String,
     pub has_api_key: bool,
+    pub secret_source: String,
 }
 
 impl ProfileSummary {
@@ -45,6 +46,19 @@ impl ProfileSummary {
             api_type: profile.api_type,
             base_url: profile.base_url.clone(),
             model: profile.model.clone(),
+            secret_source: profile
+                .api_key
+                .as_deref()
+                .map_or("none", |key| {
+                    if key.starts_with("env:") {
+                        "environment"
+                    } else if key.starts_with("keychain:") {
+                        "keychain"
+                    } else {
+                        "legacy_plaintext"
+                    }
+                })
+                .into(),
             has_api_key: profile
                 .api_key
                 .as_deref()
@@ -56,6 +70,7 @@ impl ProfileSummary {
 #[derive(Clone, Debug)]
 pub struct ConfigStore {
     path: PathBuf,
+    secrets: std::sync::Arc<dyn crate::secrets::SecretStore>,
 }
 
 impl Default for ConfigStore {
@@ -66,7 +81,10 @@ impl Default for ConfigStore {
 
 impl ConfigStore {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            secrets: std::sync::Arc::new(crate::secrets::SystemSecretStore),
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -80,11 +98,60 @@ impl ConfigStore {
         let bytes = fs::read(&self.path).map_err(|error| {
             anyhow::anyhow!("读取配置文件失败 {}：{error}", self.path.display())
         })?;
-        serde_json::from_slice(&bytes)
-            .map_err(|error| anyhow::anyhow!("解析配置文件失败 {}：{error}", self.path.display()))
+        let config: ConfigFile = serde_json::from_slice(&bytes).map_err(|error| {
+            anyhow::anyhow!("解析配置文件失败 {}：{error}", self.path.display())
+        })?;
+        if config.profiles.iter().any(|p| {
+            p.api_key
+                .as_deref()
+                .is_some_and(|k| !crate::secrets::is_reference(k))
+        }) {
+            match self.secure_config(&config) {
+                Ok(migrated) => {
+                    match self.save(&migrated) {
+                        Ok(()) => return Ok(migrated),
+                        Err(_) => {
+                            tracing::warn!("secret 已安全读回，但配置发布失败；保留旧配置读取能力")
+                        }
+                    };
+                }
+                Err(_) => tracing::warn!(
+                    "旧明文凭据迁移未通过 secret 写入/读回；原配置保留，建议配置 env 引用"
+                ),
+            }
+        }
+        Ok(config)
     }
 
+    fn secure_config(&self, config: &ConfigFile) -> Result<ConfigFile> {
+        use sha2::{Digest, Sha256};
+        let mut next = config.clone();
+        for profile in &mut next.profiles {
+            if let Some(value) = &profile.api_key {
+                if let Some(name) = value.strip_prefix("env:") {
+                    crate::secrets::environment_secret(name)?;
+                } else if let Some(account) = value.strip_prefix("keychain:") {
+                    self.secrets.get(account)?;
+                } else {
+                    let account = format!(
+                        "provider-{:x}",
+                        Sha256::digest(
+                            format!("{}:{}:{value}", self.path.display(), profile.id).as_bytes()
+                        )
+                    );
+                    self.secrets.put(&account, value)?;
+                    if self.secrets.get(&account)? != *value {
+                        bail!("secret 写入后的读回不一致；保留旧配置");
+                    }
+                    profile.api_key = Some(format!("keychain:{account}"));
+                }
+            }
+        }
+        Ok(next)
+    }
     pub fn save(&self, config: &ConfigFile) -> Result<()> {
+        let secured = self.secure_config(config)?;
+        let config = &secured;
         for profile in &config.profiles {
             profile.validate()?;
         }
@@ -107,14 +174,16 @@ impl ConfigStore {
                 anyhow::anyhow!("创建配置目录失败 {}：{error}", parent.display())
             })?;
         }
-        let temporary = self
-            .path
-            .with_extension(format!("tmp-{}", std::process::id()));
+        static NEXT_CONFIG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let temporary = self.path.with_extension(format!(
+            "tmp-{}-{}",
+            std::process::id(),
+            NEXT_CONFIG.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         let data = serde_json::to_vec_pretty(config)
             .map_err(|error| anyhow::anyhow!("序列化配置失败：{error}"))?;
         let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .write(true)
             .open(&temporary)
             .map_err(|error| {
@@ -133,8 +202,15 @@ impl ConfigStore {
                 |error| anyhow::anyhow!("设置配置权限失败 {}：{error}", temporary.display()),
             )?;
         }
+        if fs::read(&temporary)? != data {
+            bail!("配置临时文件读回不一致，保留旧配置");
+        }
         fs::rename(&temporary, &self.path)
-            .map_err(|error| anyhow::anyhow!("提交配置失败 {}：{error}", self.path.display()))
+            .map_err(|error| anyhow::anyhow!("提交配置失败 {}：{error}", self.path.display()))?;
+        if let Some(parent) = self.path.parent() {
+            fs::File::open(parent)?.sync_all()?;
+        }
+        Ok(())
     }
 
     pub fn active_profile(&self) -> Result<Option<ProviderProfile>> {
@@ -179,7 +255,7 @@ impl ConfigStore {
             config.active_profile = Some(profile_id);
         }
         self.save(&config)?;
-        Ok(config)
+        self.load()
     }
 
     pub fn activate(&self, id: &str) -> Result<ProviderProfile> {
@@ -257,7 +333,7 @@ fn normalize_profile_id(id: &str, name: &str, model: &str) -> String {
 
 pub fn check_environment() -> Vec<ConfigIssue> {
     let mut issues = Vec::new();
-    let api_type = match ApiType::from_env() {
+    let api_type = match crate::provider::api_type_from_env() {
         Ok(api_type) => Some(api_type),
         Err(error) => {
             issues.push(ConfigIssue {
@@ -432,7 +508,14 @@ mod tests {
         let saved = store
             .upsert(profile("deepseek", "deepseek-reasoner", None), true)
             .unwrap();
-        assert_eq!(saved.profiles[0].api_key.as_deref(), Some("secret"));
+        let reference = saved.profiles[0].api_key.as_deref().unwrap();
+        assert!(reference.starts_with("keychain:"));
+        assert_eq!(crate::secrets::resolve(reference).unwrap(), "secret");
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("\"secret\"")
+        );
         assert_eq!(
             store.active_profile().unwrap().unwrap().model,
             "deepseek-reasoner"
@@ -455,5 +538,42 @@ mod tests {
         ollama.api_type = ApiType::Ollama;
         ollama.base_url = "http://127.0.0.1:11434".to_owned();
         assert!(ollama.validate().is_ok());
+    }
+    #[derive(Debug)]
+    struct FailingSecrets;
+    impl crate::secrets::SecretStore for FailingSecrets {
+        fn put(&self, _: &str, _: &str) -> Result<()> {
+            bail!("故障注入")
+        }
+        fn get(&self, _: &str) -> Result<String> {
+            bail!("故障注入")
+        }
+    }
+    #[test]
+    fn migration_failure_preserves_exact_old_bytes_and_redacts_debug() {
+        let root = std::env::temp_dir().join(format!(
+            "secret-failure-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("config.json");
+        let config = ConfigFile {
+            profiles: vec![profile("remote", "model", Some("sensitive-value"))],
+            ..Default::default()
+        };
+        let bytes = serde_json::to_vec(&config).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let store = ConfigStore {
+            path: path.clone(),
+            secrets: std::sync::Arc::new(FailingSecrets),
+        };
+        assert_eq!(store.load().unwrap(), config);
+        assert!(store.save(&config).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+        assert!(!format!("{config:?}").contains("sensitive-value"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

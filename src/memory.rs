@@ -1,3 +1,4 @@
+use sha2::Digest;
 use std::collections::HashSet;
 use std::env;
 use std::path::{Path, PathBuf};
@@ -44,6 +45,27 @@ pub struct MemoryStore {
 }
 
 impl MemoryStore {
+    pub async fn migrate_legacy(&self, repository: &crate::storage::RunStore) -> Result<()> {
+        if !self.path.exists() {
+            return Ok(());
+        }
+        let bytes = tokio::fs::read(&self.path).await?;
+        let backup = self.path.with_extension("jsonl.pre-scoped-memory.backup");
+        if !backup.exists() {
+            let mut file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&backup)
+                .await?;
+            file.write_all(&bytes).await?;
+            file.sync_all().await?;
+            if tokio::fs::read(&backup).await? != bytes {
+                anyhow::bail!("legacy memory 备份读回不一致");
+            }
+        }
+        repository.import_legacy_memory(&self.path.to_string_lossy(), &bytes)?;
+        Ok(())
+    }
     pub fn from_env(workspace: &Path) -> Self {
         let configured = env::var_os("MEMORY_PATH").map(PathBuf::from);
         let path = match configured {
@@ -62,6 +84,50 @@ impl MemoryStore {
     }
 
     pub async fn save(&self, content: String, ttl_days: Option<u64>) -> Result<MemoryEntry> {
+        if let Some((repository, owner)) = crate::loop_engine::current_session_repository() {
+            let now = unix_time()?;
+            let expires_at = ttl_days.map(|days| now.saturating_add(days.saturating_mul(86400)));
+            let digest = format!("{:x}", sha2::Sha256::digest(content.as_bytes()));
+            let entry = agent_core::MemoryRecord {
+                id: format!(
+                    "manual:{}:{}:{}",
+                    owner.run_id.0,
+                    now,
+                    NEXT_MEMORY_ID.fetch_add(1, Ordering::Relaxed)
+                ),
+                layer: agent_core::MemoryLayer::Semantic,
+                scope: agent_core::MemoryScope::Session(owner.session_lifetime_id.clone()),
+                kind: agent_core::MemoryKind::Explicit,
+                content,
+                source: Some(owner),
+                source_message_ids: vec![],
+                event_time: now,
+                created_at: now,
+                updated_at: now,
+                expires_at,
+                confidence: 100,
+                confirmed_by_user: false,
+                content_digest: digest,
+                revision: 0,
+            };
+            let saved = repository.store_memory(
+                entry
+                    .source
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("缺少 memory owner"))?,
+                &entry,
+            )?;
+            return Ok(MemoryEntry {
+                id: saved.id,
+                content: saved.content,
+                created_at: saved.created_at,
+                expires_at: saved.expires_at,
+                manual: true,
+            });
+        }
+        if !cfg!(test) {
+            anyhow::bail!("memory 写入要求 daemon exact owner");
+        }
         let _guard = self.write_lock.lock().await;
         let now = unix_time()?;
         let expires_at = ttl_days.map(|days: u64| {
@@ -100,6 +166,25 @@ impl MemoryStore {
     }
 
     pub async fn recall(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
+        if let Some((repository, owner)) = crate::loop_engine::current_session_repository() {
+            let visibility = visibility_for(&*repository, &owner)?;
+            let candidates = repository.memory_candidates(&visibility)?;
+            return Ok(
+                agent_memory::rank(candidates, &visibility, query, limit, unix_time()?)
+                    .into_iter()
+                    .map(|e| MemoryEntry {
+                        id: e.id,
+                        content: e.content,
+                        created_at: e.created_at,
+                        expires_at: e.expires_at,
+                        manual: e.kind == agent_core::MemoryKind::Explicit,
+                    })
+                    .collect(),
+            );
+        }
+        if !cfg!(test) {
+            anyhow::bail!("memory 召回要求 daemon exact owner");
+        }
         let entries = self.load().await?;
         let now = unix_time()?;
         let query_terms = terms(query);
@@ -155,6 +240,34 @@ impl MemoryStore {
             })
             .collect()
     }
+}
+
+pub(crate) fn visibility_for(
+    repository: &dyn crate::storage::ControlRepository,
+    owner: &agent_core::ExactOwner,
+) -> Result<agent_core::MemoryVisibility> {
+    let project = repository
+        .run_snapshot(&owner.run_id)?
+        .map_or_else(|| "".into(), |s| s.cwd);
+    Ok(agent_core::MemoryVisibility {
+        lifetime: owner.session_lifetime_id.clone(),
+        project,
+        allow_confirmed_global: true,
+    })
+}
+
+impl agent_memory::MemoryEngine for ScopedMemoryReader {
+    fn candidates(
+        &self,
+        visibility: &agent_core::MemoryVisibility,
+    ) -> std::result::Result<Vec<agent_core::MemoryRecord>, agent_memory::MemoryError> {
+        self.repository
+            .memory_candidates(visibility)
+            .map_err(|e| agent_memory::MemoryError(e.to_string()))
+    }
+}
+pub(crate) struct ScopedMemoryReader {
+    pub repository: Arc<dyn crate::storage::ControlRepository>,
 }
 
 pub struct RememberTool {

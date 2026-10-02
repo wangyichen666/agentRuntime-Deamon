@@ -1,3 +1,4 @@
+use crate::storage::MaintenanceRepository;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -21,7 +22,7 @@ use crate::provider::{Provider, ProviderManager, ProviderProfile};
 use crate::safety::SafetyPolicy;
 use crate::session::SessionStore;
 use crate::skills::SkillLibrary;
-use crate::storage::RunStore;
+use crate::storage::{RunStore, SessionQuery, TranscriptStore};
 use crate::tools::{EditFileTool, ExecTool, ReadFileTool, ToolRegistry, WriteFileTool};
 
 pub async fn build_daemon_state(workspace: &Path) -> Result<Arc<DaemonState>> {
@@ -60,8 +61,27 @@ pub async fn build_daemon_state(workspace: &Path) -> Result<Arc<DaemonState>> {
     tools.register(RememberTool::new(memory.clone()));
     tools.register(RecallMemoryTool::new(memory.clone()));
     let delegation_daemon = Arc::new(OnceLock::new());
+    tools.register(super::resources::BackgroundTool::new(
+        delegation_daemon.clone(),
+    ));
+    for name in [
+        "resource_list",
+        "resource_status",
+        "resource_logs",
+        "resource_wait",
+        "resource_stop",
+    ] {
+        tools.register(super::resources::ResourceTool::new(
+            name,
+            delegation_daemon.clone(),
+        ));
+    }
     let context_config = ContextConfig::from_env()?;
-    let plan = Arc::new(PlanStore::from_env(workspace).await?);
+    let run_store = Arc::new(RunStore::open(
+        &workspace.join(".my-agent/runtime.sqlite3"),
+    )?);
+    memory.migrate_legacy(&run_store).await?;
+    let plan = Arc::new(PlanStore::from_env(workspace, &*run_store).await?);
     tools.register(PlanTool::new(plan.clone()));
     tools.register(DelegationTool::new("sub_agent", delegation_daemon.clone()));
     tools.register(DelegationTool::new(
@@ -114,18 +134,40 @@ pub async fn build_daemon_state(workspace: &Path) -> Result<Arc<DaemonState>> {
         provider.clone(),
         workspace,
         context_config,
-        plan,
+        plan.clone(),
         skills.clone(),
     )?;
     let session = Arc::new(SessionStore::from_env(workspace));
-    let run_store = Arc::new(RunStore::open(
-        &workspace.join(".my-agent/runtime.sqlite3"),
-    )?);
     let recovered = run_store.recover()?;
+    let collected = run_store.gc_artifacts(std::time::Duration::from_secs(86400))?;
+    tracing::debug!(collected, "启动时回收未引用 artifact");
     if recovered > 0 {
         tracing::warn!(recovered, "将重启时未确认的 run 标为 unknown_after_restart");
     }
-    let history = session.load().await?;
+    for old in session.list_sessions().await? {
+        if run_store
+            .session_metadata(&agent_core::SessionKey(old.id.clone()))?
+            .is_some_and(|m| m.deleted || m.legacy_imported)
+        {
+            continue;
+        }
+        let legacy = session.open_known_session(&old.id)?;
+        let messages = legacy.load().await?;
+        run_store.import_legacy(&agent_core::SessionKey(old.id), &messages)?;
+    }
+    let history = if run_store
+        .session_metadata(&agent_core::SessionKey(session.current_id_sync()))?
+        .is_some_and(|m| m.legacy_imported)
+    {
+        Vec::new()
+    } else {
+        session.load().await?
+    };
+    plan.migrate_legacy(
+        &*run_store,
+        &agent_core::SessionKey(session.current_id_sync()),
+    )
+    .await?;
     let engine = Arc::new(LoopEngine::new(provider, tools, context, session.clone()));
     let state = Arc::new(
         DaemonState::new_with_services_and_log_path_and_safety_and_provider(
@@ -141,7 +183,7 @@ pub async fn build_daemon_state(workspace: &Path) -> Result<Arc<DaemonState>> {
             Some(provider_manager),
             config_store,
             run_store,
-        ),
+        )?,
     );
     let _ = delegation_daemon.set(Arc::downgrade(&state));
     for queued in state.run_store.recoverable_queued()? {
@@ -154,7 +196,7 @@ pub async fn build_daemon_state(workspace: &Path) -> Result<Arc<DaemonState>> {
         let owner = state.clone();
         let accepted = state
             .spawn_owned(async move {
-                let (frames, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+                let (frames, mut receiver) = super::frames::frame_channel();
                 let request = JsonRpcRequest::new(
                     queued.request_id,
                     "chat.send",

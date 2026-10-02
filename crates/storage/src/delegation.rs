@@ -75,7 +75,7 @@ impl RunStore {
         {
             return Err(RuntimeError::Protocol("子 Agent 参数或预算无效".into()));
         }
-        let mut connection = self.connection.lock().expect("SQLite mutex poisoned");
+        let mut connection = self.lock_connection()?;
         let transaction = connection.transaction()?;
         let parent = read_run_in(&transaction, &request.parent_run_id.0)?
             .ok_or_else(|| RuntimeError::Protocol("父 run 不存在".into()))?;
@@ -90,7 +90,9 @@ impl RunStore {
             )
             .optional()?;
         if let Some(child) = duplicate {
-            let record = read_delegation_in(&transaction, &child)?.expect("existing delegation");
+            let record = read_delegation_in(&transaction, &child)?.ok_or_else(|| {
+                RuntimeError::Internal("缺少持久记录：existing delegation".into())
+            })?;
             let existing_task: String = transaction.query_row(
                 "SELECT input FROM runs WHERE id=?1",
                 params![child],
@@ -179,6 +181,66 @@ impl RunStore {
                 params![child_run_id.0, route],
             )?;
         }
+        let parent_snapshot: Option<String> = transaction
+            .query_row(
+                "SELECT snapshot_json FROM run_snapshots WHERE run_id=?1",
+                params![request.parent_run_id.0],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(raw) = parent_snapshot {
+            let mut snapshot: agent_core::RunSnapshot =
+                serde_json::from_str(&raw).map_err(|e| RuntimeError::Protocol(e.to_string()))?;
+            if request
+                .tools
+                .iter()
+                .any(|name| !snapshot.tools.iter().any(|t| &t.name == name))
+            {
+                return Err(RuntimeError::Protocol(
+                    "child tool catalog 扩大父权限".into(),
+                ));
+            }
+            snapshot.tools.retain(|t| request.tools.contains(&t.name));
+            use sha2::{Digest, Sha256};
+            snapshot.tool_catalog_digest = format!(
+                "{:x}",
+                Sha256::digest(
+                    serde_json::to_vec(&snapshot.tools)
+                        .map_err(|e| RuntimeError::Protocol(e.to_string()))?
+                )
+            );
+            snapshot.context_token_budget = snapshot
+                .context_token_budget
+                .min(request.max_tokens as usize);
+            if let Some(policy) = &snapshot.context_policy_fingerprint {
+                let (budget, suffix) = policy
+                    .split_once(':')
+                    .ok_or_else(|| RuntimeError::Protocol("父 context policy 无效".into()))?;
+                let budget = budget
+                    .parse::<usize>()
+                    .map_err(|_| RuntimeError::Protocol("父 context budget 无效".into()))?;
+                snapshot.context_policy_fingerprint = Some(format!(
+                    "{}:{suffix}",
+                    budget.min(request.max_tokens as usize)
+                ));
+            }
+            snapshot.permission_mode = request.permission_mode.clone();
+            snapshot.cwd = request.cwd.clone();
+            snapshot.max_tool_calls = Some(
+                snapshot
+                    .max_tool_calls
+                    .unwrap_or(u64::MAX)
+                    .min(request.max_tool_calls as u64),
+            );
+            transaction.execute(
+                "INSERT INTO run_snapshots VALUES(?1,?2)",
+                params![
+                    child_run_id.0,
+                    serde_json::to_string(&snapshot)
+                        .map_err(|e| RuntimeError::Protocol(e.to_string()))?
+                ],
+            )?;
+        }
         insert_event(
             &transaction,
             &child_run_id,
@@ -208,7 +270,8 @@ impl RunStore {
             &json!({"child_session_id": request.child_session_id, "child_run_id": child_run_id,
                 "depth": depth, "status": "queued"}),
         )?;
-        let record = read_delegation_in(&transaction, &child_run_id.0)?.expect("new delegation");
+        let record = read_delegation_in(&transaction, &child_run_id.0)?
+            .ok_or_else(|| RuntimeError::Internal("缺少持久记录：new delegation".into()))?;
         transaction.commit()?;
         Ok(record)
     }
@@ -217,10 +280,7 @@ impl RunStore {
         &self,
         child_run_id: &RunId,
     ) -> Result<Option<DelegationRecord>, RuntimeError> {
-        read_delegation_in(
-            &self.connection.lock().expect("SQLite mutex poisoned"),
-            &child_run_id.0,
-        )
+        read_delegation_in(&*self.lock_connection()?, &child_run_id.0)
     }
 
     pub fn delegation_by_spawn_key(
@@ -228,7 +288,7 @@ impl RunStore {
         parent_run_id: &RunId,
         spawn_key: &str,
     ) -> Result<Option<DelegationRecord>, RuntimeError> {
-        let connection = self.connection.lock().expect("SQLite mutex poisoned");
+        let connection = self.lock_connection()?;
         let child: Option<String> = connection
             .query_row(
                 "SELECT child_run_id FROM delegations WHERE parent_run_id=?1 AND spawn_key=?2",
@@ -246,7 +306,7 @@ impl RunStore {
         &self,
         session_id: &str,
     ) -> Result<Option<DelegationRecord>, RuntimeError> {
-        let connection = self.connection.lock().expect("SQLite mutex poisoned");
+        let connection = self.lock_connection()?;
         let child: Option<String> = connection
             .query_row(
                 "SELECT child_run_id FROM delegations WHERE child_session_id=?1",
@@ -264,7 +324,7 @@ impl RunStore {
         &self,
         root_run_id: &RunId,
     ) -> Result<Vec<DelegationRecord>, RuntimeError> {
-        let connection = self.connection.lock().expect("SQLite mutex poisoned");
+        let connection = self.lock_connection()?;
         let mut statement = connection
             .prepare("SELECT child_run_id FROM delegations WHERE root_run_id=?1 ORDER BY id")?;
         let ids = statement
@@ -284,7 +344,7 @@ impl RunStore {
         owner: &str,
         revision: i64,
     ) -> Result<DelegationRecord, RuntimeError> {
-        let mut connection = self.connection.lock().expect("SQLite mutex poisoned");
+        let mut connection = self.lock_connection()?;
         let transaction = connection.transaction()?;
         let record = read_delegation_in(&transaction, &child_run_id.0)?
             .ok_or_else(|| RuntimeError::Protocol("子 Agent 不存在".into()))?;
@@ -325,7 +385,8 @@ impl RunStore {
             reservation_expires_at_ms=?3, revision=revision+1 WHERE child_run_id=?1",
             params![child_run_id.0, owner, now_ms() + 30_000],
         )?;
-        let result = read_delegation_in(&transaction, &child_run_id.0)?.expect("delegation");
+        let result = read_delegation_in(&transaction, &child_run_id.0)?
+            .ok_or_else(|| RuntimeError::Internal("缺少持久记录：delegation".into()))?;
         transaction.commit()?;
         Ok(result)
     }
@@ -355,7 +416,7 @@ impl RunStore {
         revision: i64,
         target: &str,
     ) -> Result<DelegationRecord, RuntimeError> {
-        let mut connection = self.connection.lock().expect("SQLite mutex poisoned");
+        let mut connection = self.lock_connection()?;
         let transaction = connection.transaction()?;
         let record = read_delegation_in(&transaction, &child_run_id.0)?
             .ok_or_else(|| RuntimeError::Protocol("子 Agent 不存在".into()))?;
@@ -383,7 +444,8 @@ impl RunStore {
             reservation_expires_at_ms=NULL,
             reservation_released_at_ms=CASE WHEN ?2='unconsumed' THEN ?3 ELSE reservation_released_at_ms END,
             revision=revision+1 WHERE child_run_id=?1", params![child_run_id.0, target, now_ms()])?;
-        let result = read_delegation_in(&transaction, &child_run_id.0)?.expect("delegation");
+        let result = read_delegation_in(&transaction, &child_run_id.0)?
+            .ok_or_else(|| RuntimeError::Internal("缺少持久记录：delegation".into()))?;
         transaction.commit()?;
         Ok(result)
     }
@@ -521,7 +583,8 @@ fn read_delegation_in(
         child_run_id: RunId(child_run_id.to_owned()),
         spawn_key,
         depth,
-        status: RunStatus::parse(&status)?,
+        status: RunStatus::parse(&status)
+            .map_err(|error| RuntimeError::Protocol(error.to_string()))?,
         created_at_ms: created,
         started_at_ms: started,
         finished_at_ms: finished,

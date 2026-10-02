@@ -20,13 +20,16 @@ use crate::tools::{DynamicToolSource, Tool};
 const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 const MCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct ServerConfig {
     name: String,
     command: String,
     args: Vec<String>,
     env: HashMap<String, String>,
     cwd: PathBuf,
+    url: Option<String>,
+    bearer_env: Option<String>,
+    allow_private: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -153,7 +156,9 @@ impl McpManager {
             std::mem::replace(&mut *clients, next_clients)
         };
         for client in previous {
-            client.shutdown().await;
+            if Arc::strong_count(&client) == 1 {
+                client.shutdown().await;
+            }
         }
     }
 
@@ -233,6 +238,14 @@ impl Tool for McpTool {
         self.input_schema.clone()
     }
 
+    async fn preflight(&self, args: &Value) -> Result<()> {
+        self.safety
+            .authorize_external_action(
+                &format!("{} / {}", self.server_name, self.remote_name),
+                args,
+            )
+            .await
+    }
     async fn execute(&self, arguments: Value) -> Result<String> {
         self.safety
             .authorize_external_action(
@@ -245,13 +258,46 @@ impl Tool for McpTool {
 }
 
 #[derive(Clone, Debug)]
-struct RemoteTool {
+pub(crate) struct RemoteTool {
     name: String,
     description: String,
-    input_schema: Value,
+    pub(crate) input_schema: Value,
 }
 
-struct McpClient {
+enum McpClient {
+    Stdio(Arc<StdioClient>),
+    Http(Arc<crate::mcp_http::HttpMcpClient>),
+}
+impl McpClient {
+    async fn connect(config: &ServerConfig) -> Result<(Arc<Self>, Vec<RemoteTool>)> {
+        if let Some(url) = &config.url {
+            let (client, tools) = crate::mcp_http::HttpMcpClient::connect(
+                url,
+                config.bearer_env.as_deref(),
+                config.allow_private,
+            )
+            .await?;
+            Ok((Arc::new(Self::Http(client)), tools))
+        } else {
+            let (client, tools) = StdioClient::connect(config).await?;
+            Ok((Arc::new(Self::Stdio(client)), tools))
+        }
+    }
+    async fn call_tool(&self, name: &str, args: Value) -> Result<String> {
+        match self {
+            Self::Stdio(client) => client.call_tool(name, args).await,
+            Self::Http(client) => client.call_tool(name, args).await,
+        }
+    }
+    async fn shutdown(&self) {
+        match self {
+            Self::Stdio(client) => client.shutdown().await,
+            Self::Http(client) => client.shutdown().await,
+        }
+    }
+}
+
+struct StdioClient {
     stdin: Mutex<ChildStdin>,
     child: Mutex<Child>,
     pending: Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>,
@@ -260,11 +306,17 @@ struct McpClient {
     stderr_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
-impl McpClient {
+impl StdioClient {
     async fn connect(config: &ServerConfig) -> Result<(Arc<Self>, Vec<RemoteTool>)> {
         let mut command = Command::new(&config.command);
         command
             .args(&config.args)
+            .env_clear()
+            .envs(
+                ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL"]
+                    .into_iter()
+                    .filter_map(|key| std::env::var_os(key).map(|value| (key, value))),
+            )
             .envs(&config.env)
             .current_dir(&config.cwd)
             .stdin(Stdio::piped())
@@ -298,18 +350,17 @@ impl McpClient {
             }
         }));
         *client.stderr_task.lock().await = Some(tokio::spawn(async move {
-            let mut stderr = BufReader::new(stderr);
-            let mut line = String::new();
-            loop {
-                line.clear();
-                match stderr.read_line(&mut line).await {
-                    Ok(0) => break,
-                    Ok(_) => warn!(message = %line.trim_end(), "MCP server stderr"),
-                    Err(error) => {
-                        warn!(%error, "读取 MCP server stderr 失败");
-                        break;
-                    }
+            let mut reader = stderr;
+            let mut buffer = [0u8; 4096];
+            let mut bytes = 0u64;
+            while let Ok(count) = reader.read(&mut buffer).await {
+                if count == 0 {
+                    break;
                 }
+                bytes = bytes.saturating_add(count as u64);
+            }
+            if bytes > 0 {
+                warn!(bytes, "MCP server stderr 已隐藏正文");
             }
         }));
 
@@ -347,7 +398,13 @@ impl McpClient {
     async fn request(&self, method: &str, params: Value) -> Result<Value> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (sender, receiver) = oneshot::channel();
-        self.pending.lock().await.insert(id, sender);
+        {
+            let mut pending = self.pending.lock().await;
+            if pending.len() >= 64 {
+                bail!("MCP pending 请求预算已满");
+            }
+            pending.insert(id, sender);
+        }
         if let Err(error) = self
             .write_message(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
             .await
@@ -355,9 +412,10 @@ impl McpClient {
             self.pending.lock().await.remove(&id);
             return Err(error);
         }
-        tokio::time::timeout(MCP_REQUEST_TIMEOUT, receiver)
-            .await
-            .with_context(|| format!("MCP 请求超时：{method}"))?
+        let response = tokio::time::timeout(MCP_REQUEST_TIMEOUT, receiver).await;
+        self.pending.lock().await.remove(&id);
+        response
+            .context("MCP 请求超时")?
             .context("MCP 响应通道提前关闭")?
             .map_err(anyhow::Error::msg)
     }
@@ -370,12 +428,16 @@ impl McpClient {
     async fn write_message(&self, message: &Value) -> Result<()> {
         let mut bytes = serde_json::to_vec(message).context("序列化 MCP JSON-RPC 失败")?;
         bytes.push(b'\n');
-        let mut stdin = self.stdin.lock().await;
-        stdin
-            .write_all(&bytes)
-            .await
-            .context("写入 MCP stdin 失败")?;
-        stdin.flush().await.context("刷新 MCP stdin 失败")
+        tokio::time::timeout(MCP_REQUEST_TIMEOUT, async {
+            let mut stdin = self.stdin.lock().await;
+            stdin
+                .write_all(&bytes)
+                .await
+                .context("写入 MCP stdin 失败")?;
+            stdin.flush().await.context("刷新 MCP stdin 失败")
+        })
+        .await
+        .context("MCP stdin 背压超时")?
     }
 
     async fn dispatch(&self, message: Value) {
@@ -385,14 +447,12 @@ impl McpClient {
         let Some(sender) = self.pending.lock().await.remove(&id) else {
             return;
         };
-        let result = if let Some(result) = message.get("result") {
+        let result = if message.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+            Err("MCP JSON-RPC envelope 非法".into())
+        } else if let Some(result) = message.get("result") {
             Ok(result.clone())
         } else {
-            let error = message
-                .get("error")
-                .cloned()
-                .unwrap_or_else(|| json!({"message": "缺少 result/error"}));
-            Err(error.to_string())
+            Err("MCP 返回错误或缺少可信回执，已隐藏上游正文".into())
         };
         let _ = sender.send(result);
     }
@@ -407,7 +467,8 @@ impl McpClient {
     async fn call_tool(&self, name: &str, arguments: Value) -> Result<String> {
         let result = self
             .request("tools/call", json!({"name": name, "arguments": arguments}))
-            .await?;
+            .await
+            .map_err(|_| agent_core::ToolOutcomeUnknown("MCP stdio 未取得可信回执".into()))?;
         let content = result
             .get("content")
             .and_then(Value::as_array)
@@ -454,7 +515,7 @@ impl McpClient {
 
 async fn reader_loop(
     stdout: tokio::process::ChildStdout,
-    client: std::sync::Weak<McpClient>,
+    client: std::sync::Weak<StdioClient>,
 ) -> Result<()> {
     let mut reader = BufReader::new(stdout);
     while let Some(frame) = read_frame(&mut reader).await? {
@@ -467,6 +528,36 @@ async fn reader_loop(
     Ok(())
 }
 
+async fn read_bounded_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    line: &mut String,
+    limit: usize,
+) -> Result<usize> {
+    let mut bytes = Vec::new();
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            break;
+        }
+        let end = available
+            .iter()
+            .position(|b| *b == b'\n')
+            .map_or(available.len(), |i| i + 1);
+        if bytes.len() + end > limit {
+            bail!("MCP frame/header 超出预算");
+        }
+        let finished = available[end - 1] == b'\n';
+        bytes.extend_from_slice(&available[..end]);
+        reader.consume(end);
+        if finished {
+            break;
+        }
+    }
+    let count = bytes.len();
+    line.push_str(std::str::from_utf8(&bytes).context("MCP frame 非 UTF-8")?);
+    Ok(count)
+}
+
 async fn read_frame<R>(reader: &mut R) -> Result<Option<Vec<u8>>>
 where
     R: AsyncBufRead + Unpin,
@@ -474,7 +565,7 @@ where
     let mut first = String::new();
     loop {
         first.clear();
-        if reader.read_line(&mut first).await? == 0 {
+        if read_bounded_line(reader, &mut first, 256 * 1024).await? == 0 {
             return Ok(None);
         }
         if !first.trim().is_empty() {
@@ -483,9 +574,12 @@ where
     }
     if let Some(length) = first.trim().strip_prefix("Content-Length:").map(str::trim) {
         let length = length.parse::<usize>().context("非法 MCP Content-Length")?;
+        if length > 256 * 1024 {
+            bail!("MCP Content-Length 超出预算");
+        }
         loop {
             let mut header = String::new();
-            if reader.read_line(&mut header).await? == 0 {
+            if read_bounded_line(reader, &mut header, 8192).await? == 0 {
                 bail!("MCP header 未完整结束");
             }
             if header.trim().is_empty() {
@@ -500,11 +594,14 @@ where
     }
 }
 
-fn parse_remote_tools(result: &Value) -> Result<Vec<RemoteTool>> {
+pub(crate) fn parse_remote_tools(result: &Value) -> Result<Vec<RemoteTool>> {
     let tools = result
         .get("tools")
         .and_then(Value::as_array)
         .context("tools/list 响应缺少 tools 数组")?;
+    if tools.len() > 128 {
+        bail!("MCP 工具 catalog 超过预算");
+    }
     tools
         .iter()
         .map(|tool| {
@@ -520,6 +617,17 @@ fn parse_remote_tools(result: &Value) -> Result<Vec<RemoteTool>> {
             if !input_schema.is_object() {
                 bail!("MCP tool {name} 的 inputSchema 必须是对象");
             }
+            if name.len() > 256
+                || serde_json::to_vec(&input_schema)?.len() > 64 * 1024
+                || tool
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .is_some_and(|d| d.len() > 8192)
+            {
+                bail!("MCP tool catalog 条目超出预算");
+            }
+            jsonschema::validator_for(&input_schema)
+                .map_err(|_| anyhow::anyhow!("MCP tool schema 无效"))?;
             Ok(RemoteTool {
                 name: name.to_owned(),
                 description: tool
@@ -553,12 +661,15 @@ async fn load_config(workspace: &Path) -> ConfigLoad {
             return ConfigLoad::FileError(format!("读取 {} 失败：{error}", path.display()));
         }
     };
-    let root: Value = match serde_json::from_slice(&bytes) {
+    let mut root: Value = match serde_json::from_slice(&bytes) {
         Ok(value) => value,
         Err(error) => {
             return ConfigLoad::FileError(format!("解析 {} 失败：{error}", path.display()));
         }
     };
+    if let Err(_error) = migrate_environment_secrets(&path, &mut root).await {
+        tracing::warn!("MCP secret 迁移未通过写入/读回，保留原配置");
+    }
     let Some(servers) = root.get("mcpServers").and_then(Value::as_object) else {
         return ConfigLoad::FileError("mcp.json 顶层必须包含对象 mcpServers".to_owned());
     };
@@ -578,16 +689,118 @@ async fn load_config(workspace: &Path) -> ConfigLoad {
     ConfigLoad::Servers { valid, invalid }
 }
 
+fn sensitive_environment(key: &str) -> bool {
+    let upper = key.to_ascii_uppercase();
+    [
+        "TOKEN",
+        "SECRET",
+        "PASSWORD",
+        "API_KEY",
+        "CREDENTIAL",
+        "AUTHORIZATION",
+    ]
+    .iter()
+    .any(|part| upper.contains(part))
+}
+async fn migrate_environment_secrets(path: &Path, root: &mut Value) -> Result<()> {
+    use crate::secrets::SecretStore;
+    use sha2::{Digest, Sha256};
+    let mut candidate = root.clone();
+    let mut changed = false;
+    if let Some(servers) = candidate
+        .get_mut("mcpServers")
+        .and_then(Value::as_object_mut)
+    {
+        for (server, config) in servers {
+            if let Some(env) = config.get_mut("env").and_then(Value::as_object_mut) {
+                for (key, value) in env {
+                    let Some(secret) = value.as_str() else {
+                        continue;
+                    };
+                    if !sensitive_environment(key)
+                        || crate::secrets::is_reference(secret)
+                        || secret.contains("${")
+                    {
+                        continue;
+                    }
+                    let account = format!(
+                        "mcp-{:x}",
+                        Sha256::digest(
+                            format!("{}:{server}:{key}:{secret}", path.display()).as_bytes()
+                        )
+                    );
+                    crate::secrets::SystemSecretStore.put(&account, secret)?;
+                    if crate::secrets::SystemSecretStore.get(&account)? != secret {
+                        bail!("MCP secret 读回不一致");
+                    }
+                    *value = Value::String(format!("keychain:{account}"));
+                    changed = true;
+                }
+            }
+        }
+    }
+    if changed {
+        let bytes = serde_json::to_vec_pretty(&candidate)?;
+        let temporary = path.with_file_name(format!(
+            ".mcp-secret-{}-{}.tmp",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        let result = (|| -> Result<()> {
+            use std::io::Write;
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&temporary)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            if std::fs::read(&temporary)? != bytes {
+                bail!("MCP 配置读回不一致");
+            }
+            std::fs::rename(&temporary, path)?;
+            std::fs::File::open(path.parent().context("MCP 配置缺少目录")?)?.sync_all()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        result?;
+        *root = candidate;
+    }
+    Ok(())
+}
+
 fn parse_server_config(name: &str, value: &Value, workspace: &Path) -> Result<ServerConfig> {
     let object = value.as_object().context("server 条目必须是对象")?;
-    let command = required_string(object, "command")?;
+    let url = object
+        .get("url")
+        .map(|v| v.as_str().map(str::to_owned).context("url 必须是字符串"))
+        .transpose()?;
+    let command = if url.is_some() {
+        String::new()
+    } else {
+        required_string(object, "command")?
+    };
     let args = optional_string_array(object, "args")?
         .into_iter()
         .map(|value| expand_placeholders(&value, workspace))
         .collect::<Result<Vec<_>>>()?;
     let env = optional_string_map(object, "env")?
         .into_iter()
-        .map(|(key, value)| Ok((key, expand_placeholders(&value, workspace)?)))
+        .map(|(key, value)| {
+            let resolved = if crate::secrets::is_reference(&value) {
+                crate::secrets::resolve(&value)?
+            } else {
+                expand_placeholders(&value, workspace)?
+            };
+            Ok((key, resolved))
+        })
         .collect::<Result<HashMap<_, _>>>()?;
     let cwd = object
         .get("cwd")
@@ -615,6 +828,19 @@ fn parse_server_config(name: &str, value: &Value, workspace: &Path) -> Result<Se
         args,
         env,
         cwd,
+        url,
+        bearer_env: object
+            .get("bearer_env")
+            .map(|v| {
+                v.as_str()
+                    .map(str::to_owned)
+                    .context("bearer_env 必须是环境变量名")
+            })
+            .transpose()?,
+        allow_private: object
+            .get("allow_private")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     })
 }
 
