@@ -104,6 +104,12 @@ impl DelegationTool {
             .map(|value| serde_json::from_value::<Vec<String>>(value.clone()))
             .transpose()
             .context("tools 必须是字符串数组")?;
+        let context_source_ids = args
+            .get("context_source_ids")
+            .map(|v| serde_json::from_value::<Vec<String>>(v.clone()))
+            .transpose()
+            .context("context_source_ids必须是字符串数组")?
+            .unwrap_or_default();
         let mut children = Vec::with_capacity(tasks.len());
         for (index, task) in tasks.into_iter().enumerate() {
             let child = daemon
@@ -111,6 +117,7 @@ impl DelegationTool {
                     parent_run_id.clone(),
                     format!("{call_id}:{index}"),
                     task.clone(),
+                    context_source_ids.clone(),
                     tools.clone(),
                 )
                 .await
@@ -186,6 +193,7 @@ impl Tool for DelegationTool {
         }
         json!({"type":"object","properties":{
             "task":{"type":"string"},
+            "context_source_ids":{"type":"array","maxItems":4,"uniqueItems":true,"items":{"type":"string"},"description":"显式选取父run自身的lifetime:seq来源；parent_input代表父run准入输入。仅交接有界过滤文本，不扩大能力"},
             "tasks":{"type":"array","items":{"type":"string"}},
             "tools":{"type":"array","items":{"type":"string"}}
         },"additionalProperties":false})

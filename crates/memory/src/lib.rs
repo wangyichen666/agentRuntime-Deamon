@@ -3,8 +3,12 @@
     not(test),
     deny(clippy::unwrap_used, clippy::expect_used, clippy::print_stdout)
 )]
-use agent_core::{MemoryRecord, MemoryVisibility};
+use agent_core::{MemoryAssessment, MemoryFeedback, MemoryRecord, MemoryVisibility};
 use std::collections::HashSet;
+mod evaluation;
+pub use evaluation::{EvaluationReport, evaluate_builtin};
+
+pub const RECALL_POLICY: &str = "lexical-feedback-v1";
 
 #[derive(Debug, thiserror::Error)]
 #[error("记忆操作失败: {0}")]
@@ -54,7 +58,8 @@ pub fn render_context(
             "confidence": entry.confidence, "confirmed_by_user": entry.confirmed_by_user,
             "event_time": entry.event_time, "expires_at": entry.expires_at,
             "source": entry.source, "source_message_ids": entry.source_message_ids,
-            "content": entry.content
+            "content": entry.content,
+            "content_digest": entry.content_digest, "revision": entry.revision
         }));
         let encoded = serde_json::to_string(&selected).map_err(|e| MemoryError(e.to_string()))?;
         let candidate = format!("{PREFIX}{encoded}");
@@ -74,6 +79,17 @@ pub fn rank(
     limit: usize,
     now: u64,
 ) -> Vec<MemoryRecord> {
+    rank_with_feedback(entries, visibility, query, limit, now, &[])
+}
+
+pub fn rank_with_feedback(
+    entries: Vec<MemoryRecord>,
+    visibility: &MemoryVisibility,
+    query: &str,
+    limit: usize,
+    now: u64,
+    assessments: &[MemoryAssessment],
+) -> Vec<MemoryRecord> {
     let query_terms = terms(query);
     let query_lower = query.to_lowercase();
     let mut seen = HashSet::new();
@@ -81,22 +97,38 @@ pub fn rank(
         .into_iter()
         .filter(|entry| visibility.allows(entry, now))
         .filter_map(|entry| {
+            let feedback = assessments
+                .iter()
+                .find(|a| a.memory_id == entry.id && a.content_digest == entry.content_digest)
+                .map(|a| a.feedback);
+            if matches!(
+                feedback,
+                Some(MemoryFeedback::Incorrect | MemoryFeedback::Outdated)
+            ) {
+                return None;
+            }
+            let preference = match feedback {
+                Some(MemoryFeedback::Helpful) => 1i8,
+                Some(MemoryFeedback::Irrelevant) => -1,
+                _ => 0,
+            };
             let lower = entry.content.to_lowercase();
             let score = terms(&lower).intersection(&query_terms).count()
                 + usize::from(!query_lower.is_empty() && lower.contains(&query_lower)) * 100;
-            (score > 0).then_some((score, entry))
+            (score > 0).then_some((score, preference, entry))
         })
         .collect::<Vec<_>>();
     ranked.sort_by(|a, b| {
         b.0.cmp(&a.0)
-            .then_with(|| b.1.confirmed_by_user.cmp(&a.1.confirmed_by_user))
-            .then_with(|| b.1.confidence.cmp(&a.1.confidence))
-            .then_with(|| b.1.event_time.cmp(&a.1.event_time))
-            .then_with(|| a.1.id.cmp(&b.1.id))
+            .then_with(|| b.1.cmp(&a.1))
+            .then_with(|| b.2.confirmed_by_user.cmp(&a.2.confirmed_by_user))
+            .then_with(|| b.2.confidence.cmp(&a.2.confidence))
+            .then_with(|| b.2.event_time.cmp(&a.2.event_time))
+            .then_with(|| a.2.id.cmp(&b.2.id))
     });
     ranked
         .into_iter()
-        .map(|(_, e)| e)
+        .map(|(_, _, e)| e)
         .filter(|e| seen.insert(e.content_digest.clone()))
         .take(limit.min(20))
         .collect()

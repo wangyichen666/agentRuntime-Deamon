@@ -13,6 +13,8 @@ pub struct RunSnapshot {
     pub sandbox_notice: Option<String>,
     #[serde(default)]
     pub docker_image: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation_context: Option<crate::DelegationContext>,
     pub context_read_only: bool,
     #[serde(default)]
     pub context_token_budget: usize,

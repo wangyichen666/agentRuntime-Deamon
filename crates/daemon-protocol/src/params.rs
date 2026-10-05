@@ -3,6 +3,30 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct MemoryFeedbackParams {
+    pub session_id: String,
+    pub owner_run_id: RunId,
+    pub operation_id: String,
+    pub memory_id: String,
+    pub feedback: agent_core::MemoryFeedback,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryEvidenceParams {
+    pub session_id: String,
+    pub memory_id: String,
+    #[serde(default)]
+    pub after_source: usize,
+    #[serde(default = "evidence_limit")]
+    pub limit: usize,
+}
+fn evidence_limit() -> usize {
+    4
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct MemoryReadParams {
     pub session_id: String,
     #[serde(default)]
@@ -144,6 +168,8 @@ pub struct SpawnSubagentParams {
     pub parent_run_id: RunId,
     pub spawn_key: String,
     pub task: String,
+    #[serde(default)]
+    pub context_source_ids: Vec<String>,
     #[serde(default)]
     pub tools: Option<Vec<String>>,
     #[serde(default)]

@@ -449,6 +449,16 @@ fn end_in(
         ));
     }
     db.execute("DELETE FROM memories WHERE lifetime=?1 AND json_extract(data_json,'$.kind')='turn_summary'",params![lifetime.0])?;
+    for table in [
+        "memory_exposures",
+        "memory_assessments",
+        "memory_feedback_receipts",
+    ] {
+        db.execute(
+            &format!("DELETE FROM {table} WHERE lifetime=?1"),
+            params![lifetime.0],
+        )?;
+    }
     db.execute(
         "INSERT INTO session_tombstones(lifetime,session_id,deleted_at_ms) VALUES (?1,?2,?3)",
         params![lifetime.0, key.0, now_ms()],

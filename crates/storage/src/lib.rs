@@ -4,6 +4,7 @@
     deny(clippy::unwrap_used, clippy::expect_used, clippy::print_stdout)
 )]
 mod context;
+mod flywheel;
 mod memory;
 mod resources;
 pub use memory::*;
@@ -100,12 +101,12 @@ impl RunStore {
             [],
             |row| row.get(0),
         )?;
-        if version > 12 {
+        if version > 13 {
             return Err(RuntimeError::Protocol(format!(
                 "SQLite schema 版本 {version} 比当前程序支持的版本新"
             )));
         }
-        if version > 0 && version < 12 {
+        if version > 0 && version < 13 {
             backup_database(&connection, path, version)?;
         }
         if version < 1 {
@@ -239,6 +240,9 @@ impl RunStore {
         }
         if version < 12 {
             connection.execute_batch(include_str!("memory_receipt_migration.sql"))?;
+        }
+        if version < 13 {
+            connection.execute_batch(include_str!("flywheel_migration.sql"))?;
         }
         Ok(Self {
             connection: Mutex::new(connection),
@@ -2142,7 +2146,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
         connection
             .execute("INSERT INTO schema_migrations VALUES (99, 99)", [])
             .unwrap();
@@ -2172,6 +2176,7 @@ mod tests {
                 child_session_id: SessionId("session-child.jsonl".into()),
                 spawn_key: "call-1".into(),
                 task: "调查".into(),
+                context_source_ids: vec![],
                 tools: vec!["read_file".into()],
                 permission_mode: "request_approval".into(),
                 cwd: "/workspace".into(),
@@ -2259,6 +2264,7 @@ mod tests {
                         child_session_id: SessionId(format!("child-{index}")),
                         spawn_key: format!("call-{index}"),
                         task: "调查".into(),
+                        context_source_ids: vec![],
                         tools: vec!["read_file".into()],
                         permission_mode: "request_approval".into(),
                         cwd: "/workspace".into(),
@@ -2313,6 +2319,7 @@ mod tests {
             child_session_id: SessionId("grandchild".into()),
             spawn_key: "nested".into(),
             task: "继续调查".into(),
+            context_source_ids: vec![],
             tools: vec!["read_file".into()],
             permission_mode: "request_approval".into(),
             cwd: "/workspace".into(),
@@ -2344,6 +2351,7 @@ mod tests {
             child_session_id: SessionId(format!("depth-child-{index}")),
             spawn_key: format!("call-{index}"),
             task: "调查".into(),
+            context_source_ids: vec![],
             tools: vec!["read_file".into()],
             permission_mode: "request_approval".into(),
             cwd: "/workspace".into(),

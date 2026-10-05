@@ -1,6 +1,54 @@
 use crate::{ExactOwner, SessionLifetimeId};
 use serde::{Deserialize, Serialize};
 
+/// 只能通过用户侧 RPC 提交；曝光和运行成功不能产生此评价。
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryFeedback {
+    Helpful,
+    Irrelevant,
+    Incorrect,
+    Outdated,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MemoryAssessment {
+    pub memory_id: String,
+    pub content_digest: String,
+    pub feedback: MemoryFeedback,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MemoryExposure {
+    pub id: String,
+    pub content_digest: String,
+    pub revision: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MemorySourceEvidence {
+    pub source_id: String,
+    pub role: crate::Role,
+    pub text: String,
+    pub truncated: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MemoryEvidencePage {
+    pub memory_id: String,
+    pub content_digest: String,
+    pub sources: Vec<MemorySourceEvidence>,
+    pub next_source: usize,
+    pub has_more: bool,
+    pub source_scope_restricted: bool,
+}
+impl From<&MemoryRecord> for MemoryExposure {
+    fn from(entry: &MemoryRecord) -> Self {
+        Self {
+            id: entry.id.clone(),
+            content_digest: entry.content_digest.clone(),
+            revision: entry.revision,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "scope", content = "identity", rename_all = "snake_case")]
 pub enum MemoryScope {

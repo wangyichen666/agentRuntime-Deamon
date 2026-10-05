@@ -1,0 +1,470 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "中文双字检索",
+      "query": "构建约定",
+      "entries": [
+        {
+          "id": "中文",
+          "content": "项目构建约定使用 cargo",
+          "scope": {
+            "scope": "session",
+            "identity": "current"
+          }
+        },
+        {
+          "id": "其他",
+          "content": "香蕉 fruit",
+          "scope": {
+            "scope": "session",
+            "identity": "current"
+          }
+        }
+      ],
+      "expected": [
+        "中文"
+      ]
+    },
+    {
+      "id": "不跨会话召回",
+      "query": "cargo",
+      "entries": [
+        {
+          "id": "外部",
+          "content": "约定 cargo",
+          "scope": {
+            "scope": "session",
+            "identity": "foreign"
+          }
+        },
+        {
+          "id": "当前",
+          "content": "约定 cargo",
+          "scope": {
+            "scope": "session",
+            "identity": "current"
+          }
+        }
+      ],
+      "expected": [
+        "当前"
+      ]
+    },
+    {
+      "id": "不跨项目召回",
+      "query": "cargo",
+      "entries": [
+        {
+          "id": "外部",
+          "content": "约定 cargo",
+          "scope": {
+            "scope": "project",
+            "identity": "other"
+          }
+        },
+        {
+          "id": "项目",
+          "content": "约定 cargo",
+          "scope": {
+            "scope": "project",
+            "identity": "project"
+          }
+        }
+      ],
+      "expected": [
+        "项目"
+      ]
+    },
+    {
+      "id": "全局须确认且旧数据隔离",
+      "query": "cargo",
+      "entries": [
+        {
+          "id": "未确认",
+          "content": "约定 cargo",
+          "scope": {
+            "scope": "global"
+          }
+        },
+        {
+          "id": "已确认",
+          "content": "约定 cargo",
+          "scope": {
+            "scope": "global"
+          },
+          "confirmed": true
+        },
+        {
+          "id": "旧",
+          "content": "约定 cargo",
+          "scope": {
+            "scope": "legacy",
+            "identity": "old"
+          }
+        }
+      ],
+      "expected": [
+        "已确认"
+      ]
+    },
+    {
+      "id": "有效期边界",
+      "query": "cargo",
+      "entries": [
+        {
+          "id": "过期",
+          "content": "约定 cargo",
+          "scope": {
+            "scope": "session",
+            "identity": "current"
+          },
+          "expires_at": 100
+        },
+        {
+          "id": "有效",
+          "content": "约定 cargo",
+          "scope": {
+            "scope": "session",
+            "identity": "current"
+          },
+          "expires_at": 101
+        }
+      ],
+      "expected": [
+        "有效"
+      ]
+    },
+    {
+      "id": "同内容去重",
+      "query": "cargo",
+      "entries": [
+        {
+          "id": "a",
+          "content": "约定 cargo",
+          "scope": {
+            "scope": "session",
+            "identity": "current"
+          },
+          "digest": "same"
+        },
+        {
+          "id": "b",
+          "content": "约定 cargo",
+          "scope": {
+            "scope": "session",
+            "identity": "current"
+          },
+          "digest": "same"
+        }
+      ],
+      "expected": [
+        "a"
+      ]
+    },
+    {
+      "id": "纠错停止召回",
+      "query": "cargo",
+      "entries": [
+        {
+          "id": "错误",
+          "content": "约定 cargo",
+          "scope": {
+            "scope": "session",
+            "identity": "current"
+          }
+        },
+        {
+          "id": "可信",
+          "content": "约定 cargo",
+          "scope": {
+            "scope": "session",
+            "identity": "current"
+          }
+        }
+      ],
+      "feedback": [
+        {
+          "memory_id": "错误",
+          "content_digest": "错误",
+          "feedback": "incorrect"
+        }
+      ],
+      "expected": [
+        "可信"
+      ]
+    },
+    {
+      "id": "过期评价停止召回",
+      "query": "cargo",
+      "entries": [
+        {
+          "id": "过时",
+          "content": "约定 cargo",
+          "scope": {
+            "scope": "session",
+            "identity": "current"
+          }
+        },
+        {
+          "id": "有效",
+          "content": "约定 cargo",
+          "scope": {
+            "scope": "session",
+            "identity": "current"
+          }
+        }
+      ],
+      "feedback": [
+        {
+          "memory_id": "过时",
+          "content_digest": "过时",
+          "feedback": "outdated"
+        }
+      ],
+      "expected": [
+        "有效"
+      ]
+    },
+    {
+      "id": "有用反馈打破同相关度排序",
+      "query": "cargo",
+      "entries": [
+        {
+          "id": "新",
+          "content": "约定 cargo",
+          "scope": {
+            "scope": "session",
+            "identity": "current"
+          },
+          "event_time": 99
+        },
+        {
+          "id": "旧",
+          "content": "约定 cargo",
+          "scope": {
+            "scope": "session",
+            "identity": "current"
+          },
+          "event_time": 1
+        }
+      ],
+      "feedback": [
+        {
+          "memory_id": "旧",
+          "content_digest": "旧",
+          "feedback": "helpful"
+        }
+      ],
+      "expected": [
+        "旧",
+        "新"
+      ]
+    },
+    {
+      "id": "无关反馈降低同相关度排序",
+      "query": "cargo",
+      "entries": [
+        {
+          "id": "新",
+          "content": "约定 cargo",
+          "scope": {
+            "scope": "session",
+            "identity": "current"
+          },
+          "event_time": 99
+        },
+        {
+          "id": "旧",
+          "content": "约定 cargo",
+          "scope": {
+            "scope": "session",
+            "identity": "current"
+          },
+          "event_time": 1
+        }
+      ],
+      "feedback": [
+        {
+          "memory_id": "新",
+          "content_digest": "新",
+          "feedback": "irrelevant"
+        }
+      ],
+      "expected": [
+        "旧",
+        "新"
+      ]
+    },
+    {
+      "id": "反馈不可覆盖相关度",
+      "query": "cargo build",
+      "entries": [
+        {
+          "id": "准确",
+          "content": "cargo build",
+          "scope": {
+            "scope": "session",
+            "identity": "current"
+          }
+        },
+        {
+          "id": "弱",
+          "content": "cargo test",
+          "scope": {
+            "scope": "session",
+            "identity": "current"
+          }
+        }
+      ],
+      "feedback": [
+        {
+          "memory_id": "弱",
+          "content_digest": "弱",
+          "feedback": "helpful"
+        }
+      ],
+      "expected": [
+        "准确",
+        "弱"
+      ]
+    },
+    {
+      "id": "无匹配不因好评入选",
+      "query": "cargo",
+      "entries": [
+        {
+          "id": "无关",
+          "content": "banana",
+          "scope": {
+            "scope": "session",
+            "identity": "current"
+          }
+        }
+      ],
+      "feedback": [
+        {
+          "memory_id": "无关",
+          "content_digest": "无关",
+          "feedback": "helpful"
+        }
+      ],
+      "expected": []
+    },
+    {
+      "id": "旧版本反馈失效",
+      "query": "cargo",
+      "entries": [
+        {
+          "id": "当前",
+          "content": "约定 cargo",
+          "scope": {
+            "scope": "session",
+            "identity": "current"
+          },
+          "digest": "new"
+        }
+      ],
+      "feedback": [
+        {
+          "memory_id": "当前",
+          "content_digest": "old",
+          "feedback": "incorrect"
+        }
+      ],
+      "expected": [
+        "当前"
+      ]
+    },
+    {
+      "id": "零预算不注入",
+      "query": "cargo",
+      "entries": [
+        {
+          "id": "当前",
+          "content": "约定 cargo",
+          "scope": {
+            "scope": "session",
+            "identity": "current"
+          }
+        }
+      ],
+      "expected": [
+        "当前"
+      ],
+      "budget": 0,
+      "injected": []
+    },
+    {
+      "id": "大项跳过后继续小项",
+      "query": "cargo",
+      "entries": [
+        {
+          "id": "大",
+          "content": "cargo ",
+          "scope": {
+            "scope": "session",
+            "identity": "current"
+          },
+          "repeat": 5000
+        },
+        {
+          "id": "小",
+          "content": "cargo",
+          "scope": {
+            "scope": "session",
+            "identity": "current"
+          }
+        }
+      ],
+      "expected": [
+        "大",
+        "小"
+      ],
+      "injected": [
+        "小"
+      ]
+    },
+    {
+      "id": "零条数不召回",
+      "query": "cargo",
+      "entries": [
+        {
+          "id": "当前",
+          "content": "约定 cargo",
+          "scope": {
+            "scope": "session",
+            "identity": "current"
+          }
+        }
+      ],
+      "expected": [],
+      "limit": 0,
+      "injected": []
+    },
+    {
+      "id": "可恢复评价",
+      "query": "cargo",
+      "entries": [
+        {
+          "id": "恢复",
+          "content": "约定 cargo",
+          "scope": {
+            "scope": "session",
+            "identity": "current"
+          }
+        }
+      ],
+      "feedback": [
+        {
+          "memory_id": "恢复",
+          "content_digest": "恢复",
+          "feedback": "helpful"
+        }
+      ],
+      "expected": [
+        "恢复"
+      ]
+    }
+  ]
+}

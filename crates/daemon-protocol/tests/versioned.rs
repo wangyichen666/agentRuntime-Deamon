@@ -98,3 +98,34 @@ fn versioned_aliases_preserve_ids_and_interaction_owner_fields() {
         assert_eq!(normalized.params, params);
     }
 }
+
+#[test]
+fn memory_feedback_requires_typed_user_vote_and_strict_fields() {
+    let params = json!({"session_id":"s","owner_run_id":"r","operation_id":"vote","memory_id":"m","feedback":"helpful"});
+    let mut request = JsonRpcRequest::new(RequestId::Number(1), "memory.feedback", params);
+    request.protocol_version = Some(1);
+    assert!(normalize_request(request.clone()).is_ok());
+    request.params["feedback"] = json!("model_succeeded");
+    assert!(normalize_request(request.clone()).is_err());
+    request.params["feedback"] = json!("incorrect");
+    request.params["confidence"] = json!(100);
+    assert!(normalize_request(request).is_err());
+}
+
+#[test]
+fn delegation_context_is_optional_and_strictly_typed() {
+    let mut request = JsonRpcRequest::new(
+        RequestId::Number(1),
+        "spawn_subagent",
+        json!({"parent_session_id":"s","parent_run_id":"r","spawn_key":"k","task":"核实"}),
+    );
+    request.protocol_version = Some(1);
+    assert!(normalize_request(request.clone()).is_ok());
+    request.params["context_source_ids"] = json!(["parent_input"]);
+    assert!(normalize_request(request.clone()).is_ok());
+    request.params["context_source_ids"] = json!("全部历史");
+    assert!(normalize_request(request.clone()).is_err());
+    request.params["context_source_ids"] = json!([]);
+    request.params["inherit_all"] = json!(true);
+    assert!(normalize_request(request).is_err());
+}

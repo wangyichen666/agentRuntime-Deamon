@@ -19,6 +19,7 @@ pub struct DelegationRequest {
     pub child_session_id: SessionId,
     pub spawn_key: String,
     pub task: String,
+    pub context_source_ids: Vec<String>,
     pub tools: Vec<String>,
     pub permission_mode: String,
     pub cwd: String,
@@ -66,7 +67,17 @@ impl RunStore {
         &self,
         request: DelegationRequest,
     ) -> Result<DelegationRecord, RuntimeError> {
-        if request.task.trim().is_empty()
+        if request.context_source_ids.len() > 4
+            || request.context_source_ids.iter().any(|id| id.len() > 512)
+            || request
+                .context_source_ids
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                != request.context_source_ids.len()
+            || request.task.len() > 65536
+            || request.spawn_key.len() > 128
+            || request.task.trim().is_empty()
             || request.spawn_key.trim().is_empty()
             || request.tools.is_empty()
             || request.max_rounds <= 0
@@ -81,6 +92,38 @@ impl RunStore {
             .ok_or_else(|| RuntimeError::Protocol("父 run 不存在".into()))?;
         if parent.session_id != request.parent_session_id {
             return Err(RuntimeError::Protocol("父 run 不属于指定 session".into()));
+        }
+        let mut request = request;
+        // 显式别名让调用方无需猜测lifetime；映射到父run首条准入输入，重试不变。
+        if request
+            .context_source_ids
+            .iter()
+            .any(|id| id == "parent_input")
+        {
+            let (lifetime,seq):(String,u64)=transaction.query_row("SELECT lifetime,start_seq FROM transcript_batches WHERE run_id=?1 ORDER BY start_seq LIMIT 1",params![request.parent_run_id.0],|r|Ok((r.get(0)?,r.get(1)?)))?;
+            for id in &mut request.context_source_ids {
+                if id == "parent_input" {
+                    *id = format!("{lifetime}:{seq}");
+                }
+            }
+        }
+        for id in &mut request.context_source_ids {
+            let (lifetime, seq) = id
+                .rsplit_once(':')
+                .ok_or_else(|| RuntimeError::Protocol("交接来源ID无效".into()))?;
+            let seq = seq
+                .parse::<u64>()
+                .map_err(|_| RuntimeError::Protocol("交接来源序号无效".into()))?;
+            *id = format!("{lifetime}:{seq}");
+        }
+        if request
+            .context_source_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != request.context_source_ids.len()
+        {
+            return Err(RuntimeError::Protocol("交接来源存在重复ID".into()));
         }
         let duplicate: Option<String> = transaction
             .query_row(
@@ -98,7 +141,28 @@ impl RunStore {
                 params![child],
                 |row| row.get(0),
             )?;
-            if existing_task != request.task
+            let captured: Option<String> = transaction
+                .query_row(
+                    "SELECT snapshot_json FROM run_snapshots WHERE run_id=?1",
+                    params![child],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let saved_ids = captured
+                .map(|raw| {
+                    serde_json::from_str::<agent_core::RunSnapshot>(&raw)
+                        .map_err(|e| RuntimeError::Protocol(e.to_string()))
+                })
+                .transpose()?
+                .and_then(|s| s.delegation_context)
+                .map_or_else(Vec::new, |c| {
+                    c.sources
+                        .into_iter()
+                        .map(|s| s.source_id)
+                        .collect::<Vec<_>>()
+                });
+            if saved_ids != request.context_source_ids
+                || existing_task != request.task
                 || record.tools != request.tools
                 || record.max_rounds != request.max_rounds
                 || record.max_tokens != request.max_tokens
@@ -191,6 +255,43 @@ impl RunStore {
         if let Some(raw) = parent_snapshot {
             let mut snapshot: agent_core::RunSnapshot =
                 serde_json::from_str(&raw).map_err(|e| RuntimeError::Protocol(e.to_string()))?;
+            // 仅显式选择本父 run 的来源；祖先捕获包不自动传给孙任务。
+            snapshot.delegation_context = if request.context_source_ids.is_empty() {
+                None
+            } else {
+                let owner = super::sessions::owner_in(&transaction, &request.parent_run_id)?;
+                super::sessions::fence_in(&transaction, &owner)?;
+                let sources = request
+                    .context_source_ids
+                    .iter()
+                    .map(|id| super::memory::read_source_evidence(&transaction, &owner, id, 1024))
+                    .collect::<Result<Vec<_>, _>>()?;
+                use sha2::{Digest, Sha256};
+                let digest = format!(
+                    "{:x}",
+                    Sha256::digest(
+                        serde_json::to_vec(&(&owner, &sources))
+                            .map_err(|e| RuntimeError::Protocol(e.to_string()))?
+                    )
+                );
+                let context = agent_core::DelegationContext {
+                    version: 1,
+                    parent: owner,
+                    sources,
+                    digest,
+                };
+                let bytes = serde_json::to_vec(&context)
+                    .map_err(|e| RuntimeError::Protocol(e.to_string()))?
+                    .len();
+                if bytes > 8192
+                    || bytes > (request.max_tokens as usize).min(snapshot.context_token_budget)
+                {
+                    return Err(RuntimeError::Protocol(
+                        "交接包超过8KiB或子任务材料预算".into(),
+                    ));
+                }
+                Some(context)
+            };
             if request
                 .tools
                 .iter()
@@ -240,6 +341,10 @@ impl RunStore {
                         .map_err(|e| RuntimeError::Protocol(e.to_string()))?
                 ],
             )?;
+        } else if !request.context_source_ids.is_empty() {
+            return Err(RuntimeError::Protocol(
+                "父run缺少冻结快照，不能交接上下文".into(),
+            ));
         }
         insert_event(
             &transaction,
@@ -617,4 +722,190 @@ fn read_delegation_in(
         error_code,
         error_message,
     }))
+}
+
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+    use crate::{SessionLifecycle, SessionQuery, TranscriptStore, TurnRepository};
+    use agent_core::*;
+    fn parent(store: &RunStore, key: &str) -> ExactOwner {
+        let key = SessionKey(key.into());
+        store.create_session(&key).unwrap();
+        let snapshot = RunSnapshot {
+            route: None,
+            tools: vec![ToolSpec {
+                name: "read_file".into(),
+                description: "读取".into(),
+                parameters: json!({"type":"object"}),
+            }],
+            cwd: "/workspace".into(),
+            permission_mode: "request_approval".into(),
+            sandbox_requested: "native".into(),
+            sandbox_effective: "native".into(),
+            sandbox_notice: None,
+            docker_image: None,
+            delegation_context: None,
+            context_read_only: false,
+            context_token_budget: 8192,
+            context_policy_fingerprint: None,
+            tool_catalog_digest: "test".into(),
+            memory_entry_budget: 8,
+            memory_token_budget: 1024,
+            max_tool_calls: Some(16),
+            config_generation: 0,
+        };
+        let Admission::New(run) = store
+            .admit_run(
+                &RunAdmission {
+                    session_key: key,
+                    expected_lifetime: None,
+                    request_id: RequestId::Number(1),
+                    input: "禁止上传".into(),
+                    mode: AdmissionMode::Queue,
+                },
+                &snapshot,
+            )
+            .unwrap()
+        else {
+            panic!("new")
+        };
+        store.try_start_queued(&run.run_id).unwrap();
+        store.run_owner(&run.run_id).unwrap()
+    }
+    fn request(owner: &ExactOwner, child: &str, ids: Vec<String>) -> DelegationRequest {
+        DelegationRequest {
+            parent_session_id: owner.session_key.clone(),
+            parent_run_id: owner.run_id.clone(),
+            child_session_id: SessionId(child.into()),
+            spawn_key: child.into(),
+            task: "核实构建约束".into(),
+            context_source_ids: ids,
+            tools: vec!["read_file".into()],
+            permission_mode: "request_approval".into(),
+            cwd: "/workspace".into(),
+            max_rounds: 8,
+            max_tokens: 8192,
+            max_tool_calls: 16,
+            deadline_ms: now_ms() + 60_000,
+        }
+    }
+    #[test]
+    fn delegation_freezes_explicit_evidence_and_does_not_implicitly_pass_it_on() {
+        let store = RunStore::open(std::path::Path::new(":memory:")).unwrap();
+        let owner = parent(&store, "parent-context");
+        let mut message = Message::assistant_with_thinking(
+            "构建前先核实\nAPI_KEY=sk-secret\n".to_owned() + &"😀".repeat(2000),
+            Some("私有思考".into()),
+        );
+        message.image_urls = vec!["私有图片".into()];
+        store
+            .append_transcript(&owner, "material", &[message])
+            .unwrap();
+        let ids = vec![
+            format!("{}:0", owner.session_lifetime_id.0),
+            format!("{}:1", owner.session_lifetime_id.0),
+        ];
+        let command = request(&owner, "captured", ids);
+        let child = store.admit_delegation(command.clone()).unwrap();
+        let captured = store
+            .run_snapshot(&child.child_run_id)
+            .unwrap()
+            .unwrap()
+            .delegation_context
+            .unwrap();
+        assert_eq!(captured.parent, owner);
+        assert_eq!(captured.sources[0].text, "禁止上传");
+        assert!(captured.sources[1].truncated);
+        assert_eq!(captured.sources[1].text.chars().count(), 1024);
+        let raw = serde_json::to_string(&captured).unwrap();
+        for secret in ["sk-secret", "私有思考", "私有图片"] {
+            assert!(!raw.contains(secret));
+        }
+        store
+            .append_transcript(&owner, "later", &[Message::text(Role::User, "后续新材料")])
+            .unwrap();
+        assert_eq!(
+            store
+                .admit_delegation(command.clone())
+                .unwrap()
+                .child_run_id,
+            child.child_run_id
+        );
+        let mut changed = command;
+        changed.context_source_ids.pop();
+        assert!(store.admit_delegation(changed).is_err());
+        assert!(store.try_start_queued(&child.child_run_id).unwrap());
+        let child_owner = store.run_owner(&child.child_run_id).unwrap();
+        let grandchild = store
+            .admit_delegation(request(&child_owner, "grandchild", vec![]))
+            .unwrap();
+        assert!(
+            store
+                .run_snapshot(&grandchild.child_run_id)
+                .unwrap()
+                .unwrap()
+                .delegation_context
+                .is_none()
+        );
+    }
+    #[test]
+    fn delegation_rejects_foreign_owner_bad_digest_duplicates_and_budget_overflow_atomically() {
+        let store = RunStore::open(std::path::Path::new(":memory:")).unwrap();
+        let owner = parent(&store, "own");
+        let foreign = parent(&store, "foreign");
+        let id = format!("{}:0", owner.session_lifetime_id.0);
+        for ids in [
+            vec![format!("{}:0", foreign.session_lifetime_id.0)],
+            vec![id.clone(), id.clone()],
+            vec![id.clone(), format!("{}:0000", owner.session_lifetime_id.0)],
+            vec![format!("{}:999", owner.session_lifetime_id.0)],
+            vec!["bad".into()],
+            vec![id.clone(); 5],
+        ] {
+            assert!(
+                store
+                    .admit_delegation(request(&owner, "rejected", ids))
+                    .is_err()
+            );
+        }
+        store
+            .append_transcript(
+                &owner,
+                "long",
+                &[Message::text(Role::Assistant, "😀".repeat(2000))],
+            )
+            .unwrap();
+        let mut small = request(
+            &owner,
+            "budget",
+            vec![format!("{}:1", owner.session_lifetime_id.0)],
+        );
+        small.max_tokens = 512;
+        assert!(store.admit_delegation(small).is_err());
+        store
+            .lock_connection()
+            .unwrap()
+            .execute(
+                "UPDATE transcript_batches SET digest='bad' WHERE lifetime=?1",
+                params![owner.session_lifetime_id.0],
+            )
+            .unwrap();
+        assert!(
+            store
+                .admit_delegation(request(&owner, "digest", vec![id]))
+                .is_err()
+        );
+        assert!(store.list_delegations(&owner.run_id).unwrap().is_empty());
+        let leaked: i64 = store
+            .lock_connection()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE id IN ('rejected','budget','digest')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(leaked, 0);
+    }
 }

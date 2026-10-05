@@ -782,3 +782,30 @@ Wave 2 盘点：daemon 的 session_runtime/session_snapshot/session_infos 与 Lo
 
 ## Codex 对比发现
 官方参考8d44977aa2fb9ae1b128660668dc5b36966613fa。Codex retained user inputs、独立有界memory fragment、租约式两阶段提炼值得参考；本项目 CAS/SQLite/scoped receipts 保留。本轮发现压缩可能切当前轮、记忆包装漏计、Episode总量无界。详见docs/research/codex-context-memory.md。
+# 2026-10-03 数据飞轮研究
+
+已有基线：266 项 Rust 回归，SQLite v12；上一轮 Codex 对比的压缩当前轮次保护、原文锚点、完整注入预算、有界摄入已实现。本轮无需重复实现。
+
+官方参考固定为 8d44977aa2fb9ae1b128660668dc5b36966613fa（/tmp/codex-architecture-reference），非实时 HEAD。state/src/runtime/memories.rs 提供 cited usage、usage/recency retention 与租约；memories/write/src/phase1.rs 包含上传前 secret redaction。仅参考机制，独立实现。
+
+当前缺口：render_context 返回文本而无入选 ID；没有实际注入记录或显式反馈；按关键词/置信度/新近度排序，无法基于用户纠正改进；已有 provider/context ledger 与 terminal，不需要另建完整轨迹库。官方 compaction 文档说明 opaque state 必须原样传递；本项目支持多 provider，继续使用受验证的宿主摘要投影，不强行绑定 Responses API。
+
+本轮落地：独立评测17/17；lexical-feedback-v1 不用曝光数或业务成功自举标签。负反馈绑定 memory ID+digest，本会话 lifetime 使用；无关/有用仅调整同相关度排序。评测是人工预期的合成检索样本，不能推导真实模型成功率或成本改善。曝光为 context_prepared/tool_result_prepared，不宣称模型采用。学习表不保存query/content；forget FK CASCADE 和 clear/delete 清学习数据。保持 canonical transcript、投影 CAS、scope 信任不变。
+
+有界候选与负反馈复核：评价读取与同作用域最新1000个候选集合对齐，避免全体最新1000评价把仍在候选集中的旧负反馈挤出。恢复依赖既有 turn_commits，业务 terminal 先发布、维护独立；每批32、60秒退避、3次上限，失败不阻塞同批健康 turn。
+
+## 2026-10-03 第二轮研究发现
+
+- Codex `core/src/context_manager/history_user_authorization.rs` 把原始/继承/checkpoint 输入及 complete 标志分开；checkpoint 不构成原始授权。`core/src/context/compaction_summary.rs` 把摘要标作 contextual fragment（user role + compaction.summary kind），与原始指令不同。本项目摘要目前直接形成 System 字符串，只有自由文本提示，没有结构化来源/未知声明。
+- 本项目 `agent_context::validate_candidate` 只检查收益、非空和工具闭合，未验证当前用户轮次字节级保留；存储 `settle_compact` 只检查工具闭合，可能安装删除当前输入但合法闭合的候选。这是可验证的框架缺口，应把当前轮次保护提升为宿主和持久提交的共同契约。
+- 摘要递归到 depth=8 时直接截断字符串并返回成功，可能将截断 checkpoint 当完整摘要。本轮应允许无收益/失败降级，不静默损失。
+- 记忆有 source_message_ids（lifetime:seq）但无有界 evidence API；用户/模型无法从召回条目按来源核实 raw transcript。本项目已有 canonical batches 可复用，不需要 Codex 文件型索引库或复制原文。
+- 上轮恢复每60秒推进32个，但daemon空闲2秒会退出；积压大于32时只处理首批，剩余要等下次启动。需要研究与既有受管后台生命周期协调的可完成排空机制，不能无限占用空闲daemon。
+
+第二轮证据接口使用当前记忆声明的 lifetime:seq 点查 canonical batch，并复核 batch digest 与 run owner；跨会话的已确认记忆不公开原对话。维护整体失败回到60秒间隔，不让立即到期查询触发100毫秒永久忙循环。
+
+第三轮：Codex在fork前flush持久history，并区分完整继承与最近轮次；本项目已有SQLite原子委派和冻结能力，缺口是task之外可核实背景。选择显式source IDs与冻结有界包，复用run_snapshots JSON；不默认整段fork，不新增存储后端。
+
+第四轮发现：字符串数组锚点无法暴露预算省略；Codex的original/checkpoint completeness可借鉴。以文字锚点覆盖状态和省略下限补齐，不把摘要短、重压缩成功或有digest当作原始历史完整。
+
+交接复核：来源序号规范化后检测重复，防止0与0000绕过同来源去重；证据页对请求ID和元数据也作硬预算，避免无来源/跨会话返回分支绕过32KiB页上限。

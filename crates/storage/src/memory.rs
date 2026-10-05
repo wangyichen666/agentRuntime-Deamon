@@ -6,6 +6,70 @@ use sha2::{Digest, Sha256};
 const EPISODE_BYTES: usize = 16 * 1024;
 const OMITTED: &str = "\n[会话摘录已截断；完整证据保留在 transcript 中]\n";
 
+/// 保守过滤自动摘录中的常见凭据行；不是全面 DLP，不改写原始证据。
+fn redact_episode(content: &str) -> String {
+    redact_evidence(content, 1001)
+}
+fn redact_evidence(content: &str, char_limit: usize) -> String {
+    let mut output = String::new();
+    let mut remaining_chars = char_limit;
+    let mut removed = false;
+    let mut private_block = false;
+    for line in content.lines() {
+        let lower = line.to_ascii_lowercase();
+        if lower.contains("-----begin ") && lower.contains("private key-----") {
+            private_block = true;
+        }
+        let credential = private_block
+            || [
+                "api_key",
+                "api key:",
+                "authorization:",
+                "bearer ",
+                "password=",
+                "password:",
+                "password =",
+                "passwd=",
+                "client_secret",
+                "secret=",
+                "secret:",
+                "token=",
+                "token:",
+                "token =",
+                "sk-",
+                "ghp_",
+                "github_pat_",
+                "akia",
+                "aws_secret_access_key",
+            ]
+            .iter()
+            .any(|marker| lower.contains(marker))
+            || (lower.contains("://") && lower.contains('@'));
+        if credential {
+            removed = true;
+        } else {
+            if !output.is_empty() && remaining_chars > 0 {
+                output.push('\n');
+                remaining_chars -= 1;
+            }
+            for character in line.chars().take(remaining_chars) {
+                output.push(character);
+                remaining_chars -= 1;
+            }
+            if remaining_chars == 0 {
+                break;
+            }
+        }
+        if private_block && lower.contains("-----end ") && lower.contains("private key-----") {
+            private_block = false;
+        }
+    }
+    if removed && !output.trim().is_empty() {
+        output.push_str("\n[凭据行已过滤]");
+    }
+    output
+}
+
 /// 摘录不是模型提炼。字节与单消息字符双重上限，永不产生无标记的截断。
 #[derive(Default)]
 struct EpisodeExcerpt {
@@ -24,6 +88,10 @@ impl EpisodeExcerpt {
         let Some(content) = message.content.as_deref().filter(|s| !s.trim().is_empty()) else {
             return;
         };
+        let content = redact_episode(content);
+        if content.trim().is_empty() {
+            return;
+        }
         let mut chars = content.chars();
         let excerpt: String = chars.by_ref().take(1000).collect();
         let clipped = chars.next().is_some();
@@ -52,6 +120,37 @@ impl EpisodeExcerpt {
 }
 
 pub trait MemoryRepository: Send + Sync {
+    fn memory_evidence(
+        &self,
+        visibility: &MemoryVisibility,
+        memory_id: &str,
+        after_source: usize,
+        limit: usize,
+    ) -> Result<MemoryEvidencePage, RuntimeError>;
+    fn next_memory_ingest_due(&self) -> Result<Option<i64>, RuntimeError>;
+    fn memory_assessments(
+        &self,
+        visibility: &MemoryVisibility,
+    ) -> Result<Vec<MemoryAssessment>, RuntimeError>;
+    fn record_memory_exposures(
+        &self,
+        owner: &ExactOwner,
+        entries: &[MemoryExposure],
+        channel: &str,
+        policy: &str,
+    ) -> Result<(), RuntimeError>;
+    fn memory_feedback(
+        &self,
+        owner: &ExactOwner,
+        operation: &str,
+        memory_id: &str,
+        feedback: MemoryFeedback,
+    ) -> Result<(), RuntimeError>;
+    fn flywheel_report(
+        &self,
+        lifetime: &SessionLifetimeId,
+    ) -> Result<serde_json::Value, RuntimeError>;
+    fn recover_memory_ingests(&self, limit: usize) -> Result<usize, RuntimeError>;
     fn memory_candidates(
         &self,
         visibility: &MemoryVisibility,
@@ -107,7 +206,7 @@ fn write_in(db: &rusqlite::Connection, entry: &MemoryRecord) -> Result<(), Runti
     )?;
     Ok(())
 }
-fn writable(db: &rusqlite::Connection, owner: &ExactOwner) -> Result<(), RuntimeError> {
+pub(crate) fn writable(db: &rusqlite::Connection, owner: &ExactOwner) -> Result<(), RuntimeError> {
     fence_in(db, owner)?;
     let raw: Option<String> = db
         .query_row(
@@ -128,7 +227,168 @@ fn writable(db: &rusqlite::Connection, owner: &ExactOwner) -> Result<(), Runtime
     }
     Ok(())
 }
+pub(crate) fn read_source_evidence(
+    db: &rusqlite::Connection,
+    source: &ExactOwner,
+    id: &str,
+    char_limit: usize,
+) -> Result<MemorySourceEvidence, RuntimeError> {
+    if id.len() > 512 {
+        return Err(RuntimeError::Protocol("来源ID超出预算".into()));
+    }
+    let (lifetime, seq) = id
+        .rsplit_once(':')
+        .ok_or_else(|| RuntimeError::Protocol("来源ID无效".into()))?;
+    let seq = seq
+        .parse::<u64>()
+        .map_err(|_| RuntimeError::Protocol("来源序号无效".into()))?;
+    if lifetime != source.session_lifetime_id.0 {
+        return Err(RuntimeError::Protocol("来源lifetime不匹配".into()));
+    }
+    let batch:Option<(String,u64,String,String)>=db.query_row("SELECT messages_json,start_seq,digest,run_id FROM transcript_batches WHERE lifetime=?1 AND start_seq<=?2 AND end_seq>?2 ORDER BY start_seq DESC LIMIT 1",params![lifetime,seq],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+    let (raw, start, digest, run) =
+        batch.ok_or_else(|| RuntimeError::Protocol("来源证据已缺失".into()))?;
+    if digest != format!("{:x}", Sha256::digest(raw.as_bytes())) || run != source.run_id.0 {
+        return Err(RuntimeError::Protocol("来源digest或owner不匹配".into()));
+    }
+    let messages: Vec<Message> =
+        serde_json::from_str(&raw).map_err(|e| RuntimeError::Protocol(e.to_string()))?;
+    let message = messages
+        .get((seq - start) as usize)
+        .ok_or_else(|| RuntimeError::Protocol("来源序号越界".into()))?;
+    let safe = redact_evidence(
+        message.content.as_deref().unwrap_or_default(),
+        char_limit + 1,
+    );
+    Ok(MemorySourceEvidence {
+        source_id: id.into(),
+        role: message.role.clone(),
+        truncated: safe.chars().count() > char_limit,
+        text: safe.chars().take(char_limit).collect(),
+    })
+}
 impl MemoryRepository for RunStore {
+    fn memory_evidence(
+        &self,
+        visibility: &MemoryVisibility,
+        memory_id: &str,
+        after_source: usize,
+        limit: usize,
+    ) -> Result<MemoryEvidencePage, RuntimeError> {
+        if memory_id.len() > 512 {
+            return Err(RuntimeError::Protocol("memory evidence标识超出预算".into()));
+        }
+        let db = self.lock_connection()?;
+        let active: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_heads WHERE lifetime=?1 AND deleted=0)",
+            params![visibility.lifetime.0],
+            |r| r.get(0),
+        )?;
+        if !active {
+            return Err(RuntimeError::Protocol(
+                "memory evidence lifetime 已失效".into(),
+            ));
+        }
+        let raw: Option<String> = db
+            .query_row(
+                "SELECT data_json FROM memories WHERE id=?1",
+                params![memory_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let raw = raw.ok_or_else(|| RuntimeError::Protocol("memory 已遗忘或不存在".into()))?;
+        let entry: MemoryRecord =
+            serde_json::from_str(&raw).map_err(|e| RuntimeError::Protocol(e.to_string()))?;
+        if !visibility.allows(&entry, super::now_ms() as u64 / 1000) {
+            return Err(RuntimeError::Protocol("memory 不可见".into()));
+        }
+        let restricted = entry.source.as_ref().is_some_and(|s| {
+            s.session_lifetime_id != visibility.lifetime || fence_in(&db, s).is_err()
+        });
+        let mut page = MemoryEvidencePage {
+            memory_id: entry.id,
+            content_digest: entry.content_digest,
+            sources: vec![],
+            next_source: after_source,
+            has_more: false,
+            source_scope_restricted: restricted,
+        };
+        if serde_json::to_vec(&page)
+            .map_err(|e| RuntimeError::Protocol(e.to_string()))?
+            .len()
+            > 32 * 1024
+        {
+            return Err(RuntimeError::Protocol(
+                "memory evidence元数据超出预算".into(),
+            ));
+        }
+        if restricted || entry.source.is_none() {
+            return Ok(page);
+        }
+        let source = entry
+            .source
+            .ok_or_else(|| RuntimeError::Protocol("memory 没有来源 owner".into()))?;
+        let mut bytes = serde_json::to_vec(&page)
+            .map_err(|e| RuntimeError::Protocol(e.to_string()))?
+            .len()
+            + 128;
+        for (index, id) in entry
+            .source_message_ids
+            .iter()
+            .enumerate()
+            .skip(after_source)
+            .take(limit.clamp(1, 16))
+        {
+            let item = read_source_evidence(&db, &source, id, 4096)?;
+            let size = serde_json::to_vec(&item)
+                .map_err(|e| RuntimeError::Protocol(e.to_string()))?
+                .len();
+            if bytes + size + 1 > 32 * 1024 {
+                break;
+            }
+            bytes += size + 1;
+            page.sources.push(item);
+            page.next_source = index + 1;
+        }
+        page.has_more = page.next_source < entry.source_message_ids.len();
+        Ok(page)
+    }
+    fn next_memory_ingest_due(&self) -> Result<Option<i64>, RuntimeError> {
+        RunStore::next_memory_ingest_due(self)
+    }
+    fn memory_assessments(
+        &self,
+        visibility: &MemoryVisibility,
+    ) -> Result<Vec<MemoryAssessment>, RuntimeError> {
+        RunStore::memory_assessments(self, visibility)
+    }
+    fn record_memory_exposures(
+        &self,
+        owner: &ExactOwner,
+        entries: &[MemoryExposure],
+        channel: &str,
+        policy: &str,
+    ) -> Result<(), RuntimeError> {
+        RunStore::record_memory_exposures(self, owner, entries, channel, policy)
+    }
+    fn memory_feedback(
+        &self,
+        owner: &ExactOwner,
+        operation: &str,
+        memory_id: &str,
+        feedback: MemoryFeedback,
+    ) -> Result<(), RuntimeError> {
+        RunStore::memory_feedback(self, owner, operation, memory_id, feedback)
+    }
+    fn flywheel_report(
+        &self,
+        lifetime: &SessionLifetimeId,
+    ) -> Result<serde_json::Value, RuntimeError> {
+        RunStore::flywheel_report(self, lifetime)
+    }
+    fn recover_memory_ingests(&self, limit: usize) -> Result<usize, RuntimeError> {
+        RunStore::recover_memory_ingests(self, limit)
+    }
     fn memory_candidates(
         &self,
         visibility: &MemoryVisibility,
@@ -432,6 +692,34 @@ mod tests {
         assert!(excerpt.source_message_ids.len() < 100);
         assert!(!excerpt.source_message_ids.contains(&"empty".into()));
     }
+    #[test]
+    fn automatic_excerpt_filters_credentials_and_keeps_safe_evidence() {
+        let text = "构建使用 cargo\nAPI_KEY=sk-do-not-store\nAuthorization: Bearer private-token\n-----BEGIN PRIVATE KEY-----\nprivate-material\n-----END PRIVATE KEY-----\nhttps://user:password@example.com\n继续使用 Rust";
+        let mut excerpt = EpisodeExcerpt::default();
+        excerpt.push(&Message::text(Role::User, text), "source".into());
+        assert!(excerpt.text.contains("构建使用 cargo"));
+        assert!(excerpt.text.contains("继续使用 Rust"));
+        assert!(excerpt.text.contains("凭据行已过滤"));
+        for secret in [
+            "sk-do-not-store",
+            "private-token",
+            "private-material",
+            "password",
+        ] {
+            assert!(!excerpt.text.contains(secret));
+        }
+        let mut empty = EpisodeExcerpt::default();
+        empty.push(
+            &Message::text(Role::User, "API_KEY=sk-do-not-store"),
+            "secret".into(),
+        );
+        assert!(empty.text.is_empty());
+        assert!(empty.source_message_ids.is_empty());
+        assert_eq!(
+            redact_episode("普通 token budget: 1000"),
+            "普通 token budget: 1000"
+        );
+    }
     fn admission(store: &RunStore, key: &str) -> ExactOwner {
         let key = SessionKey(key.into());
         store.create_session(&key).unwrap();
@@ -468,6 +756,156 @@ mod tests {
             content_digest: format!("{:x}", Sha256::digest(b"memory fact")),
             revision: 0,
         }
+    }
+    fn visible(owner: &ExactOwner) -> MemoryVisibility {
+        MemoryVisibility {
+            lifetime: owner.session_lifetime_id.clone(),
+            project: "p".into(),
+            allow_confirmed_global: true,
+        }
+    }
+    #[test]
+    fn evidence_pages_verify_sources_redact_secrets_and_obey_forget() {
+        use crate::TranscriptStore;
+        let store = RunStore::open(std::path::Path::new(":memory:")).unwrap();
+        let owner = admission(&store, "evidence");
+        let mut evidence = Message::assistant_with_thinking(
+            "安全证据\nAPI_KEY=sk-private",
+            Some("私有思考".into()),
+        );
+        evidence.image_urls.push("私有图片".into());
+        store
+            .append_transcript(&owner, "evidence", &[evidence])
+            .unwrap();
+        store
+            .finish(&owner.run_id, RunStatus::Completed, Some("完成"), None)
+            .unwrap();
+        store.ingest_committed_turn(&owner).unwrap();
+        let id = format!("turn:{}", owner.run_id.0);
+        let first = store.memory_evidence(&visible(&owner), &id, 0, 1).unwrap();
+        assert_eq!(first.sources.len(), 1);
+        assert_eq!(
+            first.sources[0].source_id,
+            format!("{}:0", owner.session_lifetime_id.0)
+        );
+        assert_eq!(first.next_source, 1);
+        assert!(first.has_more);
+        let second = store
+            .memory_evidence(&visible(&owner), &id, first.next_source, 1)
+            .unwrap();
+        assert!(second.sources[0].text.contains("安全证据"));
+        let raw = serde_json::to_string(&second).unwrap();
+        for secret in ["sk-private", "私有思考", "私有图片"] {
+            assert!(!raw.contains(secret));
+        }
+        let third = store
+            .memory_evidence(&visible(&owner), &id, second.next_source, 16)
+            .unwrap();
+        assert_eq!(third.sources[0].text, "完成");
+        assert!(!third.has_more);
+        assert_eq!(
+            store.flywheel_report(&owner.session_lifetime_id).unwrap()["exposure_count"],
+            0
+        );
+        assert!(
+            store
+                .forget_memory(&owner, &visible(&owner), &id, 0)
+                .unwrap()
+        );
+        assert!(store.memory_evidence(&visible(&owner), &id, 0, 4).is_err());
+    }
+    #[test]
+    fn evidence_does_not_expand_cross_session_authorization_or_accept_bad_digest() {
+        let store = RunStore::open(std::path::Path::new(":memory:")).unwrap();
+        let a = admission(&store, "evidence-a");
+        let b = admission(&store, "evidence-b");
+        let mut global = entry(&a, MemoryScope::Global, "global-source");
+        global.source_message_ids = vec![format!("{}:0", a.session_lifetime_id.0)];
+        store.store_memory(&a, &global).unwrap();
+        let foreign = store
+            .memory_evidence(&visible(&b), &global.id, 0, 4)
+            .unwrap();
+        assert!(foreign.source_scope_restricted);
+        assert!(foreign.sources.is_empty());
+        let own = store
+            .memory_evidence(&visible(&a), &global.id, 0, 4)
+            .unwrap();
+        assert_eq!(own.sources[0].text, "memory fact");
+        let local = entry(
+            &a,
+            MemoryScope::Session(a.session_lifetime_id.clone()),
+            "local-source",
+        );
+        store.store_memory(&a, &local).unwrap();
+        assert!(
+            store
+                .memory_evidence(&visible(&b), &local.id, 0, 4)
+                .is_err()
+        );
+        store
+            .finish(&a.run_id, RunStatus::Completed, Some("完成"), None)
+            .unwrap();
+        store
+            .lock_connection()
+            .unwrap()
+            .execute(
+                "UPDATE transcript_batches SET digest='bad' WHERE lifetime=?1",
+                params![a.session_lifetime_id.0],
+            )
+            .unwrap();
+        assert!(
+            store
+                .memory_evidence(&visible(&a), &global.id, 0, 4)
+                .is_err()
+        );
+        store
+            .end_session(&a.session_key, &a.session_lifetime_id, false)
+            .unwrap();
+        assert!(
+            store
+                .memory_evidence(&visible(&a), &global.id, 0, 4)
+                .is_err()
+        );
+    }
+    #[test]
+    fn evidence_has_unicode_and_serialized_page_budgets() {
+        use crate::TranscriptStore;
+        let store = RunStore::open(std::path::Path::new(":memory:")).unwrap();
+        let owner = admission(&store, "evidence-budget");
+        store
+            .append_transcript(
+                &owner,
+                "large",
+                &(0..8)
+                    .map(|_| Message::text(Role::Assistant, "😀".repeat(5000)))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        let mut record = entry(
+            &owner,
+            MemoryScope::Session(owner.session_lifetime_id.clone()),
+            "large-source",
+        );
+        record.source_message_ids = (1..=8)
+            .map(|seq| format!("{}:{seq}", owner.session_lifetime_id.0))
+            .collect();
+        store.store_memory(&owner, &record).unwrap();
+        let page = store
+            .memory_evidence(&visible(&owner), &record.id, 0, 16)
+            .unwrap();
+        assert!(serde_json::to_vec(&page).unwrap().len() <= 32 * 1024);
+        assert_eq!(page.sources.len(), 1);
+        assert_eq!(page.sources[0].text.chars().count(), 4096);
+        assert!(page.sources[0].truncated && page.has_more);
+        assert!(
+            store
+                .memory_evidence(&visible(&owner), &"x".repeat(513), 0, 4)
+                .is_err()
+        );
+        let next = store
+            .memory_evidence(&visible(&owner), &record.id, page.next_source, 16)
+            .unwrap();
+        assert_ne!(page.sources[0].source_id, next.sources[0].source_id);
     }
     #[test]
     fn empty_ingest_commits_receipt_without_memory_and_large_turn_is_bounded() {
@@ -621,6 +1059,7 @@ mod tests {
             sandbox_effective: "native".into(),
             sandbox_notice: None,
             docker_image: None,
+            delegation_context: None,
             context_read_only: true,
             context_token_budget: 1000,
             context_policy_fingerprint: None,

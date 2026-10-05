@@ -169,18 +169,36 @@ impl MemoryStore {
         if let Some((repository, owner)) = crate::loop_engine::current_session_repository() {
             let visibility = visibility_for(&*repository, &owner)?;
             let candidates = repository.memory_candidates(&visibility)?;
-            return Ok(
-                agent_memory::rank(candidates, &visibility, query, limit, unix_time()?)
-                    .into_iter()
-                    .map(|e| MemoryEntry {
-                        id: e.id,
-                        content: e.content,
-                        created_at: e.created_at,
-                        expires_at: e.expires_at,
-                        manual: e.kind == agent_core::MemoryKind::Explicit,
-                    })
-                    .collect(),
+            let records = agent_memory::rank_with_feedback(
+                candidates,
+                &visibility,
+                query,
+                limit,
+                unix_time()?,
+                &repository.memory_assessments(&visibility)?,
             );
+            let exposures = records
+                .iter()
+                .map(agent_core::MemoryExposure::from)
+                .collect::<Vec<_>>();
+            if let Err(error) = repository.record_memory_exposures(
+                &owner,
+                &exposures,
+                "tool_result_prepared",
+                agent_memory::RECALL_POLICY,
+            ) {
+                tracing::warn!(error=%error,"memory 工具曝光维护未写入");
+            }
+            return Ok(records
+                .into_iter()
+                .map(|e| MemoryEntry {
+                    id: e.id,
+                    content: e.content,
+                    created_at: e.created_at,
+                    expires_at: e.expires_at,
+                    manual: e.kind == agent_core::MemoryKind::Explicit,
+                })
+                .collect());
         }
         if !cfg!(test) {
             anyhow::bail!("memory 召回要求 daemon exact owner");
@@ -256,20 +274,6 @@ pub(crate) fn visibility_for(
     })
 }
 
-impl agent_memory::MemoryEngine for ScopedMemoryReader {
-    fn candidates(
-        &self,
-        visibility: &agent_core::MemoryVisibility,
-    ) -> std::result::Result<Vec<agent_core::MemoryRecord>, agent_memory::MemoryError> {
-        self.repository
-            .memory_candidates(visibility)
-            .map_err(|e| agent_memory::MemoryError(e.to_string()))
-    }
-}
-pub(crate) struct ScopedMemoryReader {
-    pub repository: Arc<dyn crate::storage::ControlRepository>,
-}
-
 pub struct RememberTool {
     store: Arc<MemoryStore>,
 }
@@ -317,6 +321,46 @@ impl Tool for RememberTool {
 
 pub struct RecallMemoryTool {
     store: Arc<MemoryStore>,
+}
+
+pub struct MemoryEvidenceTool;
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvidenceArgs {
+    memory_id: String,
+    #[serde(default)]
+    after_source: usize,
+    #[serde(default = "default_recall_limit")]
+    limit: usize,
+}
+#[async_trait]
+impl Tool for MemoryEvidenceTool {
+    fn name(&self) -> &str {
+        "memory_evidence"
+    }
+    fn description(&self) -> &str {
+        "按记忆来源 ID 核实本会话原始证据；有界分页且过滤常见凭据，跨会话来源不返回文本"
+    }
+    fn parameters(&self) -> Value {
+        json!({"type":"object","properties":{"memory_id":{"type":"string"},"after_source":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":16}},"required":["memory_id"],"additionalProperties":false})
+    }
+    fn is_read_only(&self) -> bool {
+        true
+    }
+    async fn execute(&self, args: Value) -> Result<String> {
+        let args: EvidenceArgs =
+            serde_json::from_value(args).context("memory_evidence 参数无效")?;
+        let (repository, owner) = crate::loop_engine::current_session_repository()
+            .context("证据读取要求 daemon exact owner")?;
+        let visibility = visibility_for(&*repository, &owner)?;
+        let page = repository.memory_evidence(
+            &visibility,
+            &args.memory_id,
+            args.after_source,
+            args.limit,
+        )?;
+        Ok(serde_json::to_string(&page)?)
+    }
 }
 
 impl RecallMemoryTool {

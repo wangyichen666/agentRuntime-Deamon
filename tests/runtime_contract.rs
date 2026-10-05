@@ -100,14 +100,21 @@ async fn mock_delegation_ollama(
     (url, task, count)
 }
 
-async fn mock_tool_spawn_ollama() -> (String, tokio::task::JoinHandle<()>) {
+async fn mock_tool_spawn_ollama() -> (
+    String,
+    tokio::task::JoinHandle<()>,
+    Arc<tokio::sync::Mutex<Vec<Value>>>,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let count = Arc::new(AtomicUsize::new(0));
+    let captures = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let captured = captures.clone();
     let task = tokio::spawn(async move {
         loop {
             let (mut stream, _) = listener.accept().await.unwrap();
             let served = count.fetch_add(1, Ordering::SeqCst) + 1;
+            let captured = captured.clone();
             tokio::spawn(async move {
                 let mut request = Vec::new();
                 let mut buffer = [0u8; 8192];
@@ -121,8 +128,30 @@ async fn mock_tool_spawn_ollama() -> (String, tokio::task::JoinHandle<()>) {
                         break;
                     }
                 }
+                let offset = request.windows(4).position(|s| s == b"\r\n\r\n").unwrap() + 4;
+                let header = String::from_utf8_lossy(&request[..offset]);
+                let length = header
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                    .unwrap()
+                    .1
+                    .trim()
+                    .parse::<usize>()
+                    .unwrap();
+                while request.len() < offset + length {
+                    let read = stream.read(&mut buffer).await.unwrap();
+                    if read == 0 {
+                        return;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                captured
+                    .lock()
+                    .await
+                    .push(serde_json::from_slice(&request[offset..offset + length]).unwrap());
                 let body = if served == 1 {
-                    "{\"message\":{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"function\":{\"name\":\"spawn_subagent\",\"arguments\":{\"task\":\"核对一个问题\"}}}]},\"done\":false}\n{\"done\":true}\n"
+                    "{\"message\":{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"function\":{\"name\":\"spawn_subagent\",\"arguments\":{\"task\":\"核对一个问题\",\"context_source_ids\":[\"parent_input\"]}}}]},\"done\":false}\n{\"done\":true}\n"
                 } else {
                     "{\"message\":{\"role\":\"assistant\",\"content\":\"完成\"},\"done\":false}\n{\"done\":true}\n"
                 };
@@ -131,7 +160,7 @@ async fn mock_tool_spawn_ollama() -> (String, tokio::task::JoinHandle<()>) {
             });
         }
     });
-    (url, task)
+    (url, task, captures)
 }
 
 async fn mock_child_outside_read_ollama(
@@ -991,13 +1020,13 @@ async fn model_spawn_tool_uses_durable_delegation_and_receipt() {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        let (url, server) = mock_tool_spawn_ollama().await;
+        let (url, server, captures) = mock_tool_spawn_ollama().await;
         let (mut daemon_process, socket) = daemon(&workspace, &runtime_dir, &url).await;
         let session = rpc(&socket, "new", "session.new", json!({})).await["result"]["session_id"]
             .as_str()
             .unwrap()
             .to_owned();
-        let (parent, response) = chat(&socket, "parent", &session, "派出子任务", true).await;
+        let (parent, response) = chat(&socket, "parent", &session, "派出子任务\nAPI_KEY=sk-parent-private", true).await;
         assert!(response.unwrap().get("result").is_some());
         let tools = rpc(&socket, "tools", "run.tools", json!({"run_id":parent})).await;
         assert_eq!(
@@ -1031,8 +1060,28 @@ async fn model_spawn_tool_uses_durable_delegation_and_receipt() {
             waited["result"]["children"][0]["status"], "completed",
             "{waited}"
         );
+        let material=captures.lock().await.iter().find(|request|request["messages"].as_array().unwrap().iter().any(|m|m["role"]=="user" && m["content"]=="核对一个问题")).cloned().expect("应捕获真实child请求");
+        let messages=material["messages"].as_array().unwrap();
+        let inherited=messages.iter().find(|m|m["content"].as_str().is_some_and(|t|t.starts_with("[retrieved_delegation]"))).expect("child应收到持久交接包");
+        let inherited_text=inherited["content"].as_str().unwrap();
+        assert!(inherited_text.contains("派出子任务") && inherited_text.contains("凭据行已过滤"));
+        assert!(!serde_json::to_string(&material).unwrap().contains("sk-parent-private"));
+        assert_eq!(material["tools"].as_array().unwrap().len(),1);
+        assert_eq!(material["tools"][0]["function"]["name"],"read_file");
+        let fact=rpc(&socket,"captured","run.read",json!({"run_id":child})).await;
+        let captured=fact["result"]["snapshot"]["delegation_context"].clone();
+        assert_eq!(captured["version"],1);assert_eq!(captured["parent"]["run_id"],parent);
+        assert_eq!(captured["sources"].as_array().unwrap().len(),1);
         daemon_process.kill().await.unwrap();
         daemon_process.wait().await.unwrap();
+        let (mut restarted,socket)=daemon(&workspace,&runtime_dir,&url).await;
+        let fact=rpc(&socket,"captured-restart","run.read",json!({"run_id":child})).await;
+        assert_eq!(fact["result"]["snapshot"]["delegation_context"],captured);
+        let replay=rpc(&socket,"replay","spawn_subagent",json!({"parent_session_id":session,"parent_run_id":parent,"spawn_key":listed["result"]["children"][0]["spawn_key"],"task":"核对一个问题","context_source_ids":["parent_input"]})).await;
+        assert_eq!(replay["result"]["child"]["child_run_id"],child,"{replay}");
+        let conflict=rpc(&socket,"replay-conflict","spawn_subagent",json!({"parent_session_id":session,"parent_run_id":parent,"spawn_key":listed["result"]["children"][0]["spawn_key"],"task":"核对一个问题","context_source_ids":[]})).await;
+        assert!(conflict.get("error").is_some());
+        restarted.kill().await.unwrap();restarted.wait().await.unwrap();
         server.abort();
         let _ = std::fs::remove_dir_all(workspace);
         let _ = std::fs::remove_dir_all(runtime_dir);
@@ -1274,7 +1323,7 @@ async fn compact_memory_receipts_survive_restart_and_all_three_entries() {
         entry_views(&workspace,&runtime_dir,&url,&owner,"子任务完成",None).await;
         let doctor=rpc(&socket,"doctor","runtime.doctor",json!({})).await;
         assert_eq!(doctor["result"]["storage"]["integrity"],"ok");
-        assert_eq!(doctor["result"]["storage"]["schema_version"],12);
+        assert_eq!(doctor["result"]["storage"]["schema_version"],13);
         rpc(&socket,"clear","sessions.clear",json!({"session_id":key,"operation_id":"clear-context"})).await;
         let cleared=rpc(&socket,"clear-read","memory.list",json!({"session_id":key})).await;
         assert_eq!(cleared["result"]["entries"],json!([]));
@@ -1283,4 +1332,124 @@ async fn compact_memory_receipts_survive_restart_and_all_three_entries() {
         restarted.kill().await.unwrap();restarted.wait().await.unwrap();server.abort();
         let _=std::fs::remove_dir_all(workspace);let _=std::fs::remove_dir_all(runtime_dir);
     }).await.expect("compact memory 三入口重启合同超时");
+}
+
+#[tokio::test]
+async fn memory_flywheel_learns_from_user_feedback_across_restart_and_purges_on_forget() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let workspace=temp_workspace();let runtime_dir=PathBuf::from(format!("/tmp/ma-fw-{}-{}",std::process::id(),NEXT.fetch_add(1,Ordering::Relaxed)));
+        let (url,server,_)=mock_delegation_ollama((1..=10).collect()).await;
+        let (mut process,socket)=daemon(&workspace,&runtime_dir,&url).await;
+        let key="session-flywheel.jsonl";
+        rpc(&socket,"create","sessions.create",json!({"session_id":key,"operation_id":"create-fw"})).await;
+        let (seed,response)=chat(&socket,"seed",key,"初始化",true).await;assert!(response.unwrap().get("error").is_none());
+        let stored=rpc(&socket,"store","memory.store",json!({"session_id":key,"owner_run_id":seed,"operation_id":"fact","content":"cargo 约定：构建必须执行 cargo check"})).await;
+        let memory=stored["result"]["entry"]["id"].as_str().unwrap().to_owned();
+        let (used,response)=chat(&socket,"use",key,"cargo 约定",true).await;assert!(response.unwrap().get("error").is_none());
+        let episode=format!("turn:{seed}");
+        let evidence=rpc(&socket,"evidence","memory.evidence",json!({"session_id":key,"memory_id":episode,"limit":1})).await;
+        assert_eq!(evidence["result"]["evidence"]["sources"][0]["text"],"初始化","{evidence}");
+        assert_eq!(evidence["result"]["evidence"]["has_more"],true);
+        let report=rpc(&socket,"report","memory.flywheel",json!({"session_id":key})).await;
+        assert!(report["result"]["exposures"].as_array().unwrap().iter().any(|e|e["memory_id"]==memory && e["run_id"]==used && e["channel"]=="context_prepared" && e["policy"]=="lexical-feedback-v1"),"{report}");
+        let command=json!({"session_id":key,"owner_run_id":used,"operation_id":"user-correction","memory_id":memory,"feedback":"incorrect"});
+        let accepted=rpc(&socket,"vote","memory.feedback",command.clone()).await;assert_eq!(accepted["result"]["accepted"],true,"{accepted}");
+        let conflict=rpc(&socket,"conflict","memory.feedback",json!({"session_id":key,"owner_run_id":used,"operation_id":"user-correction","memory_id":memory,"feedback":"helpful"})).await;assert!(conflict.get("error").is_some());
+        process.kill().await.unwrap();process.wait().await.unwrap();
+        let (mut restarted,socket)=daemon(&workspace,&runtime_dir,&url).await;
+        let evidence=rpc(&socket,"evidence-restart","memory.evidence",json!({"session_id":key,"memory_id":episode,"after_source":1,"limit":1})).await;
+        assert_eq!(evidence["result"]["evidence"]["sources"][0]["role"],"assistant","{evidence}");
+        let forget_episode=rpc(&socket,"forget-evidence","memory.forget",json!({"session_id":key,"owner_run_id":used,"memory_id":episode,"revision":0})).await;
+        assert_eq!(forget_episode["result"]["forgotten"],true);
+        let evidence=rpc(&socket,"evidence-forgotten","memory.evidence",json!({"session_id":key,"memory_id":episode})).await;
+        assert!(evidence.get("error").is_some());
+        let replay=rpc(&socket,"replay","memory.feedback",command).await;assert_eq!(replay["result"]["accepted"],true);
+        let recall=rpc(&socket,"recall","memory.recall",json!({"session_id":key,"query":"cargo 约定"})).await;
+        assert!(recall["result"]["entries"].as_array().unwrap().iter().all(|e|e["id"]!=memory),"{recall}");
+        let (after,response)=chat(&socket,"after-feedback",key,"cargo 约定",true).await;assert!(response.unwrap().get("error").is_none());
+        let report=rpc(&socket,"after-report","memory.flywheel",json!({"session_id":key})).await;
+        assert_eq!(report["result"]["feedback"]["incorrect"],1);
+        assert!(report["result"]["exposures"].as_array().unwrap().iter().all(|e|e["run_id"]!=after || e["memory_id"]!=memory));
+        let forgotten=rpc(&socket,"forget","memory.forget",json!({"session_id":key,"owner_run_id":used,"memory_id":memory,"revision":0})).await;assert_eq!(forgotten["result"]["forgotten"],true);
+        let purged=rpc(&socket,"purged","memory.flywheel",json!({"session_id":key})).await;assert_eq!(purged["result"]["feedback"]["incorrect"],0);
+        let late=rpc(&socket,"late","memory.feedback",json!({"session_id":key,"owner_run_id":used,"operation_id":"user-correction","memory_id":memory,"feedback":"incorrect"})).await;assert!(late.get("error").is_some());
+        restarted.kill().await.unwrap();restarted.wait().await.unwrap();server.abort();let _=std::fs::remove_dir_all(workspace);let _=std::fs::remove_dir_all(runtime_dir);
+    }).await.expect("记忆飞轮重启合同超时");
+}
+
+#[tokio::test]
+async fn memory_maintenance_drains_multiple_batches_before_idle_exit() {
+    use agent_core::{Admission, AdmissionMode, RequestId, RunStatus, SessionKey};
+    use agent_storage::{RunStore, SessionLifecycle};
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let workspace = temp_workspace();
+        std::fs::create_dir_all(workspace.join(".my-agent")).unwrap();
+        let runtime_dir = PathBuf::from(format!(
+            "/tmp/ma-drain-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let key = SessionKey("session-drain.jsonl".into());
+        {
+            let store = RunStore::open(&workspace.join(".my-agent/runtime.sqlite3")).unwrap();
+            let lifetime = store.create_session(&key).unwrap();
+            for id in 0..40 {
+                let Admission::New(run) = store
+                    .admit_with_route(
+                        key.clone(),
+                        RequestId::Number(id),
+                        "排空证据",
+                        AdmissionMode::Queue,
+                        None,
+                    )
+                    .unwrap()
+                else {
+                    panic!("new")
+                };
+                assert!(store.try_start_queued(&run.run_id).unwrap());
+                store
+                    .finish(&run.run_id, RunStatus::Completed, Some("完成"), None)
+                    .unwrap();
+            }
+            assert_eq!(
+                store.flywheel_report(&lifetime.lifetime).unwrap()["pending_ingests"],
+                40
+            );
+        }
+        // 不启动模型服务：恢复来自已提交事实，不应发起模型调用。
+        let (mut process, socket) = daemon(&workspace, &runtime_dir, "http://127.0.0.1:1").await;
+        let mut drained = false;
+        for index in 0..30 {
+            let report = rpc(
+                &socket,
+                &format!("report-{index}"),
+                "memory.flywheel",
+                json!({"session_id":key.0}),
+            )
+            .await;
+            if report["result"]["pending_ingests"] == 0 {
+                drained = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            drained,
+            "积压40项必须在两个批次排空，不能等60秒或提前空闲退出"
+        );
+        let listed = rpc(
+            &socket,
+            "list",
+            "memory.list",
+            json!({"session_id":key.0,"limit":50}),
+        )
+        .await;
+        assert_eq!(listed["result"]["entries"].as_array().unwrap().len(), 40);
+        process.kill().await.unwrap();
+        process.wait().await.unwrap();
+        let _ = std::fs::remove_dir_all(workspace);
+        let _ = std::fs::remove_dir_all(runtime_dir);
+    })
+    .await
+    .expect("维护积压排空合同超时");
 }

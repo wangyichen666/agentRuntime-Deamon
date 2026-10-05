@@ -919,3 +919,52 @@ Wave 1–7 均完成当前主链，本地 schema v12；261 项 Rust/27 项 Web �
 - [x] 记录取舍与实施计划：docs/research/codex-context-memory.md。
 - [x] 实施当前轮次保护、原文锚点、完整记忆预算、有界摄入与空结果回执。
 - [x] 回归测试与门禁，记录实际证据。
+
+## 2026-10-03：Codex 对比与数据飞轮
+
+目标：先研究、再确定取舍，开发运行数据→显式反馈→确定性策略→离线评测→运行应用的持续改进闭环。复用已有 owner/CAS、SQLite 与隔离预算。
+
+| 阶段 | 状态 | 完成标准 |
+|---|---|---|
+| 对比研究 | complete | 固定源码证据，核对既有实现与实际缺口 |
+| 方案设计 | complete | 明确采样、反馈信号、作用域、遗忘、评测与上线边界 |
+| 开发接线 | complete | 真实召回链路、持久反馈、诊断与 CLI、评测集接线 |
+| 验证交付 | complete | 重启/幂等/只读/遗忘合同与完整门禁通过 |
+
+研究方案：docs/research/codex-data-flywheel.md。Codex参考固定提交8d44977aa2fb9ae1b128660668dc5b36966613fa，远程HEAD受失效代理阻断，未宣称最新版。
+
+开发修复：params补丁按实际导入锚点重做；时间i64与请求u64类型明确转换；恢复查询JOIN runs取得lifetime；并行临时目录加原子序号防碰撞；clear(false)已创建新lifetime，不重复create。SQLite v13保存曝光/评价/回执/退避，自动摘录过滤常见凭据，运行成功不自动视为好评。
+
+本阶段门禁：Rust276项、真实daemon10合同、检索17/17、Web27项、Clippy、MSRV1.88、release、fmt/diff、离线cargo-deny通过。本机socket及公告缓存锁经自动审批执行，未跳过合同。
+
+## 2026-10-03：继续研究——压缩、证据与维护生命周期
+
+延续用户要求，保留上一轮改动。研究、方案、实施、验证均complete，见docs/research/codex-context-evidence.md。
+
+- 当前轮次suffix契约同时进入候选验证和持久提交，完整保护原文、图片、工具参数与结果。
+- 历史摘要标明模型推断与projection digest；递归上限拒绝安装截断摘要。
+- memory.evidence RPC与只读工具按来源点查canonical transcript，复核owner/digest、分页与元数据预算；跨会话不公开源对话。
+- 健康积压每批32项、短间隔排空并保护空闲生命周期；整体错误回到常规退避。
+- 修复夹具：clear前先结束受管run；create_session返回metadata，报告传metadata.lifetime；memory.list核对40项须显式limit50。
+
+## 2026-10-05：继续研究——有界委派上下文
+
+研究、方案、实施、验证均complete，见docs/research/codex-delegation-context.md。
+
+显式最多4条父run来源，支持parent_input别名；事务复核来源并冻结于child RunSnapshot。原task独立，正常/overflow请求按同一包组装并计入预算；不扩大read_file能力，不隐式传递祖先包。来源序号规范化后去重，重试读回原捕获包，改选来源拒绝。真实provider请求捕获、重启读回及存储回滚合同通过。
+
+## 2026-10-05：继续研究——原文保留覆盖状态
+
+研究、方案、实施、验证均complete，见docs/research/codex-retention-coverage.md。
+
+v2锚点兼容旧数组，保存文字覆盖状态和省略下限；checkpoint不能恢复原始完整标识。包装与元数据均计预算，零预算覆盖诊断仍进入宿主摘要JSON。6项独立保留评测与15项当前轮次保护评测共同形成21项上下文门禁。SummaryProvider夹具改用Response::Text，生产adapter保持既有契约。
+
+### 2026-10-05：第二至第四轮最终验收
+
+统一门禁全部通过：Rust289项（真实daemon11合同）、Web27项、debug/release检索17/17与上下文21/21、Clippy locked all-targets/all-features -D warnings、MSRV1.88 locked、release locked、fmt/diff、离线cargo-deny。使用已有公告缓存，不宣称实时漏洞数据库。未重启用户项目daemon。
+
+已通过Codex应用创建本对话heartbeat“Agent Rust 持续研究与优化”（automationId: agent-rust），每12小时继续一项有证据的研究/计划/开发/验证增量；不作无收益改动，无实质新进展保持安静。下一次继续依据既有研究与质量基线选题，真实语义收益仍待生产对照验证。
+
+### 提交前文档修复
+
+提交检查发现上一轮写文件脚本误将src/context.rs内容写入task_plan.md。保留临时备份，从HEAD恢复原有921行计划，依据研究文档与progress补回上述新增记录；未改动源码。用户已授权提交并推送远端，按现有main与origin进行常规提交，禁止强制覆盖远端历史。

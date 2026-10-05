@@ -384,6 +384,7 @@ impl LoopEngine {
             let mut request_messages = self
                 .prepare_context(history, &specs, &cancellation, None)
                 .await?;
+            self.insert_delegation_context(&mut request_messages)?;
             if let Some(memory) = self.recall_memory_segment(history)? {
                 insert_retrieved(&mut request_messages, memory);
             }
@@ -805,6 +806,17 @@ impl LoopEngine {
         Ok(self.context.compose(&projected).await)
     }
 
+    fn insert_delegation_context(&self, messages: &mut Vec<Message>) -> Result<()> {
+        if let Some((repository, owner)) = current_session_repository()
+            && let Some(context) = repository
+                .run_snapshot(&owner.run_id)?
+                .and_then(|s| s.delegation_context)
+        {
+            insert_retrieved(messages, agent_context::render_delegation(&context)?);
+        }
+        Ok(())
+    }
+
     fn recall_memory_segment(&self, history: &[Message]) -> Result<Option<Message>> {
         let Some((repository, owner)) = current_session_repository() else {
             return Ok(None);
@@ -819,10 +831,15 @@ impl LoopEngine {
             .find(|m| m.role == Role::User)
             .and_then(|m| m.content.as_deref())
             .unwrap_or_default();
-        use agent_memory::MemoryEngine;
-        let reader = crate::memory::ScopedMemoryReader { repository };
         let now = unix_time_ms() / 1000;
-        let entries = reader.recall(&visibility, query, 20, now)?;
+        let entries = agent_memory::rank_with_feedback(
+            repository.memory_candidates(&visibility)?,
+            &visibility,
+            query,
+            20,
+            now,
+            &repository.memory_assessments(&visibility)?,
+        );
         let segment = agent_memory::render_context(
             &entries,
             &visibility,
@@ -926,6 +943,31 @@ impl LoopEngine {
                 budget,
             };
             store.record_context(&owner, round, &envelope)?;
+            // 计完整预算后记录实际请求材料中的版本；不把召回候选记成曝光。
+            for message in messages {
+                if message.role == Role::System
+                    && message
+                        .content
+                        .as_deref()
+                        .is_some_and(|s| s.starts_with("[retrieved_memory]"))
+                {
+                    let entries: Vec<agent_core::MemoryExposure> = serde_json::from_str(
+                        message
+                            .content
+                            .as_deref()
+                            .and_then(|s| s.split_once('\n'))
+                            .map_or("[]", |(_, json)| json),
+                    )?;
+                    if let Err(error) = store.record_memory_exposures(
+                        &owner,
+                        &entries,
+                        "context_prepared",
+                        agent_memory::RECALL_POLICY,
+                    ) {
+                        tracing::warn!(error=%error,"memory 曝光维护未写入");
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -1140,6 +1182,7 @@ impl LoopEngine {
                             let mut rebuilt = self
                                 .prepare_context(&[], specs, cancellation, Some(&operation))
                                 .await?;
+                            self.insert_delegation_context(&mut rebuilt)?;
                             if let Some(memory) = self.recall_memory_segment(messages)? {
                                 insert_retrieved(&mut rebuilt, memory);
                             }

@@ -118,6 +118,22 @@ pub fn normalize_request(mut request: JsonRpcRequest) -> Result<JsonRpcRequest, 
             "revision"
         ),
         "runtime.doctor" => check!(EmptyParams,),
+        "memory.feedback" => check!(
+            MemoryFeedbackParams,
+            "session_id",
+            "owner_run_id",
+            "operation_id",
+            "memory_id",
+            "feedback"
+        ),
+        "memory.flywheel" => check!(MemoryReadParams, "session_id", "query", "after_id", "limit"),
+        "memory.evidence" => check!(
+            MemoryEvidenceParams,
+            "session_id",
+            "memory_id",
+            "after_source",
+            "limit"
+        ),
         "session.compact" => check!(
             SessionCompactParams,
             "session_id",
@@ -175,6 +191,7 @@ pub fn normalize_request(mut request: JsonRpcRequest) -> Result<JsonRpcRequest, 
             "parent_run_id",
             "spawn_key",
             "task",
+            "context_source_ids",
             "tools",
             "max_rounds",
             "max_tokens",

@@ -16,7 +16,7 @@ use crate::cron::{AgentCronRunner, CronManager, CronStore, UnattendedApproval};
 use crate::daemon::protocol::JsonRpcRequest;
 use crate::loop_engine::LoopEngine;
 use crate::mcp::McpManager;
-use crate::memory::{MemoryStore, RecallMemoryTool, RememberTool};
+use crate::memory::{MemoryEvidenceTool, MemoryStore, RecallMemoryTool, RememberTool};
 use crate::plan::{PlanStore, PlanTool};
 use crate::provider::{Provider, ProviderManager, ProviderProfile};
 use crate::safety::SafetyPolicy;
@@ -60,6 +60,7 @@ pub async fn build_daemon_state(workspace: &Path) -> Result<Arc<DaemonState>> {
     let memory = Arc::new(MemoryStore::from_env(workspace));
     tools.register(RememberTool::new(memory.clone()));
     tools.register(RecallMemoryTool::new(memory.clone()));
+    tools.register(MemoryEvidenceTool);
     let delegation_daemon = Arc::new(OnceLock::new());
     tools.register(super::resources::BackgroundTool::new(
         delegation_daemon.clone(),
@@ -114,6 +115,7 @@ pub async fn build_daemon_state(workspace: &Path) -> Result<Arc<DaemonState>> {
     cron_tools.register(EditFileTool::new(cron_safety));
     cron_tools.register(RememberTool::new(memory.clone()));
     cron_tools.register(RecallMemoryTool::new(memory));
+    cron_tools.register(MemoryEvidenceTool);
     let cron_store = Arc::new(CronStore::load_best_effort(workspace).await);
     let heartbeat = env_bool("HEARTBEAT_ENABLED", false)
         .then(|| Duration::from_secs(env_u64("HEARTBEAT_INTERVAL_SECS", 300)));

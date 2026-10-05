@@ -71,6 +71,8 @@ enum Command {
     Status,
     #[command(about = "读取 daemon 的存储、恢复与凭据来源诊断")]
     Doctor,
+    #[command(subcommand, about = "记忆数据飞轮：报告、用户反馈与离线质量评测")]
+    Flywheel(FlywheelCommand),
     #[command(about = "优雅停止当前工作区 daemon")]
     Stop,
     #[command(about = "列出当前工作区会话")]
@@ -101,6 +103,37 @@ enum ConfigCommand {
     List,
 }
 
+#[derive(Subcommand)]
+enum FlywheelCommand {
+    #[command(about = "读取当前会话的曝光、评价和摄入诊断")]
+    Report {
+        #[arg(long)]
+        session: String,
+    },
+    #[command(about = "评价报告中已曝光的记忆，运行结束后提交")]
+    Feedback {
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        run: String,
+        #[arg(long)]
+        memory: String,
+        #[arg(long)]
+        operation: String,
+        #[arg(long, value_enum)]
+        vote: FeedbackVote,
+    },
+    #[command(about = "离线执行固定质量评测，不调用模型；失败退出非零")]
+    Evaluate,
+}
+#[derive(Clone, clap::ValueEnum)]
+enum FeedbackVote {
+    Helpful,
+    Irrelevant,
+    Incorrect,
+    Outdated,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
@@ -123,6 +156,50 @@ async fn main() -> Result<()> {
                     &request_result(&client, "runtime.doctor", json!({})).await?
                 )?
             );
+            Ok(())
+        }
+        Command::Flywheel(command) => {
+            let result = match command {
+                FlywheelCommand::Evaluate => {
+                    let report = agent_memory::evaluate_builtin(|text| {
+                        agent_context::TokenEstimator
+                            .messages(&[agent_core::Message::text(agent_core::Role::System, text)])
+                    })?;
+                    let context = agent_context::evaluate_builtin()?;
+                    let mut output = serde_json::to_value(&report)?;
+                    output["context"] = context.clone();
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                    anyhow::ensure!(report.is_passed(), "记忆质量门禁未通过");
+                    anyhow::ensure!(
+                        context["passed"] == context["total"]
+                            && context["total"].as_u64().is_some_and(|total| total > 0),
+                        "上下文保护门禁未通过"
+                    );
+                    return Ok(());
+                }
+                FlywheelCommand::Report { session } => {
+                    let client = bootstrap::connect_workspace(&workspace).await?;
+                    request_result(&client, "memory.flywheel", json!({"session_id":session}))
+                        .await?
+                }
+                FlywheelCommand::Feedback {
+                    session,
+                    run,
+                    memory,
+                    operation,
+                    vote,
+                } => {
+                    let feedback = match vote {
+                        FeedbackVote::Helpful => agent_core::MemoryFeedback::Helpful,
+                        FeedbackVote::Irrelevant => agent_core::MemoryFeedback::Irrelevant,
+                        FeedbackVote::Incorrect => agent_core::MemoryFeedback::Incorrect,
+                        FeedbackVote::Outdated => agent_core::MemoryFeedback::Outdated,
+                    };
+                    let client = bootstrap::connect_workspace(&workspace).await?;
+                    request_result(&client,"memory.feedback",json!({"session_id":session,"owner_run_id":run,"memory_id":memory,"operation_id":operation,"feedback":feedback})).await?
+                }
+            };
+            println!("{}", serde_json::to_string_pretty(&result)?);
             Ok(())
         }
         Command::Stop => run_stop_command(&workspace).await,

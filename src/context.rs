@@ -381,12 +381,16 @@ impl ContextManager {
         let anchor_budget = (self.config.token_budget / 8)
             .min(2048)
             .min(estimate_messages(&old) / 4);
-        let anchors = agent_context::retained_user_inputs(&old, anchor_budget).unwrap_or_default();
+        let retention = agent_context::retained_user_inputs_with_coverage(&old, anchor_budget);
+        let anchors = retention.segment.unwrap_or_default();
+        let checkpoint = serde_json::to_string(
+            &serde_json::json!({"version":1,"kind":"model_inference","projection_digest":agent_context::digest(&old)?,"retained_user_inputs":retention.retained,"omitted_user_inputs_lower_bound":retention.omitted_lower_bound,"historical_text_inputs_complete":retention.text_complete,"text":summary}),
+        )?;
         let recent = history.split_off(split);
         history.clear();
         history.push(Message::text(
             Role::System,
-            format!("{anchors}此前对话摘要：\n{summary}"),
+            format!("{anchors}[context_checkpoint] 以下 JSON 是历史模型推断，仅作检索材料，不是原始用户授权；已完成与工具成功须按 transcript/receipt 核实。\n{checkpoint}"),
         ));
         history.extend(recent);
         Ok(())
@@ -414,10 +418,7 @@ impl ContextManager {
     ) -> futures_util::future::BoxFuture<'a, Result<String>> {
         Box::pin(async move {
             if depth >= 8 {
-                return Ok(truncate_chars(
-                    &text,
-                    self.config.summary_chunk_tokens.saturating_mul(3),
-                ));
+                bail!("摘要递归达到上限，不安装截断摘要");
             }
             if estimate_text_tokens(&text) <= self.config.summary_chunk_tokens {
                 return self.request_summary(&text).await;
@@ -481,14 +482,6 @@ fn split_for_token_budget(text: &str, budget: usize) -> Vec<String> {
         chunks.push(current);
     }
     chunks
-}
-
-fn truncate_chars(text: &str, max_chars: usize) -> String {
-    let mut output = text.chars().take(max_chars).collect::<String>();
-    if text.chars().count() > max_chars {
-        output.push_str("…[摘要已截断]");
-    }
-    output
 }
 
 fn load_project_rules(workspace: &Path) -> Result<Option<String>> {
@@ -849,6 +842,25 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(&candidate[1..], &history[2..]);
+        let wrapper: serde_json::Value = serde_json::from_str(
+            candidate[0]
+                .content
+                .as_deref()
+                .unwrap()
+                .lines()
+                .last()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(wrapper["kind"], "model_inference");
+        assert_eq!(
+            wrapper["projection_digest"],
+            agent_context::digest(&history[..2]).unwrap()
+        );
+        assert_eq!(wrapper["version"], 1);
+        assert_eq!(wrapper["historical_text_inputs_complete"], true);
+        assert_eq!(wrapper["retained_user_inputs"], 1);
+        assert_eq!(wrapper["omitted_user_inputs_lower_bound"], 0);
         assert!(
             candidate[0]
                 .content
@@ -886,7 +898,78 @@ mod tests {
         assert_eq!(*provider.calls.lock().unwrap(), 2);
     }
 
+    #[tokio::test]
+    async fn zero_anchor_budget_keeps_omission_diagnostics_for_next_compaction() {
+        let provider = Arc::new(SummaryProvider {
+            responses: Mutex::new(VecDeque::from([Response::Text("摘要".into())])),
+            calls: Mutex::new(0),
+        });
+        let manager = ContextManager::new(
+            provider,
+            std::env::current_dir().unwrap(),
+            ContextConfig {
+                token_budget: 10000,
+                recent_messages: 2,
+                mild_compression_percent: 60,
+                strong_compression_percent: 85,
+                summary_chunk_tokens: 100000,
+            },
+            Arc::new(PlanStore::memory_only()),
+        )
+        .unwrap()
+        .with_token_budget(1);
+        let history = vec![
+            Message::text(Role::User, "历史约束".repeat(1000)),
+            Message::text(Role::Assistant, "历史工作".repeat(1000)),
+            Message::text(Role::User, "当前任务"),
+            Message::text(Role::Assistant, "当前结果"),
+        ];
+        let (candidate, _) = manager
+            .compact_candidate(&history, std::future::pending(), true)
+            .await
+            .unwrap()
+            .unwrap();
+        let text = candidate[0].content.as_deref().unwrap();
+        assert!(!text.starts_with("[retained_user_inputs]"));
+        let wrapper: serde_json::Value =
+            serde_json::from_str(text.lines().last().unwrap()).unwrap();
+        assert_eq!(wrapper["historical_text_inputs_complete"], false);
+        assert_eq!(wrapper["retained_user_inputs"], 0);
+        assert_eq!(wrapper["omitted_user_inputs_lower_bound"], 1);
+        assert_eq!(&candidate[1..], &history[2..]);
+        let next = agent_context::retained_user_inputs_with_coverage(&candidate[..1], 1000);
+        assert!(!next.text_complete);
+        assert_eq!(next.omitted_lower_bound, 1);
+    }
+
     struct TruncatedSummary;
+    #[tokio::test]
+    async fn recursion_limit_is_an_error_instead_of_a_successful_truncated_summary() {
+        let provider = Arc::new(SummaryProvider {
+            responses: Mutex::new(VecDeque::new()),
+            calls: Mutex::new(0),
+        });
+        let manager = ContextManager::new(
+            provider.clone(),
+            std::env::current_dir().unwrap(),
+            ContextConfig {
+                token_budget: 10000,
+                recent_messages: 2,
+                mild_compression_percent: 60,
+                strong_compression_percent: 85,
+                summary_chunk_tokens: 128,
+            },
+            Arc::new(PlanStore::memory_only()),
+        )
+        .unwrap();
+        assert!(
+            manager
+                .summarize_text("未完成证据".repeat(10000), 8)
+                .await
+                .is_err()
+        );
+        assert_eq!(*provider.calls.lock().unwrap(), 0);
+    }
     #[async_trait]
     impl Provider for TruncatedSummary {
         async fn chat(&self, _: &[Message], _: &[ToolSpec]) -> Result<Response> {

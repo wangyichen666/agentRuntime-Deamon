@@ -407,3 +407,32 @@ cargo deny check
 ### Codex 源码对比与记忆改进
 
 [研究、取舍与开发计划](docs/research/codex-context-memory.md)：已落实当前轮次保护、压缩原文延续、完整记忆注入预算和有界 Episode 摄入；两阶段智能提炼/整合保留为后续独立计划。
+
+### 记忆数据飞轮
+
+[本轮研究与实施方案](docs/research/codex-data-flywheel.md)记录与 Codex 使用统计、整合、租约及业务流程的比较。SQLite v13 保存进入请求材料的记忆版本和用户反馈，不在学习表重复保存查询或记忆内容。旧数据库升级前自动生成并验证 v12 备份。
+
+```bash
+# 无需模型配置、无需启动 daemon；失败退出非零
+my-agent flywheel evaluate
+# 查看运行 ID、记忆 ID、曝光及评价（最多显示最近 100 项）
+my-agent flywheel report --session session-example.jsonl
+# 运行结束后评价报告中的记忆；相同 operation 可安全重试
+my-agent flywheel feedback --session session-example.jsonl --run RUN_ID --memory MEMORY_ID --operation correction-1 --vote incorrect
+```
+
+`helpful` 优先、`irrelevant` 降序，只在关键词相关度相同时影响排序；`incorrect`/`outdated` 停止召回。新 operation 的 `helpful` 评价可以恢复召回；重复旧 operation 只读回执，不覆盖更新评价。反馈只影响当前会话 lifetime，绑定曝光版本，不会改写事实、提高置信度或扩大作用域。`memory.list` 仍可查看被排除的记录；`memory.recall`、自动注入、`recall_memory` 工具采用同一策略。
+
+JSON-RPC 对应 `memory.flywheel` 与 `memory.feedback`。反馈入口不注册为模型工具，运行成功和曝光次数不自动转成好评。曝光表示上下文完整预算已校验或工具结果已准备，不保证网络发送成功或模型采用。只读运行不产生学习数据；遗忘级联删除相关曝光/评价/回执，清空或删除会话也清除对应 lifetime 的学习数据。
+
+daemon 启动后的维护 tick 及此后每 60 秒按批恢复缺摄入回执的已完成 turn，每批最多 32 个；健康积压以 100 毫秒间隔继续排空并阻止提前空闲退出，跳过只读与旧 lifetime；单任务失败间隔至少 60 秒，最多重试 3 次，失败由 `doctor` 和飞轮报告暴露。自动摘录过滤常见凭据行、PEM 私钥块和含凭据 URL，原始 transcript 保持原样；此过滤并非全面 DLP。固定的 17 项检索样本位于 `crates/memory/eval/recall-v1.json`，15 项当前轮次保护样本位于 `crates/context/eval/protection-v1.json`，6项原文覆盖样本位于 `crates/context/eval/retention-v1.json`；均加入 cargo test，`flywheel evaluate` 同时报告两组结果。
+
+这形成“运行材料→用户反馈→下次召回调整→离线评测防回归→报告”的闭环。当前验证的是检索策略与持久协议，真实模型的回答质量、token 成本和任务收益仍需要生产样本评测。下一阶段的语义提炼、冲突整合和向量检索以这些证据为前提。
+
+[第二轮研究与实施](docs/research/codex-context-evidence.md)把当前用户轮次的原文、图片与工具交换保留要求同时放在候选校验和持久提交层。历史摘要通过宿主 JSON 包装标明模型推断及 projection digest；递归上限拒绝安装截断摘要，允许既有 prune_only 降级。
+
+`memory.evidence` RPC 和只读 `memory_evidence` 工具按记忆声明的 source IDs 核实 canonical transcript 的 batch digest 和 run owner。参数为 `memory_id`、`after_source`（默认0）、`limit`（默认4，上限16）；RPC 另需 `session_id`。返回每条 role、过滤后的文本、来源 ID、截断标识及下一页游标；每条最多4096字符、整页最多32KiB。跨会话已确认记忆只返回 `source_scope_restricted=true`，不开放源对话；没有来源的显式记忆返回空列表。遗忘或旧 lifetime 拒绝读取，读取不产生质量反馈。
+
+[父子任务交接研究](docs/research/codex-delegation-context.md)：`spawn_subagent` RPC/模型工具及兼容 `sub_agent` 增加可选 `context_source_ids`，例如 `["parent_input"]` 显式选择父run准入输入，或选择最多4条父run自身的 `lifetime:seq` 来源。默认空；每条最多1024字符、捕获包最多8KiB并受子预算约束。包在委派事务内核实来源并冻结于child snapshot，正常及overflow请求都计入检索分区；相同spawn_key改选来源拒绝。交接过滤常见凭据、只复制role/文本，孙任务不隐式继承祖先包；子工具仍只有read_file。该包是显式转交后的独立快照，父记忆遗忘不会追溯修改已交接运行快照。
+
+[历史原文覆盖研究](docs/research/codex-retention-coverage.md)：历史锚点v2携带 `inputs`、`text_complete`、`omitted`（已知省略下限），兼容读取旧数组。完整性仅针对历史非空、去重后的用户文字，不能证明对话、图片或授权完整；checkpoint/legacy摘要始终不证明原始完整。零锚点预算仍在摘要宿主JSON记录省略下限，重压缩不将缺失状态变回完整。`flywheel evaluate` 当前包含17项检索、21项上下文结构评测。

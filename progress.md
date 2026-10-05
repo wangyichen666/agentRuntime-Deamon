@@ -423,3 +423,43 @@ agent-memory 提供 typed scope/layer/kind、可见性复核与确定性 ranking
 最终代码：`cargo test --workspace` 266通过、0失败/忽略（含9项真实daemon合同）；Web 27通过；Clippy workspace/all-targets/all-features `-D warnings`、Rust 1.88 locked check、release locked build、cargo fmt、git diff --check 全部通过。cargo deny offline 的 advisories/bans/licenses/sources 通过（使用缓存公告库，既有重复版本警告仍保留）。
 
 日志：`/tmp/codex-comparison-tests-final.log`、`/tmp/codex-comparison-clippy.log`、`/tmp/codex-comparison-msrv.log`、`/tmp/codex-comparison-release.log`、`/tmp/codex-comparison-web.log`、`/tmp/codex-comparison-deny.log`。未调用真实摘要服务，未证明提炼质量或成本收益；验证的是宿主上下文传递、预算、存储边界及现有合同。SQLite仍为v12，无迁移；原有Wave改动全部保留，未commit/push。
+# 2026-10-03 数据飞轮
+
+- 工作树基线干净，复用已有规划和源码对比文档；不覆盖历史记录。
+- 阅读 OpenAI Docs 与 planning-with-files 技能；打开官方 compaction 文档与用户指定 GitHub 页面。
+- 开始核对 Codex 使用统计/保留策略与本项目召回、摄入、维护路径。
+
+- 开发前完成 docs/research/codex-data-flywheel.md：明确取舍与六步方案。
+- SQLite v13 曝光/评价/回执/恢复退避；自动注入、工具召回、RPC 召回共用反馈策略；新增 flywheel report/feedback/evaluate；17 项独立 JSON 质量样本。
+- 新增真实存储的幂等、重启、作用域、只读、删除、schema12 迁移测试及真实 daemon 重启反馈合同；自动摘录常见凭据行过滤。
+
+## 最终验证与交付
+
+2026-10-03：SQLite v13、lexical-feedback-v1 与 flywheel CLI/RPC 完成；代码共用既有 transcript/TurnCommit/context ledger，没有另建会话状态或轨迹真相源。维护日志与反馈保持独立，常见凭据过滤不改原文。
+
+- `cargo test --locked --workspace --all-targets --all-features`：276通过，0失败/忽略，包括10项真实daemon合同。
+- `flywheel evaluate`：17/17独立JSON质量样本；debug与release入口均验证。
+- 严格Clippy、Rust1.88全目标全特性locked检查、release locked构建、fmt、diff通过；Web27/27与JS语法通过。
+- 离线cargo-deny：advisories/bans/licenses/sources通过，保留既有重复依赖警告；初次缓存锁因沙箱只读失败，自动审批后成功，未联网更新公告。
+- 日志：/tmp/flywheel-tests-final.log、/tmp/flywheel-clippy.log、/tmp/flywheel-msrv.log、/tmp/flywheel-release.log、/tmp/flywheel-web.log、/tmp/flywheel-deny.log、/tmp/flywheel-evaluation-final.json。
+- 未调用真实模型服务，不宣称生产质量、成本或成功率收益；未commit/push。Codex参考仍为已固定源码提交，并非远程最新HEAD。
+
+## 2026-10-03：继续研究
+
+用户要求继续研究、不要停。保留数据飞轮全部改动，进入压缩质量、来源证据与上下文传递的第二轮研究；不重复上一轮工作。
+
+第二轮：当前轮次持久保护、推断摘要包装与递归上限拒绝、15项独立结构门禁、受限memory.evidence读取及健康积压批次排空已接线。完整测试发现积压恢复正确，但memory.list默认只返回20项；夹具显式limit50核对40项，不改变生产分页。继续完整回归与上下文交接研究。
+
+第三轮实施：增加可选context_source_ids、委派事务捕获并核实来源、child快照持久包，来源点查与凭据过滤复用于记忆证据。旧snapshot默认None，孙任务不隐式继承祖先包。正常与overflow重组同样加入retrieved分区并走完整预算。首次check发现一个嵌套测试literal漏加默认空来源，已补齐。
+
+第四轮：v2锚点兼容旧数组，并增加文字覆盖状态与省略下限；checkpoint不可恢复原始完整标识。包装整体预算含元数据并最终复核；零预算的覆盖诊断仍保存在宿主摘要JSON。独立评测扩展6项，合计21项上下文保护/保留门禁。
+
+## 2026-10-05：第二至第四轮统一最终验证
+
+- Rust workspace/all-targets/all-features：289项通过，含真实daemon11合同。
+- Web27项与语法检查通过；debug及release的flywheel evaluate均为检索17/17、上下文21/21。
+- Clippy -D warnings、MSRV1.88 locked全目标、release locked、fmt/diff通过。
+- cargo-deny offline：advisories/bans/licenses/sources均通过，保持既有duplicate warnings；使用已有公告缓存，不宣称实时漏洞库。
+- 验证日志位于 /tmp/retention-tests-final.log、retention-clippy-final.log、retention-msrv-final.log、retention-release-final.log、retention-web-final.log、retention-deny-final.log；release评测JSON /tmp/retention-evaluate-release.json。
+- Codex应用已创建并查看ACTIVE heartbeat：Agent Rust 持续研究与优化（agent-rust），每12小时在本对话延续研究与开发，无实质新进展保持安静。
+- 保留所有工作区改动，未提交/推送/部署。

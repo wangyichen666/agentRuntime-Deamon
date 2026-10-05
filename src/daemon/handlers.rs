@@ -68,7 +68,8 @@ impl DaemonState {
             }
         };
         match request.method.as_str() {
-            "memory.store" | "memory.recall" | "memory.list" | "memory.forget" | "memory.scope" => {
+            "memory.store" | "memory.recall" | "memory.list" | "memory.forget" | "memory.scope"
+            | "memory.feedback" | "memory.flywheel" | "memory.evidence" => {
                 let result = self.memory_command(&request.method, &request.params).await;
                 send_result(&frames, request.id, result);
             }
@@ -523,6 +524,7 @@ impl DaemonState {
         parent_run_id: RunId,
         spawn_key: String,
         task: String,
+        context_source_ids: Vec<String>,
         tools: Option<Vec<String>>,
     ) -> Result<Value, (i64, String)> {
         let parent = self
@@ -536,6 +538,7 @@ impl DaemonState {
                 parent_run_id,
                 spawn_key,
                 task,
+                context_source_ids,
                 tools,
                 max_rounds: None,
                 max_tokens: None,
@@ -691,6 +694,7 @@ impl DaemonState {
                 child_session_id: SessionId(child_session_id),
                 spawn_key: params.spawn_key,
                 task: params.task.clone(),
+                context_source_ids: params.context_source_ids,
                 tools: requested_tools,
                 permission_mode,
                 cwd,
@@ -983,6 +987,7 @@ impl DaemonState {
             docker_image: (effective == "docker").then(|| {
                 std::env::var("MY_AGENT_DOCKER_IMAGE").unwrap_or_else(|_| "alpine:3.21".into())
             }),
+            delegation_context: None,
             context_read_only: params.context_read_only,
             context_token_budget: frozen_engine.token_budget(),
             context_policy_fingerprint: Some(frozen_engine.context_policy_fingerprint()),
@@ -1561,6 +1566,41 @@ impl DaemonState {
             .map_or(0, |time| time.as_secs());
         let fail = |e: RuntimeError| (REQUEST_CONFLICT, e.to_string());
         match method {
+            "memory.evidence" => {
+                let params: MemoryEvidenceParams =
+                    parse_params(value).map_err(|e| (INVALID_PARAMS, e))?;
+                Ok(
+                    json!({"evidence":self.run_store.memory_evidence(&visibility,&params.memory_id,params.after_source,params.limit).map_err(fail)?}),
+                )
+            }
+            "memory.flywheel" => self
+                .run_store
+                .flywheel_report(&visibility.lifetime)
+                .map_err(fail),
+            "memory.feedback" => {
+                let params: MemoryFeedbackParams =
+                    parse_params(value).map_err(|e| (INVALID_PARAMS, e))?;
+                let owner = self
+                    .run_store
+                    .run_owner(&params.owner_run_id)
+                    .map_err(fail)?;
+                if owner.session_key.0 != session_id
+                    || owner.session_lifetime_id != visibility.lifetime
+                {
+                    return Err((REQUEST_CONFLICT, "feedback owner session 不匹配".into()));
+                }
+                self.run_store
+                    .memory_feedback(
+                        &owner,
+                        &params.operation_id,
+                        &params.memory_id,
+                        params.feedback,
+                    )
+                    .map_err(fail)?;
+                Ok(
+                    json!({"accepted":true,"policy":agent_memory::RECALL_POLICY,"scope":"session_lifetime"}),
+                )
+            }
             "memory.scope" => Ok(
                 json!({"session_id":session_id,"scopes":["session","project","confirmed_global"],"legacy_visible":false}),
             ),
@@ -1576,7 +1616,7 @@ impl DaemonState {
                         )
                         .map_err(fail)?
                 } else {
-                    agent_memory::rank(
+                    agent_memory::rank_with_feedback(
                         self.run_store
                             .memory_candidates(&visibility)
                             .map_err(fail)?,
@@ -1584,6 +1624,10 @@ impl DaemonState {
                         &params.query,
                         params.limit.clamp(1, 100) + 1,
                         now,
+                        &self
+                            .run_store
+                            .memory_assessments(&visibility)
+                            .map_err(fail)?,
                     )
                 };
                 entries.retain(|e| visibility.allows(e, now));

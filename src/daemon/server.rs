@@ -68,6 +68,9 @@ pub async fn run_unix_server(
     let mut accepted_any = false;
     let mut idle_since = None;
     let mut lifecycle_tick = tokio::time::interval(Duration::from_millis(250));
+    let mut memory_tick = tokio::time::interval(Duration::from_secs(60));
+    memory_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut memory_due = false;
     let interrupt = tokio::signal::ctrl_c();
     tokio::pin!(interrupt);
 
@@ -85,6 +88,29 @@ pub async fn run_unix_server(
                     }
                 });
             }
+            _ = memory_tick.tick() => {
+                memory_due = match state.run_store.recover_memory_ingests(32) {
+                    Ok(_) => {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |d| d.as_millis() as i64);
+                        match state.run_store.next_memory_ingest_due() {
+                            Ok(due) => due.is_some_and(|due| due <= now),
+                            Err(error) => {
+                                tracing::warn!(%error, "记忆维护积压查询失败，下次常规维护重试");
+                                false
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "记忆摄入恢复未完成，下次常规维护重试");
+                        false
+                    }
+                };
+                if memory_due {
+                    memory_tick.reset_after(Duration::from_millis(100));
+                }
+            }
             result = connections.join_next(), if !connections.is_empty() => {
                 if let Some(Err(error)) = result { tracing::warn!(%error, "daemon 连接任务异常结束"); }
                 clients = clients.saturating_sub(1);
@@ -94,6 +120,7 @@ pub async fn run_unix_server(
             }
             _ = lifecycle_tick.tick() => {
                 if accepted_any
+                    && !memory_due
                     && clients == 0
                     && !state.has_active_turns().await
                     && !state.has_persistent_background_work().await
@@ -638,6 +665,7 @@ mod tests {
             sandbox_effective: "native".into(),
             sandbox_notice: None,
             docker_image: None,
+            delegation_context: None,
             context_read_only: false,
             context_token_budget: 1000,
             context_policy_fingerprint: None,

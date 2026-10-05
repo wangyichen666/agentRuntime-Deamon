@@ -42,7 +42,7 @@ fn source_check(
     db: &Connection,
     key: &SessionKey,
     source: &ContextSource,
-) -> Result<(), RuntimeError> {
+) -> Result<Vec<Message>, RuntimeError> {
     let meta = metadata_in(db, key)?
         .ok_or_else(|| RuntimeError::Protocol("compact session 不存在".into()))?;
     let generation: u64 = db.query_row(
@@ -87,7 +87,7 @@ fn source_check(
     if messages.len() as u64 != source.source_end.0 || digest != source.prefix_digest {
         return Err(RuntimeError::Protocol("compact prefix 已变化".into()));
     }
-    Ok(())
+    Ok(messages)
 }
 impl ContextRepository for RunStore {
     fn compact_result(
@@ -253,6 +253,12 @@ impl ContextRepository for RunStore {
             .ok_or_else(|| RuntimeError::Protocol("projection generation 耗尽".into()))?;
         let candidate =
             replacement.ok_or_else(|| RuntimeError::Protocol("缺少 compact 候选".into()))?;
+        let canonical = check?;
+        if !preserves_current_turn(&canonical, candidate) {
+            return Err(RuntimeError::Protocol(
+                "compact 不得删除或改写当前用户轮次".into(),
+            ));
+        }
         if candidate.is_empty()
             || candidate
                 .iter()
@@ -334,6 +340,16 @@ mod tests {
         };
         store.try_start_queued(&run.run_id).unwrap();
         let owner = store.run_owner(&run.run_id).unwrap();
+        store
+            .append_transcript(
+                &owner,
+                "history",
+                &[
+                    Message::text(Role::Assistant, "旧证据".repeat(300)),
+                    Message::text(Role::User, "当前约束"),
+                ],
+            )
+            .unwrap();
         (store, owner)
     }
     fn intent(store: &RunStore, owner: &ExactOwner, operation: &str) -> CompactIntent {
@@ -373,7 +389,10 @@ mod tests {
         store
             .settle_compact(
                 &first,
-                Some(&[Message::text(Role::System, "checkpoint")]),
+                Some(&[
+                    Message::text(Role::System, "checkpoint"),
+                    Message::text(Role::User, "当前约束"),
+                ]),
                 "summary",
             )
             .unwrap();
@@ -387,11 +406,11 @@ mod tests {
                 .is_err()
         );
         let snapshot = store.session_snapshot(&owner.session_key).unwrap();
-        assert_eq!(snapshot.messages.len(), 2);
+        assert_eq!(snapshot.messages.len(), 4);
         let projection = store.context_projection(&snapshot).unwrap();
         assert_eq!(projection.generation.0, 1);
         assert_eq!(
-            projection.messages[1].content.as_deref(),
+            projection.messages[2].content.as_deref(),
             Some("fresh suffix")
         );
         let third = intent(&store, &owner, "third");
@@ -421,6 +440,44 @@ mod tests {
         );
     }
     #[test]
+    fn durable_compact_rejects_tool_closed_candidate_that_loses_current_input() {
+        let (store, owner) = fixture(std::path::Path::new(":memory:"));
+        let intent = intent(&store, &owner, "protect-current");
+        store.begin_compact(&intent).unwrap();
+        for candidate in [
+            vec![Message::text(Role::System, "checkpoint")],
+            vec![
+                Message::text(Role::System, "checkpoint"),
+                Message::text(Role::User, "伪造约束"),
+            ],
+        ] {
+            assert!(
+                store
+                    .settle_compact(&intent, Some(&candidate), "summary")
+                    .is_err()
+            );
+            assert_eq!(
+                store
+                    .session_snapshot(&owner.session_key)
+                    .unwrap()
+                    .projection_generation
+                    .0,
+                0
+            );
+        }
+        let candidate = vec![
+            Message::text(Role::System, "checkpoint"),
+            Message::text(Role::User, "当前约束"),
+        ];
+        assert_eq!(
+            store
+                .settle_compact(&intent, Some(&candidate), "summary")
+                .unwrap()
+                .0,
+            1
+        );
+    }
+    #[test]
     fn restart_keeps_projection_and_settles_uncommitted_intent() {
         let dir = std::env::temp_dir().join(format!(
             "context-restart-{}-{}",
@@ -435,7 +492,10 @@ mod tests {
         store
             .settle_compact(
                 &first,
-                Some(&[Message::text(Role::System, "checkpoint")]),
+                Some(&[
+                    Message::text(Role::System, "checkpoint"),
+                    Message::text(Role::User, "当前约束"),
+                ]),
                 "summary",
             )
             .unwrap();
