@@ -968,3 +968,20 @@ v2锚点兼容旧数组，保存文字覆盖状态和省略下限；checkpoint�
 ### 提交前文档修复
 
 提交检查发现上一轮写文件脚本误将src/context.rs内容写入task_plan.md。保留临时备份，从HEAD恢复原有921行计划，依据研究文档与progress补回上述新增记录；未改动源码。用户已授权提交并推送远端，按现有main与origin进行常规提交，禁止强制覆盖远端历史。
+
+## 2026-10-05：重新核验 Runtime 架构要求
+
+本轮仅以当前仓库为事实依据，不搜索、克隆其他仓库。保留上述历史。
+1. [完成] 干净基线、源码/历史证据盘点、基线测试（socket 需环境审批）。
+2. [完成] 实现前 ADR 0002 与 change doc：只读 readback / lifetime CAS / connection negotiation。
+3. [进行中] 优先补 Wave 0–2：单事务 durable snapshot、稀疏读取、生命周期请求屏障、明确能力协商与静态护栏。
+4. [待完成] 两后端合同、故障/重启/三入口交叉验证及完整门禁。
+5. [待完成] 同步完成范围与后续 Wave 的真实未实现项。
+
+### 本轮已验收交付（2026-10-05）
+
+- [完成] Wave 0–2 恢复纵切：SQLite v14 单事务 SessionReadback、纯读取、strict schema/物理连接能力协商、destructive request lifetime CAS/receipt。
+- [完成] 两后端、两连接读写、故障回滚、损坏 fork 拒绝、v13 备份迁移与真实 daemon/CLI/ACP/WS 重启对照。
+- [完成] Rust 302、Web 27、fmt/Clippy/MSRV1.88/release/offline deny/diff 门禁。
+- [完成] ADR0002、change doc 与 README/roadmap/known-issues 同步，纠正历史全部 Wave 完成宣称。
+- [未完成] 完整 Wave0–7 验收、Wave5B plan/hooks、manual compact exact owner、全入口 live revision 防回退、tool_search、剩余物理 crate/后端能力；不创建空接口或双写。没有提交/推送。

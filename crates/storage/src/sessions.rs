@@ -20,6 +20,11 @@ pub trait SessionQuery: Send + Sync {
     ) -> Result<Vec<SessionMetadata>, RuntimeError>;
     fn session_metadata_list(&self) -> Result<Vec<SessionMetadata>, RuntimeError>;
     fn session_snapshot(&self, key: &SessionKey) -> Result<SessionSnapshot, RuntimeError>;
+    fn session_readback(
+        &self,
+        key: &SessionKey,
+        mode: HistoryReadMode,
+    ) -> Result<SessionReadback, RuntimeError>;
     fn run_owner(&self, run: &RunId) -> Result<ExactOwner, RuntimeError>;
 }
 pub trait SessionLifecycle: Send + Sync {
@@ -215,63 +220,82 @@ impl SessionQuery for RunStore {
             })
             .collect()
     }
+    fn session_readback(
+        &self,
+        key: &SessionKey,
+        mode: HistoryReadMode,
+    ) -> Result<SessionReadback, RuntimeError> {
+        self.readback(key, mode)
+    }
     fn run_owner(&self, run: &RunId) -> Result<ExactOwner, RuntimeError> {
         owner_in(&*self.lock_connection()?, run)
     }
     fn session_snapshot(&self, key: &SessionKey) -> Result<SessionSnapshot, RuntimeError> {
-        let db = self.lock_connection()?;
-        let meta = metadata_in(&db, key)?
-            .filter(|m| !m.deleted)
-            .ok_or_else(|| RuntimeError::Protocol("session 已删除或不存在".into()))?;
-        let generation = db.query_row(
-            "SELECT projection_generation FROM session_heads WHERE session_id=?1",
-            params![key.0],
-            |r| r.get(0),
-        )?;
-        let mut q=db.prepare("SELECT messages_json,digest,start_seq,end_seq FROM transcript_batches WHERE lifetime=?1 ORDER BY start_seq,rowid")?;
-        let payloads = q
-            .query_map(params![meta.lifetime.0], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, u64>(2)?,
-                    r.get::<_, u64>(3)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut messages = Vec::new();
-        let mut hasher = Sha256::new();
-        let mut batch_ranges = Vec::new();
-        for (payload, digest, start, end) in payloads {
-            if start != messages.len() as u64 || end < start {
-                return Err(RuntimeError::Protocol("transcript batch seq 不连续".into()));
-            }
-            batch_ranges.push((start, end));
-            if format!("{:x}", Sha256::digest(payload.as_bytes())) != digest {
-                return Err(RuntimeError::Protocol("transcript digest 损坏".into()));
-            }
-            hasher.update(payload.as_bytes());
-            messages.extend(
-                serde_json::from_str::<Vec<Message>>(&payload)
-                    .map_err(|e| RuntimeError::Protocol(e.to_string()))?,
-            );
-        }
-        if messages.len() as u64 != meta.revision.0 {
-            return Err(RuntimeError::Protocol(
-                "transcript revision 与内容不一致".into(),
-            ));
-        }
-        Ok(SessionSnapshot {
-            session_key: key.clone(),
-            lifetime: meta.lifetime,
-            revision: meta.revision,
-            projection_generation: ProjectionGeneration(generation),
-            messages,
-            batch_ranges,
-            prefix_digest: format!("{:x}", hasher.finalize()),
-        })
+        let mut db = self.lock_connection()?;
+        let tx = db.transaction()?;
+        let snapshot = snapshot_in(&tx, key)?;
+        tx.commit()?;
+        Ok(snapshot)
     }
 }
+pub(crate) fn snapshot_in(
+    db: &Connection,
+    key: &SessionKey,
+) -> Result<SessionSnapshot, RuntimeError> {
+    let meta = metadata_in(db, key)?
+        .filter(|m| !m.deleted)
+        .ok_or_else(|| RuntimeError::Protocol("session 已删除或不存在".into()))?;
+    let generation = db.query_row(
+        "SELECT projection_generation FROM session_heads WHERE session_id=?1",
+        params![key.0],
+        |r| r.get(0),
+    )?;
+    let mut q=db.prepare("SELECT messages_json,digest,start_seq,end_seq FROM transcript_batches WHERE lifetime=?1 ORDER BY start_seq,rowid")?;
+    let payloads = q
+        .query_map(params![meta.lifetime.0], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, u64>(2)?,
+                r.get::<_, u64>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut messages = Vec::new();
+    let mut hasher = Sha256::new();
+    let mut batch_ranges = Vec::new();
+    for (payload, digest, start, end) in payloads {
+        if start != messages.len() as u64 || end < start {
+            return Err(RuntimeError::Protocol("transcript batch seq 不连续".into()));
+        }
+        batch_ranges.push((start, end));
+        if format!("{:x}", Sha256::digest(payload.as_bytes())) != digest {
+            return Err(RuntimeError::Protocol("transcript digest 损坏".into()));
+        }
+        hasher.update(payload.as_bytes());
+        let batch: Vec<Message> =
+            serde_json::from_str(&payload).map_err(|e| RuntimeError::Protocol(e.to_string()))?;
+        if end - start != batch.len() as u64 {
+            return Err(RuntimeError::Protocol("transcript batch 长度不匹配".into()));
+        }
+        messages.extend(batch);
+    }
+    if messages.len() as u64 != meta.revision.0 {
+        return Err(RuntimeError::Protocol(
+            "transcript revision 与内容不一致".into(),
+        ));
+    }
+    Ok(SessionSnapshot {
+        session_key: key.clone(),
+        lifetime: meta.lifetime,
+        revision: meta.revision,
+        projection_generation: ProjectionGeneration(generation),
+        messages,
+        batch_ranges,
+        prefix_digest: format!("{:x}", hasher.finalize()),
+    })
+}
+
 impl SessionLifecycle for RunStore {
     fn set_preferred_session(&self, key: &SessionKey) -> Result<(), RuntimeError> {
         let db = self.lock_connection()?;
@@ -290,8 +314,8 @@ impl SessionLifecycle for RunStore {
         if operation.is_empty() || operation.len() > 256 {
             return Err(RuntimeError::Protocol("operation id 无效".into()));
         }
-        let payload =
-            serde_json::to_string(command).map_err(|e| RuntimeError::Protocol(e.to_string()))?;
+        let payload = serde_json::to_string(&(command, expected))
+            .map_err(|e| RuntimeError::Protocol(e.to_string()))?;
         let mut db = self.lock_connection()?;
         let tx = db.transaction()?;
         if let Some((old, result)) = tx
@@ -302,8 +326,17 @@ impl SessionLifecycle for RunStore {
             )
             .optional()?
         {
+            // v6-v13 receipt 使用单 command；只允许原身份的无写入兼容读回。
             if old != payload {
-                return Err(RuntimeError::Protocol("lifecycle operation id 冲突".into()));
+                let legacy = serde_json::to_string(command)
+                    .map_err(|e| RuntimeError::Protocol(e.to_string()))?;
+                let prior: SessionMetadata = serde_json::from_str(&result)
+                    .map_err(|e| RuntimeError::Protocol(e.to_string()))?;
+                if old != legacy || expected.is_some_and(|e| e != &prior.lifetime) {
+                    return Err(RuntimeError::Protocol(
+                        "lifecycle operation id / lifetime 冲突".into(),
+                    ));
+                }
             }
             return serde_json::from_str(&result)
                 .map_err(|e| RuntimeError::Protocol(e.to_string()));
@@ -311,8 +344,9 @@ impl SessionLifecycle for RunStore {
         let meta = match command {
             SessionCommand::Create { key } => create_in(&tx, key)?,
             SessionCommand::End { key, delete } => {
-                let lifetime = expected
-                    .ok_or_else(|| RuntimeError::Protocol("缺少 lifecycle owner".into()))?;
+                let lifetime = expected.ok_or_else(|| {
+                    RuntimeError::Protocol("缺少 lifecycle expected lifetime".into())
+                })?;
                 end_in(&tx, key, lifetime, *delete)?;
                 metadata_in(&tx, key)?
                     .ok_or_else(|| RuntimeError::Internal("缺少 lifecycle head".into()))?
@@ -484,20 +518,11 @@ fn fork_in(
     let meta = metadata_in(db, source)?
         .filter(|m| !m.deleted && m.revision == revision)
         .ok_or_else(|| RuntimeError::Protocol("fork source 已变化".into()))?;
-    let mut q = db.prepare(
-        "SELECT messages_json FROM transcript_batches WHERE lifetime=?1 ORDER BY start_seq,rowid",
-    )?;
-    let payloads = q
-        .query_map(params![meta.lifetime.0], |r| r.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    drop(q);
-    let mut messages = Vec::new();
-    for p in payloads {
-        messages.extend(
-            serde_json::from_str::<Vec<Message>>(&p)
-                .map_err(|e| RuntimeError::Protocol(e.to_string()))?,
-        );
+    let snapshot = snapshot_in(db, source)?;
+    if snapshot.lifetime != meta.lifetime || snapshot.revision != revision {
+        return Err(RuntimeError::Protocol("fork source stale".into()));
     }
+    let messages = snapshot.messages;
     let child = create_in(db, target)?;
     insert_batch(db, target, &child.lifetime, "fork", None, &messages)?;
     Ok(child)

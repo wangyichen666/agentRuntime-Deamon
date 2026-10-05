@@ -63,13 +63,19 @@ pub fn normalize_request(mut request: JsonRpcRequest) -> Result<JsonRpcRequest, 
         };
     }
     match request.method.as_str() {
+        "connection.initialize" => {
+            check!(crate::InitializeParams, "protocol_versions", "capabilities");
+            let offer: crate::InitializeParams = serde_json::from_value(request.params.clone())?;
+            offer.negotiate()?;
+        }
         "chat.send" => check!(
             ChatSendParams,
             "message",
             "session_id",
             "admission_mode",
             "context_read_only",
-            "sandbox"
+            "sandbox",
+            "expected_lifetime"
         ),
         "artifacts.read" => check!(
             ArtifactReadParams,
@@ -143,16 +149,65 @@ pub fn normalize_request(mut request: JsonRpcRequest) -> Result<JsonRpcRequest, 
         ),
         "session.new" => check!(SessionCreateParams, "session_id", "operation_id"),
         "session.delete" | "session.clear" => {
-            check!(SessionEndParams, "session_id", "operation_id")
+            check!(
+                SessionEndParams,
+                "session_id",
+                "operation_id",
+                "expected_lifetime"
+            );
+            if request
+                .params
+                .get("expected_lifetime")
+                .is_none_or(Value::is_null)
+            {
+                return Err(ProtocolError::InvalidParams(
+                    "缺少 expected_lifetime".into(),
+                ));
+            }
         }
-        "session.fork" => check!(
-            SessionForkParams,
-            "session_id",
-            "target_session_id",
-            "operation_id",
-            "expected_revision"
-        ),
-        "session.load" => check!(SessionSelectorParams, "session_id"),
+        "session.fork" => {
+            check!(
+                SessionForkParams,
+                "session_id",
+                "target_session_id",
+                "operation_id",
+                "expected_revision",
+                "expected_lifetime"
+            );
+            if request
+                .params
+                .get("expected_lifetime")
+                .is_none_or(Value::is_null)
+            {
+                return Err(ProtocolError::InvalidParams(
+                    "缺少 expected_lifetime".into(),
+                ));
+            }
+        }
+        "session.load" => {
+            check!(
+                SessionSelectorParams,
+                "session_id",
+                "history_mode",
+                "read_model_only"
+            );
+            if request
+                .params
+                .get("read_model_only")
+                .and_then(Value::as_bool)
+                == Some(true)
+            {
+                if request.params.get("history_mode").is_some() {
+                    return Err(ProtocolError::InvalidParams(
+                        "read_model_only 与 history_mode 不能组合".into(),
+                    ));
+                }
+                request.params["history_mode"] = serde_json::json!("model");
+            }
+            if let Some(object) = request.params.as_object_mut() {
+                object.remove("read_model_only");
+            }
+        }
         "session.resume" | "session.trace" | "interaction.list" | "queue.list" => {
             check!(SessionResumeParams, "session_id")
         }

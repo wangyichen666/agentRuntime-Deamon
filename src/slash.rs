@@ -5,6 +5,7 @@ use crate::session::SessionInfo;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SlashAction {
+    Snapshot,
     Help,
     Memory,
     Context,
@@ -216,6 +217,14 @@ const COMMANDS: &[SlashCommand] = &[
         usage: "/memory <session_id>",
         args: ArgSpec::AtLeastOne("session ID"),
         action: SlashAction::Memory,
+    },
+    SlashCommand {
+        name: "snapshot",
+        aliases: &[],
+        help: "读取版本化会话恢复快照",
+        usage: "/snapshot <session_id>",
+        args: ArgSpec::AtLeastOne("session ID"),
+        action: SlashAction::Snapshot,
     },
     SlashCommand {
         name: "context",

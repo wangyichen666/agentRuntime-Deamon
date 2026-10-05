@@ -463,3 +463,15 @@ agent-memory 提供 typed scope/layer/kind、可见性复核与确定性 ranking
 - 验证日志位于 /tmp/retention-tests-final.log、retention-clippy-final.log、retention-msrv-final.log、retention-release-final.log、retention-web-final.log、retention-deny-final.log；release评测JSON /tmp/retention-evaluate-release.json。
 - Codex应用已创建并查看ACTIVE heartbeat：Agent Rust 持续研究与优化（agent-rust），每12小时在本对话延续研究与开发，无实质新进展保持安静。
 - 保留所有工作区改动，未提交/推送/部署。
+
+## 2026-10-05：Runtime 架构要求复核
+
+HEAD35af558，工作树干净。应用 planning-with-files，保留既有日志；基线命令 cargo test --locked --workspace --all-features 经本地 socket 环境审批后全绿。新建 ADR0002 和实施 change doc，业务实现之前明确只读恢复与生命周期请求屏障，记录后续未实现项。
+
+### 本轮最终验收（2026-10-05）
+
+Rust 基线289→302项，全目标/全特性通过（真实daemon11、架构10），Web27；fmt、严格Clippy、MSRV1.88、release、offline cargo-deny、diff通过。日志 /tmp/runtime-refactor-{baseline,tests-final,clippy-final,msrv,release,web-final,deny}.log。Socket/公告库锁需要环境审批后重跑，均通过。修复v14降级fixture、marker路径、strict run snapshot兼容和本地参数校验RPC错误回归；原业务断言未放宽。文档纠正旧Wave0–7全完成表述，明确未实现项；代码与文档保留为工作树改动，未提交/推送/部署。
+
+### 云端提交授权
+
+用户明确要求“提交到云端”。已复核当前 main/origin 与本轮变更范围，执行常规提交和推送，不强制覆盖远端。

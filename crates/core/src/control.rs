@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RunRecord {
     pub run_id: RunId,
     pub turn_id: TurnId,
@@ -43,6 +44,7 @@ pub struct ToolReceipt {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QueuedMessage {
     pub id: i64,
     pub position: i64,
@@ -53,6 +55,7 @@ pub struct QueuedMessage {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InteractionRecord {
     pub interaction_id: InteractionId,
     pub session_id: SessionId,

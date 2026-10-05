@@ -103,6 +103,8 @@ pub struct MemoryForgetParams {
 #[serde(deny_unknown_fields)]
 pub struct ChatSendParams {
     #[serde(default)]
+    pub expected_lifetime: Option<agent_core::SessionLifetimeId>,
+    #[serde(default)]
     pub sandbox: Option<String>,
     #[serde(default)]
     pub context_read_only: bool,
@@ -304,6 +306,10 @@ fn default_web_page_limit() -> usize {
 #[serde(deny_unknown_fields)]
 pub struct SessionSelectorParams {
     #[serde(default)]
+    pub read_model_only: Option<bool>,
+    #[serde(default)]
+    pub history_mode: agent_core::HistoryReadMode,
+    #[serde(default)]
     pub session_id: Option<String>,
 }
 
@@ -326,12 +332,16 @@ pub struct SessionCreateParams {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionEndParams {
+    #[serde(default)]
+    pub expected_lifetime: Option<agent_core::SessionLifetimeId>,
     pub session_id: String,
     pub operation_id: String,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionForkParams {
+    #[serde(default)]
+    pub expected_lifetime: Option<agent_core::SessionLifetimeId>,
     pub session_id: String,
     pub target_session_id: String,
     pub operation_id: String,

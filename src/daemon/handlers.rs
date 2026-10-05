@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -134,7 +134,10 @@ impl DaemonState {
             "chat.send" => self.handle_chat_send(request, frames).await,
             "session.load" => {
                 let result = match parse_params::<SessionSelectorParams>(&request.params) {
-                    Ok(params) => self.session_load(params.session_id.as_deref()).await,
+                    Ok(params) => {
+                        self.session_load_mode(params.session_id.as_deref(), params.history_mode)
+                            .await
+                    }
                     Err(error) => Err((INVALID_PARAMS, error)),
                 };
                 send_result(&frames, request.id, result);
@@ -1007,7 +1010,12 @@ impl DaemonState {
         let admitted = match self.run_store.admit_run(
             &agent_core::RunAdmission {
                 session_key: SessionId(session_id.clone()),
-                expected_lifetime: Some(session.lifetime.clone()),
+                expected_lifetime: Some(
+                    params
+                        .expected_lifetime
+                        .clone()
+                        .unwrap_or_else(|| session.lifetime.clone()),
+                ),
                 request_id: request.id.clone(),
                 input: params.message.clone(),
                 mode,
@@ -1512,7 +1520,7 @@ impl DaemonState {
         method: &str,
         params: ResourceParams,
     ) -> Result<Value, (i64, String)> {
-        let session = self.session_runtime(Some(&params.session_id)).await?;
+        let session = self.query_session_metadata(&params.session_id)?;
         let fail = |e: RuntimeError| (REQUEST_CONFLICT, e.to_string());
         if method == "resources.list" {
             let entries = self
@@ -1551,7 +1559,7 @@ impl DaemonState {
             .get("session_id")
             .and_then(Value::as_str)
             .ok_or_else(|| (INVALID_PARAMS, "缺少 session_id".into()))?;
-        let session = self.session_runtime(Some(session_id)).await?;
+        let session = self.query_session_metadata(session_id)?;
         let project = self.safety.as_ref().map_or_else(
             || "".into(),
             |s| s.workspace().to_string_lossy().into_owned(),
@@ -1715,6 +1723,28 @@ impl DaemonState {
         }
     }
 
+    fn query_session_metadata(
+        &self,
+        session_id: &str,
+    ) -> Result<agent_core::SessionMetadata, (i64, String)> {
+        self.run_store
+            .session_metadata(&SessionId(session_id.to_owned()))
+            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?
+            .filter(|m| !m.deleted)
+            .ok_or_else(|| (INVALID_PARAMS, "session 已删除或不存在".into()))
+    }
+
+    fn query_session_trace_store(
+        &self,
+        session_id: &str,
+    ) -> Result<crate::session::SessionStore, (i64, String)> {
+        let metadata = self.query_session_metadata(session_id)?;
+        self.session
+            .open_known_session(session_id)
+            .and_then(|s| s.with_trace_lifetime(&metadata.lifetime))
+            .map_err(|e| (INVALID_PARAMS, e.to_string()))
+    }
+
     async fn session_runtime(
         &self,
         requested_id: Option<&str>,
@@ -1852,7 +1882,8 @@ impl DaemonState {
         let operation = params
             .operation_id
             .unwrap_or_else(|| format!("create:{session_id}"));
-        self.run_store
+        let created = self
+            .run_store
             .execute_lifecycle(
                 &agent_core::SessionCommand::Create {
                     key: SessionId(session_id.clone()),
@@ -1861,13 +1892,24 @@ impl DaemonState {
                 &operation,
             )
             .map_err(|e| (REQUEST_CONFLICT, e.to_string()))?;
+        let current = self
+            .run_store
+            .session_metadata(&SessionId(session_id.clone()))
+            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+        if current.is_none_or(|m| m.deleted || m.lifetime != created.lifetime) {
+            return Err((
+                REQUEST_CONFLICT,
+                "create receipt 属于旧 lifetime；请读回当前会话".into(),
+            ));
+        }
         self.run_store
             .set_preferred_session(&SessionId(session_id.clone()))
             .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
         *self.session_supervisor.legacy_session_id.lock().await = session_id.clone();
-        Ok(
-            json!({"created":true,"session_id":session_id,"messages":[],"pending_approvals":[],"active_requests":[]}),
-        )
+        let mut snapshot =
+            self.session_readback_value(&session_id, agent_core::HistoryReadMode::Canonical)?;
+        snapshot["created"] = json!(true);
+        Ok(snapshot)
     }
 
     async fn session_end(
@@ -1877,8 +1919,7 @@ impl DaemonState {
     ) -> Result<Value, (i64, String)> {
         let _barrier = self.session_supervisor.control_lock.lock().await;
         let key = SessionId(params.session_id.clone());
-        let meta = self
-            .run_store
+        self.run_store
             .session_metadata(&key)
             .map_err(|e| (INTERNAL_ERROR, e.to_string()))?
             .ok_or((INVALID_PARAMS, "session 不存在".into()))?;
@@ -1901,7 +1942,7 @@ impl DaemonState {
                     key: key.clone(),
                     delete,
                 },
-                Some(&meta.lifetime),
+                params.expected_lifetime.as_ref(),
                 &params.operation_id,
             )
             .map_err(|e| (REQUEST_CONFLICT, e.to_string()))?;
@@ -1982,13 +2023,6 @@ impl DaemonState {
             .map_err(|e| (INVALID_PARAMS, e.to_string()))?;
         let source = SessionId(params.session_id);
         let target = SessionId(params.target_session_id);
-        let source_lifetime = self
-            .run_store
-            .session_metadata(&source)
-            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?
-            .filter(|m| !m.deleted)
-            .ok_or_else(|| (INVALID_PARAMS, "fork source 不存在".into()))?
-            .lifetime;
         self.run_store
             .execute_lifecycle(
                 &agent_core::SessionCommand::Fork {
@@ -1996,30 +2030,45 @@ impl DaemonState {
                     target: target.clone(),
                     revision: params.expected_revision,
                 },
-                Some(&source_lifetime),
+                params.expected_lifetime.as_ref(),
                 &params.operation_id,
             )
             .map_err(|e| (REQUEST_CONFLICT, e.to_string()))?;
         Ok(json!({"forked":true,"session_id":target}))
     }
 
-    async fn session_load(&self, session_id: Option<&str>) -> Result<Value, (i64, String)> {
-        let runtime = self.session_runtime(session_id).await?;
-        self.session_snapshot(&runtime.id).await
+    async fn session_load_mode(
+        &self,
+        session_id: Option<&str>,
+        mode: agent_core::HistoryReadMode,
+    ) -> Result<Value, (i64, String)> {
+        let key = match session_id {
+            Some(key) => key.to_owned(),
+            None => self
+                .session_supervisor
+                .legacy_session_id
+                .lock()
+                .await
+                .clone(),
+        };
+        self.session_readback_value(&key, mode)
     }
 
     async fn session_load_page(&self, params: SessionPageParams) -> Result<Value, (i64, String)> {
-        let runtime = self.session_runtime(Some(&params.session_id)).await?;
-        let snapshot = self
+        let mut snapshot = self
             .run_store
-            .session_snapshot(&SessionId(runtime.id.clone()))
+            .session_readback(
+                &SessionId(params.session_id.clone()),
+                agent_core::HistoryReadMode::Canonical,
+            )
             .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
-        let history = snapshot.messages;
+        let history = std::mem::take(&mut snapshot.messages);
+        let batch_ranges = std::mem::take(&mut snapshot.batch_ranges);
         let total_messages = history.len();
         let mut start = params.offset.min(total_messages);
         let limit = params.limit.clamp(1, WEB_PAGE_MAX_LIMIT);
         let mut end = start.saturating_add(limit).min(total_messages);
-        for &(batch_start, batch_end) in &snapshot.batch_ranges {
+        for &(batch_start, batch_end) in &batch_ranges {
             if (batch_start as usize) < start && start < (batch_end as usize) {
                 start = batch_start as usize;
             }
@@ -2062,66 +2111,88 @@ impl DaemonState {
             )
         };
         let has_more = truncated_page || end < total_messages;
-        let (active_requests, approvals, status) = self.session_activity(&runtime.id).await?;
-        Ok(json!({
-            "session_id": runtime.id,
-            "messages": messages,
-            "offset": start,
-            "cursor": end,
-            "limit": limit,
-            "total_messages": total_messages,
-            "projection_generation":snapshot.projection_generation,
-            "transcript_revision":snapshot.revision,
-            "has_more": has_more,
-            "pending_approvals": approvals,
-            "active_requests": active_requests,
-            "status": status,
-        }))
+        let mut readback = self.decorate_session_readback(snapshot)?;
+        readback["messages"] = json!(messages);
+        readback["history_mode"] = json!("canonical");
+        readback["omitted"] = json!([
+            "complete_messages",
+            "batch_ranges",
+            "plan_execution_identity"
+        ]);
+        readback["offset"] = json!(start);
+        readback["cursor"] = json!(start + readback["messages"].as_array().map_or(0, Vec::len));
+        readback["limit"] = json!(limit);
+        readback["total_messages"] = json!(total_messages);
+        readback["has_more"] = json!(has_more);
+        Ok(readback)
     }
 
     async fn session_snapshot(&self, session_id: &str) -> Result<Value, (i64, String)> {
-        // 读 durable snapshot 不等待执行 permit；审批中的 turn 不阻塞恢复入口。
-        let runtime = self.session_runtime(Some(session_id)).await?;
+        self.session_readback_value(session_id, agent_core::HistoryReadMode::Canonical)
+    }
+
+    fn session_readback_value(
+        &self,
+        session_id: &str,
+        mode: agent_core::HistoryReadMode,
+    ) -> Result<Value, (i64, String)> {
         let snapshot = self
             .run_store
-            .session_snapshot(&SessionId(runtime.id.clone()))
-            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
-        let history = snapshot.messages;
-        let active = self.run_coordinator.active.lock().await;
-        let active_requests = active
-            .keys()
-            .filter(|key| key.session_id == session_id)
-            .map(|key| key.request_id.clone())
-            .collect::<Vec<RequestId>>();
-        let request_ids = active
-            .keys()
-            .filter(|key| key.session_id == session_id)
-            .map(|key| key.request_id.clone())
-            .collect::<HashSet<RequestId>>();
-        drop(active);
-        let approvals = self
-            .approvals
-            .pending_for_session(Some(session_id))
-            .await
-            .into_iter()
-            .filter(|approval| request_ids.contains(&approval.request_id))
+            .session_readback(&SessionId(session_id.to_owned()), mode)
+            .map_err(|e| (INVALID_PARAMS, e.to_string()))?;
+        self.decorate_session_readback(snapshot)
+    }
+
+    fn decorate_session_readback(
+        &self,
+        snapshot: agent_core::SessionReadback,
+    ) -> Result<Value, (i64, String)> {
+        let active_requests = snapshot
+            .active_runs
+            .iter()
+            .map(|run| run.request_id.clone())
             .collect::<Vec<_>>();
-        let status = if !approvals.is_empty() {
+        let pending_approvals = snapshot
+            .pending_interactions
+            .iter()
+            .filter(|i| i.kind == "approval")
+            .map(|i| {
+                let run = snapshot
+                    .active_runs
+                    .iter()
+                    .find(|run| run.run_id == i.owner_run_id)
+                    .ok_or_else(|| {
+                        (
+                            INTERNAL_ERROR,
+                            "pending interaction 缺少 active owner".into(),
+                        )
+                    })?;
+                Ok(PendingApprovalInfo {
+                    id: i.interaction_id.0.clone(),
+                    request_id: run.request_id.clone(),
+                    prompt: i.prompt.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, (i64, String)>>()?;
+        let status = if !pending_approvals.is_empty() {
             "waiting"
         } else if !active_requests.is_empty() {
             "running"
         } else {
             "idle"
         };
-        Ok(json!({
-            "session_id": session_id,
-            "messages": history,
-            "transcript_revision": snapshot.revision,
-            "projection_generation": snapshot.projection_generation,
-            "pending_approvals": approvals,
-            "active_requests": active_requests,
-            "status": status,
-        }))
+        let mut value =
+            serde_json::to_value(snapshot).map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+        value["active_requests"] = json!(active_requests);
+        value["pending_approvals"] = json!(pending_approvals);
+        value["status"] = json!(status);
+        value["workspace"] = self
+            .safety
+            .as_ref()
+            .map(|s| json!(s.workspace()))
+            .unwrap_or(Value::Null);
+        value["capability_generation"] = json!(1);
+        Ok(value)
     }
 
     async fn session_list(&self, params: SessionListParams) -> Result<Value, (i64, String)> {
@@ -2139,9 +2210,8 @@ impl DaemonState {
     }
 
     async fn session_trace(&self, session_id: &str) -> Result<Value, (i64, String)> {
-        let runtime = self.session_runtime(Some(session_id)).await?;
-        let records = runtime
-            .store
+        let store = self.query_session_trace_store(session_id)?;
+        let records = store
             .load_trace()
             .await
             .map_err(|error| (INTERNAL_ERROR, format!("{error:#}")))?;
@@ -2152,9 +2222,8 @@ impl DaemonState {
     }
 
     async fn session_trace_page(&self, params: SessionPageParams) -> Result<Value, (i64, String)> {
-        let runtime = self.session_runtime(Some(&params.session_id)).await?;
-        let records = runtime
-            .store
+        let store = self.query_session_trace_store(&params.session_id)?;
+        let records = store
             .load_trace()
             .await
             .map_err(|error| (INTERNAL_ERROR, format!("{error:#}")))?;
@@ -2166,46 +2235,13 @@ impl DaemonState {
             "链路记录过大，已截断；可继续加载其余记录",
         );
         Ok(json!({
-            "session_id": runtime.id,
+            "session_id": params.session_id,
             "records": records,
             "offset": params.offset,
             "limit": limit,
             "total_records": total_records,
             "has_more": has_more,
         }))
-    }
-
-    async fn session_activity(
-        &self,
-        session_id: &str,
-    ) -> Result<(Vec<RequestId>, Vec<PendingApprovalInfo>, &'static str), (i64, String)> {
-        let active = self.run_coordinator.active.lock().await;
-        let active_requests = active
-            .keys()
-            .filter(|key| key.session_id == session_id)
-            .map(|key| key.request_id.clone())
-            .collect::<Vec<RequestId>>();
-        let request_ids = active
-            .keys()
-            .filter(|key| key.session_id == session_id)
-            .map(|key| key.request_id.clone())
-            .collect::<HashSet<RequestId>>();
-        drop(active);
-        let approvals = self
-            .approvals
-            .pending_for_session(Some(session_id))
-            .await
-            .into_iter()
-            .filter(|approval| request_ids.contains(&approval.request_id))
-            .collect::<Vec<_>>();
-        let status = if !approvals.is_empty() {
-            "waiting"
-        } else if !active_requests.is_empty() {
-            "running"
-        } else {
-            "idle"
-        };
-        Ok((active_requests, approvals, status))
     }
 
     fn permissions_get(&self) -> Result<Value, (i64, String)> {
@@ -2401,20 +2437,18 @@ impl DaemonState {
         for session in &mut sessions {
             session.active = session.id == current_id;
         }
-        let active_counts = self.run_coordinator.active.lock().await.keys().fold(
-            HashMap::<String, usize>::new(),
-            |mut counts, key| {
-                *counts.entry(key.session_id.clone()).or_default() += 1;
-                counts
-            },
-        );
-        let pending_sessions = self.approvals.pending_sessions().await;
         for session in &mut sessions {
-            let active_requests = active_counts.get(&session.id).copied().unwrap_or(0);
-            session.active_requests = active_requests;
-            session.status = if pending_sessions.contains(&session.id) {
+            let snapshot = self
+                .run_store
+                .session_readback(
+                    &SessionId(session.id.clone()),
+                    agent_core::HistoryReadMode::Omitted,
+                )
+                .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+            session.active_requests = snapshot.active_runs.len();
+            session.status = if !snapshot.pending_interactions.is_empty() {
                 SessionStatus::Waiting
-            } else if active_requests > 0 {
+            } else if !snapshot.active_runs.is_empty() {
                 SessionStatus::Running
             } else {
                 SessionStatus::Idle
@@ -2432,7 +2466,6 @@ impl DaemonState {
     }
 
     async fn session_resume(&self, session_id: &str) -> Result<Value, (i64, String)> {
-        self.session_runtime(Some(session_id)).await?;
         let mut snapshot = self.session_snapshot(session_id).await?;
         snapshot["resumed"] = json!(true);
         Ok(snapshot)
@@ -2490,6 +2523,19 @@ impl DaemonState {
                             .map_err(|e| (INTERNAL_ERROR, e.to_string()))?,
                     }
                 }
+                SlashAction::Snapshot => {
+                    if invocation.args.len() != 1 {
+                        return Err((INVALID_PARAMS, "需要一个 session ID".into()));
+                    }
+                    SlashResponse::Text {
+                        content: self
+                            .session_readback_value(
+                                &invocation.args[0],
+                                agent_core::HistoryReadMode::Omitted,
+                            )?
+                            .to_string(),
+                    }
+                }
                 SlashAction::Doctor => SlashResponse::Text {
                     content: self
                         .maintenance_store
@@ -2498,8 +2544,9 @@ impl DaemonState {
                         .to_string(),
                 },
                 SlashAction::Status => {
-                    let current_session = self.session_runtime(session_id).await?;
-                    let snapshot = self.session_snapshot(&current_session.id).await?;
+                    let snapshot = self
+                        .session_load_mode(session_id, agent_core::HistoryReadMode::Omitted)
+                        .await?;
                     let model = self
                         .provider_manager
                         .as_ref()
@@ -2510,7 +2557,7 @@ impl DaemonState {
                             "会话 {} · 模型 {} · 历史 {} 条 · 活动请求 {} 个 · 待审批 {} 个",
                             snapshot["session_id"].as_str().unwrap_or("unknown"),
                             model,
-                            snapshot["messages"].as_array().map_or(0, Vec::len),
+                            snapshot["transcript_revision"].as_u64().unwrap_or(0),
                             snapshot["active_requests"].as_array().map_or(0, Vec::len),
                             snapshot["pending_approvals"].as_array().map_or(0, Vec::len),
                         ),

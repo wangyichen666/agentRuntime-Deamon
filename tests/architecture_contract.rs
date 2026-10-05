@@ -381,3 +381,70 @@ fn checker_detects_grouped_aliased_and_fully_qualified_imports() {
         ["Context.stash", "Context.cache"]
     );
 }
+
+#[derive(Default)]
+struct ForbiddenLibraryOperations(Vec<String>);
+impl<'ast> Visit<'ast> for ForbiddenLibraryOperations {
+    fn visit_item(&mut self, item: &'ast Item) {
+        // 使用相同的生产分支排除规则；不能因测试 fixture 触发库规则。
+        let attrs: &[Attribute] = match item {
+            Item::Mod(i) => &i.attrs,
+            Item::Fn(i) => &i.attrs,
+            Item::Impl(i) => &i.attrs,
+            _ => &[],
+        };
+        if !test_only(attrs) {
+            visit::visit_item(self, item);
+        }
+    }
+    fn visit_expr_method_call(&mut self, expr: &'ast syn::ExprMethodCall) {
+        if expr.method == "unwrap" || expr.method == "expect" {
+            self.0.push(expr.method.to_string());
+        }
+        visit::visit_expr_method_call(self, expr);
+    }
+    fn visit_macro(&mut self, value: &'ast syn::Macro) {
+        if value.path.is_ident("println") || value.path.is_ident("print") {
+            self.0.push("stdout".into());
+        }
+        visit::visit_macro(self, value);
+    }
+}
+#[test]
+fn workspace_libraries_cannot_panic_or_print_in_production() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for file in rust_files(&root.join("crates")) {
+        if !file.components().any(|part| part.as_os_str() == "src") {
+            continue;
+        }
+        let mut operations = ForbiddenLibraryOperations::default();
+        operations.visit_file(&syn::parse_file(&std::fs::read_to_string(&file).unwrap()).unwrap());
+        assert!(
+            operations.0.is_empty(),
+            "{} 存在库级禁止操作 {:?}",
+            file.display(),
+            operations.0
+        );
+    }
+}
+#[test]
+fn extracted_context_cannot_acquire_session_or_storage_owners() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for file in rust_files(&root.join("crates/context/src")) {
+        let facts = production(&std::fs::read_to_string(&file).unwrap());
+        assert!(
+            private_context_state(&facts).is_empty(),
+            "{} 保存私有历史",
+            file.display()
+        );
+        for path in facts.paths {
+            assert!(
+                !path
+                    .iter()
+                    .any(|p| ["agent_storage", "agent_daemon_client", "agent_memory"]
+                        .contains(&p.as_str())),
+                "context 禁止 concrete owner 依赖 {path:?}"
+            );
+        }
+    }
+}

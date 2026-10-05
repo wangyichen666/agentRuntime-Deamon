@@ -14,7 +14,7 @@ type Result<T> = std::result::Result<T, ClientError>;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, OnceCell, mpsc};
 
 use agent_daemon_protocol::{
     EventSeq, JsonRpcRequest, JsonRpcResponse, MAX_FRAME_BYTES, RequestId, RunId, RunRecord,
@@ -57,6 +57,7 @@ pub struct DaemonClient {
 }
 
 struct DaemonClientInner {
+    negotiated: OnceCell<agent_daemon_protocol::NegotiatedCapabilities>,
     transport: ClientTransport,
     next_id: Arc<AtomicU64>,
     socket: Option<PathBuf>,
@@ -77,6 +78,7 @@ impl DaemonClient {
     pub fn in_memory(requests: mpsc::Sender<InMemoryEnvelope>) -> Self {
         Self {
             inner: Arc::new(DaemonClientInner {
+                negotiated: OnceCell::new(),
                 transport: ClientTransport::InMemory(requests),
                 next_id: Arc::new(AtomicU64::new(1)),
                 socket: None,
@@ -176,6 +178,7 @@ impl DaemonClient {
 
         Ok(Self {
             inner: Arc::new(DaemonClientInner {
+                negotiated: OnceCell::new(),
                 transport: ClientTransport::Unix {
                     requests,
                     pending,
@@ -226,17 +229,45 @@ impl DaemonClient {
                     }
                     return Err(ClientError::Rpc(error));
                 }
-                return response.result.ok_or(ClientError::MissingResult);
+                let value = response.result.ok_or(ClientError::MissingResult)?;
+                if ["session.load", "session.resume", "session.new"]
+                    .contains(&agent_daemon_protocol::canonical_method(method))
+                {
+                    agent_daemon_protocol::decode_session_readback(value.clone())?;
+                }
+                return Ok(value);
             }
         }
         Err(ClientError::Disconnected)
+    }
+
+    pub async fn read_session(
+        &self,
+        key: &agent_daemon_protocol::SessionKey,
+        mode: agent_daemon_protocol::HistoryReadMode,
+    ) -> Result<agent_daemon_protocol::SessionReadback> {
+        let value = self
+            .request_result(
+                "sessions.read",
+                serde_json::json!({"session_id":key,"history_mode":mode}),
+            )
+            .await?;
+        let snapshot = agent_daemon_protocol::decode_session_readback(value)?;
+        if snapshot.session_id != *key || snapshot.history_mode != mode {
+            return Err(ClientError::Protocol(
+                agent_daemon_protocol::ProtocolError::InvalidParams(
+                    "session readback owner/mode 不匹配".into(),
+                ),
+            ));
+        }
+        Ok(snapshot)
     }
 
     pub async fn read_run(&self, run_id: &RunId) -> Result<RunRecord> {
         let value = self
             .request_result("runs.read", serde_json::json!({"run_id":run_id}))
             .await?;
-        let record: RunRecord = serde_json::from_value(value)?;
+        let record = agent_daemon_protocol::decode_run_readback(value)?;
         if record.run_id != *run_id {
             return Err(ClientError::Protocol(
                 agent_daemon_protocol::ProtocolError::InvalidParams(
@@ -292,7 +323,60 @@ impl DaemonClient {
         self.request_with_id(id, method, params).await
     }
 
+    pub async fn negotiated_capabilities(
+        &self,
+    ) -> Result<&agent_daemon_protocol::NegotiatedCapabilities> {
+        self.inner
+            .negotiated
+            .get_or_try_init(|| async {
+                let offer = agent_daemon_protocol::InitializeParams::default();
+                let id = RequestId::Number(self.inner.next_id.fetch_add(1, Ordering::Relaxed));
+                let mut stream = self
+                    .request_raw_with_id(id, "connection.initialize", serde_json::to_value(&offer)?)
+                    .await?;
+                let frame = tokio::time::timeout(std::time::Duration::from_secs(10), stream.next())
+                    .await
+                    .map_err(|_| ClientError::Disconnected)?
+                    .ok_or(ClientError::Disconnected)?;
+                let ServerFrame::Response(response) = frame else {
+                    return Err(ClientError::MissingResult);
+                };
+                if let Some(error) = response.error {
+                    return Err(ClientError::Rpc(error));
+                }
+                let result: agent_daemon_protocol::NegotiatedCapabilities =
+                    serde_json::from_value(response.result.ok_or(ClientError::MissingResult)?)?;
+                result.validate_offer(&offer)?;
+                Ok(result)
+            })
+            .await
+    }
+
     pub async fn request_with_id(
+        &self,
+        id: RequestId,
+        method: &str,
+        params: Value,
+    ) -> Result<RpcStream> {
+        let mut candidate = JsonRpcRequest::new(id.clone(), method, params.clone());
+        candidate.protocol_version = Some(1);
+        agent_daemon_protocol::normalize_request(candidate).map_err(|error| {
+            ClientError::Rpc(agent_daemon_protocol::RpcError {
+                code: -32602,
+                message: error.to_string(),
+                data: None,
+            })
+        })?;
+        let negotiated = self.negotiated_capabilities().await?;
+        if !negotiated.permits(agent_daemon_protocol::canonical_method(method)) {
+            return Err(ClientError::Protocol(
+                agent_daemon_protocol::ProtocolError::InvalidParams("方法未协商".into()),
+            ));
+        }
+        self.request_raw_with_id(id, method, params).await
+    }
+
+    async fn request_raw_with_id(
         &self,
         id: RequestId,
         method: &str,

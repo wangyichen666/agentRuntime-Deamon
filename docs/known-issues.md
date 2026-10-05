@@ -2,7 +2,14 @@
 
 ## Runtime 部署与验证边界（2026-10-02）
 
-Wave 0–7 主链与本地门禁已完成，schema v12；各阶段历史证据及最终验收见 [实施记录](./changes/runtime-architecture.md)。
+当前 schema v14。2026-10-05 源码复核更正“全部 Wave 完成”的历史结论：本轮只补齐早期恢复读取/协议/lifetime 屏障纵切，302 项 Rust 和 27 项 Web 测试通过；完整 Wave 0–7 验收**未完成**。证据见 [最新实施记录](./changes/runtime-readback-fences.md)。
+
+- Wave 5B：stable plan identity、digest CAS execute/discard、pending_execution/executing、受治理 boundary hooks **未实现**。readback 的 plan_digest 只供展示。
+- 手动 compact 独立 canonical run/Started/exact cancel **未实现**，仍复用历史 run owner。
+- 所有入口 live event/readback 的统一 revision 防回退 **未实现**；领域比较 helper 已提供但未统一接线。
+- generation-scoped tool_search 与 runtime/daemon/sandbox/cli/acp/gateway 最终物理 crate 提取 **未实现**。
+- 新 model readback 只返回已安装模型历史 projection+suffix，完整四层 Provider 请求只读重建**未实现**；`/context` 保留既有读取路径。
+- clear/delete/fork 所有版本现在要求 expected_lifetime；兼容方法名保留，缺身份的旧客户端需先 readback 后发请求。恢复读取不切换 preferred session。
 
 - Native 仍是软边界，不能阻止同 UID shell 访问宿主。Docker foreground exec 已接通；后台 Docker resource **未实现**，强隔离后台请求 fail closed。
 - 本机 Docker daemon 可连接，但缺少预装 `alpine:3.21`，未运行真实容器隔离成功路径；已验证不可用时拒绝请求。部署需要自行准备合适镜像，不会自动 pull。

@@ -2,6 +2,7 @@ use crate::{ExactOwner, Message, RouteSnapshot, RunStatus, ToolSpec};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RunSnapshot {
     pub route: Option<RouteSnapshot>,
     pub tools: Vec<ToolSpec>,
@@ -58,6 +59,7 @@ pub struct RunAdmission {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PlanSnapshot {
     pub revision: u64,
     pub value: serde_json::Value,

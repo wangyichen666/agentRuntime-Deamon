@@ -18,14 +18,38 @@ fn socket() -> PathBuf {
     ))
 }
 
+async fn initialize(
+    reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+) {
+    let mut line = Vec::new();
+    reader.read_until(b'\n', &mut line).await.unwrap();
+    let request = decode_request(&line).unwrap();
+    assert_eq!(request.method, "connection.initialize");
+    let offer: agent_daemon_protocol::InitializeParams =
+        serde_json::from_value(request.params).unwrap();
+    let result = offer.negotiate().unwrap();
+    writer
+        .write_all(
+            &encode_frame(&ServerFrame::Response(JsonRpcResponse::success(
+                request.id,
+                serde_json::to_value(result).unwrap(),
+            )))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn reconnect_uses_cursor_readback_without_replaying_mutation() {
     let socket = socket();
     let listener = UnixListener::bind(&socket).unwrap();
     let server = tokio::spawn(async move {
         let (first, _) = listener.accept().await.unwrap();
-        let (reader, first_writer) = first.into_split();
+        let (reader, mut first_writer) = first.into_split();
         let mut reader = BufReader::new(reader);
+        initialize(&mut reader, &mut first_writer).await;
         let mut line = Vec::new();
         reader.read_until(b'\n', &mut line).await.unwrap();
         let mutation = decode_request(&line).unwrap();
@@ -36,6 +60,7 @@ async fn reconnect_uses_cursor_readback_without_replaying_mutation() {
         let (second, _) = listener.accept().await.unwrap();
         let (reader, mut writer) = second.into_split();
         let mut reader = BufReader::new(reader);
+        initialize(&mut reader, &mut writer).await;
         let mut line = Vec::new();
         reader.read_until(b'\n', &mut line).await.unwrap();
         let readback = decode_request(&line).unwrap();
@@ -83,6 +108,7 @@ async fn readback_rejects_wrong_owner_and_missing_event_sequence() {
             let (stream, _) = listener.accept().await.unwrap();
             let (reader, mut writer) = stream.into_split();
             let mut reader = BufReader::new(reader);
+            initialize(&mut reader, &mut writer).await;
             let mut line = Vec::new();
             reader.read_until(b'\n', &mut line).await.unwrap();
             let request = decode_request(&line).unwrap();
@@ -115,6 +141,7 @@ async fn run_readback_rejects_a_different_run_owner() {
         let (stream, _) = listener.accept().await.unwrap();
         let (reader, mut writer) = stream.into_split();
         let mut reader = BufReader::new(reader);
+        initialize(&mut reader, &mut writer).await;
         let mut line = Vec::new();
         reader.read_until(b'\n', &mut line).await.unwrap();
         let request = decode_request(&line).unwrap();
@@ -148,6 +175,7 @@ async fn resync_required_keeps_typed_snapshot_and_cursor() {
         let (stream, _) = listener.accept().await.unwrap();
         let (reader, mut writer) = stream.into_split();
         let mut reader = BufReader::new(reader);
+        initialize(&mut reader, &mut writer).await;
         let mut line = Vec::new();
         reader.read_until(b'\n', &mut line).await.unwrap();
         let request = decode_request(&line).unwrap();

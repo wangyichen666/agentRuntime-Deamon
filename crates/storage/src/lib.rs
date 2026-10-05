@@ -3,7 +3,7 @@
     not(test),
     deny(clippy::unwrap_used, clippy::expect_used, clippy::print_stdout)
 )]
-mod context;
+mod context_projection;
 mod flywheel;
 mod memory;
 mod resources;
@@ -12,7 +12,7 @@ pub use resources::*;
 mod ports;
 mod sessions;
 mod turns;
-pub use context::*;
+pub use context_projection::*;
 pub use ports::*;
 pub use sessions::*;
 pub use turns::*;
@@ -101,12 +101,12 @@ impl RunStore {
             [],
             |row| row.get(0),
         )?;
-        if version > 13 {
+        if version > 14 {
             return Err(RuntimeError::Protocol(format!(
                 "SQLite schema 版本 {version} 比当前程序支持的版本新"
             )));
         }
-        if version > 0 && version < 13 {
+        if version > 0 && version < 14 {
             backup_database(&connection, path, version)?;
         }
         if version < 1 {
@@ -243,6 +243,9 @@ impl RunStore {
         }
         if version < 13 {
             connection.execute_batch(include_str!("flywheel_migration.sql"))?;
+        }
+        if version < 14 {
+            connection.execute_batch(include_str!("readback_migration.sql"))?;
         }
         Ok(Self {
             connection: Mutex::new(connection),
@@ -2146,7 +2149,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 13);
+        assert_eq!(version, 14);
         connection
             .execute("INSERT INTO schema_migrations VALUES (99, 99)", [])
             .unwrap();
@@ -2479,3 +2482,5 @@ mod tests {
         assert_eq!(store.health_report().unwrap()["integrity"], "ok");
     }
 }
+
+mod readback;

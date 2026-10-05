@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -160,16 +160,6 @@ impl ApprovalBroker {
             .collect::<Vec<PendingApprovalInfo>>();
         pending.sort_by(|left, right| left.id.cmp(&right.id));
         pending
-    }
-
-    pub async fn pending_sessions(&self) -> HashSet<String> {
-        self.inner
-            .pending
-            .lock()
-            .await
-            .values()
-            .filter_map(|value| value.session_id.clone())
-            .collect()
     }
 }
 

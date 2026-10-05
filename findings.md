@@ -809,3 +809,9 @@ Wave 2 盘点：daemon 的 session_runtime/session_snapshot/session_infos 与 Lo
 第四轮发现：字符串数组锚点无法暴露预算省略；Codex的original/checkpoint completeness可借鉴。以文字锚点覆盖状态和省略下限补齐，不把摘要短、重压缩成功或有digest当作原始历史完整。
 
 交接复核：来源序号规范化后检测重复，防止0与0000绕过同来源去重；证据页对请求ID和元数据也作硬预算，避免无来源/跨会话返回分支绕过32KiB页上限。
+
+## 2026-10-05 主链复核
+
+现有六个 workspace 库，SQLite v13；源码证实在线 transcript 不双写，但文档宣称 Wave0–7 全完成过宽。只读 load 会构造 runtime；公开快照缺 durable control/lifetime；删除请求没有客户端 lifetime CAS；连接无 capability intersection。Wave5B plan identity/digest/execute/discard/hooks、手动 compact exact owner、tool_search 尚未实现。详见 ADR0002 与 runtime-readback-fences change doc。初次基线 client socket EPERM 为环境限制，经环境审批同命令通过。
+
+本轮实现收口：snapshot revision 采用全库持久单调游标，元数据/控制/投影在同一 read transaction 对齐；读取不使用 runtime/approval 缓存拼事实。旧 JSONL 启动迁移已在 composition root 受控存在，公共 readback 无需兼容导入。缺 expected_lifetime 的 destructive legacy 请求不能安全授权，所有版本统一拒绝；原方法 alias 与 Rpc(-32602) 错误合同保留。严格 RunRecord 与兼容 snapshot 附加字段通过集中 typed decoder 处理。新 readback 的 plan digest 不冒充未实现的 plan execution identity。

@@ -38,6 +38,43 @@ pub trait ContextRepository: Send + Sync {
         envelope: &ContextEnvelope,
     ) -> Result<(), RuntimeError>;
 }
+pub(crate) fn projection_in(
+    db: &Connection,
+    snapshot: &SessionSnapshot,
+) -> Result<ContextProjection, RuntimeError> {
+    let meta = metadata_in(db, &snapshot.session_key)?
+        .ok_or_else(|| RuntimeError::Protocol("session 不存在".into()))?;
+    if meta.deleted || meta.lifetime != snapshot.lifetime {
+        return Err(RuntimeError::Protocol("projection stale lifetime".into()));
+    }
+    let head: Option<(u64, u64, String)> = db
+        .query_row(
+            "SELECT source_end,generation,messages_json FROM context_heads WHERE lifetime=?1",
+            params![snapshot.lifetime.0],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    if let Some((end, generation, raw)) = head {
+        if end > snapshot.revision.0 || generation != snapshot.projection_generation.0 {
+            return Err(RuntimeError::Protocol("projection source stale".into()));
+        }
+        let mut messages: Vec<Message> =
+            serde_json::from_str(&raw).map_err(|e| RuntimeError::Protocol(e.to_string()))?;
+        messages.extend_from_slice(&snapshot.messages[end as usize..]);
+        Ok(ContextProjection {
+            source_end: snapshot.revision,
+            generation: ProjectionGeneration(generation),
+            messages,
+        })
+    } else {
+        Ok(ContextProjection {
+            source_end: snapshot.revision,
+            generation: snapshot.projection_generation,
+            messages: snapshot.messages.clone(),
+        })
+    }
+}
+
 fn source_check(
     db: &Connection,
     key: &SessionKey,
@@ -135,37 +172,7 @@ impl ContextRepository for RunStore {
         snapshot: &SessionSnapshot,
     ) -> Result<ContextProjection, RuntimeError> {
         let db = self.lock_connection()?;
-        let meta = metadata_in(&db, &snapshot.session_key)?
-            .ok_or_else(|| RuntimeError::Protocol("session 不存在".into()))?;
-        if meta.deleted || meta.lifetime != snapshot.lifetime {
-            return Err(RuntimeError::Protocol("projection stale lifetime".into()));
-        }
-        let head: Option<(u64, u64, String)> = db
-            .query_row(
-                "SELECT source_end,generation,messages_json FROM context_heads WHERE lifetime=?1",
-                params![snapshot.lifetime.0],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .optional()?;
-        if let Some((end, generation, raw)) = head {
-            if end > snapshot.revision.0 || generation != snapshot.projection_generation.0 {
-                return Err(RuntimeError::Protocol("projection source stale".into()));
-            }
-            let mut messages: Vec<Message> =
-                serde_json::from_str(&raw).map_err(|e| RuntimeError::Protocol(e.to_string()))?;
-            messages.extend_from_slice(&snapshot.messages[end as usize..]);
-            Ok(ContextProjection {
-                source_end: snapshot.revision,
-                generation: ProjectionGeneration(generation),
-                messages,
-            })
-        } else {
-            Ok(ContextProjection {
-                source_end: snapshot.revision,
-                generation: snapshot.projection_generation,
-                messages: snapshot.messages.clone(),
-            })
-        }
+        projection_in(&db, snapshot)
     }
     fn begin_compact(&self, intent: &CompactIntent) -> Result<(), RuntimeError> {
         let mut db = self.lock_connection()?;

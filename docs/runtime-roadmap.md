@@ -1,10 +1,10 @@
 # 本地 Agent Runtime 路线图
 
-更新日期：2026-10-02。本文件只记录已实现的行为与待办，不把下一阶段设计当作现有保证。
+更新日期：2026-10-05。本文件只记录已实现的行为与待办，不把下一阶段设计当作现有保证。
 
 ## 当前重构顺序：Wave 0–7
 
-Wave 0–7 主链已实现并通过本地门禁，当前 schema v12。实际 owner 分为 daemon SessionSupervisor/RunCoordinator、SQLite repository、无会话私有状态的 ContextEngine 与作用域 MemoryEngine；Native/Docker exec 和后台 Native resources 共用 exact owner。旧 JSONL 只受控导入一次，在线不双写。迁移、故障与三入口重启证据见 [实施记录](./changes/runtime-architecture.md)，状态合同见 [ADR](./adr/0001-runtime-state-ownership.md)。下文 P 阶段保留为旧实现历史，其中 JSONL owner 和未实现项以本段及最新 known-issues 为准。
+源码复核后更正：完整 Wave 0–7 验收尚未完成，当前 schema v14。本轮完成早期恢复读取/协议/lifetime 屏障纵切，SQLite 提供同事务 canonical facts，context/memory 保留原有接线；新增 13 项后共 302 项 Rust 测试通过。版本化计划执行与 hooks、手动 compact 独立 owner、tool_search、全入口 live revision 防回退及剩余物理 crate 提取**未实现**。按 Wave 的实际状态、owner 变化、迁移、测试和风险见 [最新实施记录](./changes/runtime-readback-fences.md) 与 [ADR 0002](./adr/0002-readback-and-lifecycle-fences.md)。下文 P 阶段和早期 change doc 保留为历史，以本段及最新 known-issues 为准。
 
 ## 阶段与状态
 

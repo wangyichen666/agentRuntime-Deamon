@@ -245,6 +245,7 @@ async fn run_acp_slash(
             action: SlashAction::Help
                 | SlashAction::Memory
                 | SlashAction::Context
+                | SlashAction::Snapshot
                 | SlashAction::Resources
                 | SlashAction::Doctor
                 | SlashAction::Run

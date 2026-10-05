@@ -293,6 +293,54 @@ async fn send_and_disconnect(socket: &Path, id: &str, session: &str, message: &s
     stream.write_all(format!("{}\n", json!({"jsonrpc":"2.0","id":id,"method":"chat.send","params":{"session_id":session,"message":message}})).as_bytes()).await.unwrap();
 }
 
+fn assert_snapshot_projection(text: &str, expected: &str) {
+    fn find(value: &Value) -> Option<Value> {
+        if value.get("snapshot_revision").is_some() {
+            return Some(value.clone());
+        }
+        match value {
+            Value::String(text) => serde_json::from_str::<Value>(text)
+                .ok()
+                .and_then(|v| find(&v)),
+            Value::Object(map) => map.values().find_map(find),
+            Value::Array(values) => values.iter().find_map(find),
+            _ => None,
+        }
+    }
+    let expected: Value = serde_json::from_str(expected).unwrap();
+    let actual = text
+        .lines()
+        .find_map(|line| {
+            let start = line.find('{')?;
+            let end = line.rfind('}')?;
+            serde_json::from_str::<Value>(&line[start..=end])
+                .ok()
+                .and_then(|v| find(&v))
+        })
+        .unwrap_or_else(|| panic!("入口未返回 canonical snapshot: {text}"));
+    agent_daemon_protocol::decode_session_readback(actual.clone()).unwrap();
+    for field in [
+        "session_id",
+        "session_lifetime_id",
+        "transcript_revision",
+        "projection_generation",
+        "active_owner",
+        "queue_rows",
+        "pending_interactions",
+        "last_durable_terminal",
+        "plan_digest",
+    ] {
+        assert_eq!(
+            actual[field], expected[field],
+            "三入口 snapshot 的 {field} 不一致"
+        );
+    }
+    assert!(
+        actual["snapshot_revision"].as_u64().unwrap()
+            >= expected["snapshot_revision"].as_u64().unwrap()
+    );
+}
+
 async fn entry_views(
     workspace: &Path,
     runtime_dir: &Path,
@@ -316,7 +364,7 @@ async fn entry_views(
     .await;
     let session_key = read["result"]["session_id"].as_str().unwrap();
     let mut facts = Vec::new();
-    for command in ["memory", "context", "resources"] {
+    for command in ["memory", "context", "resources", "snapshot"] {
         let line = format!("/{command} {session_key}");
         let result = rpc(
             &daemon_socket,
@@ -379,10 +427,14 @@ async fn entry_views(
     );
 
     for (_, fact) in &facts {
-        assert!(
-            cli_text.contains(fact),
-            "CLI 缺少 durable fact: {fact}; {cli_text}"
-        );
+        if fact.contains("snapshot_revision") {
+            assert_snapshot_projection(&cli_text, fact);
+        } else {
+            assert!(
+                cli_text.contains(fact),
+                "CLI 缺少 durable fact: {fact}; {cli_text}"
+            );
+        }
     }
 
     let mut acp = Command::new(env!("CARGO_BIN_EXE_my-agent"))
@@ -473,14 +525,19 @@ async fn entry_views(
         loop {
             let line = acp_out.next_line().await.unwrap().unwrap();
             text.push_str(&line);
+            text.push('\n');
             if serde_json::from_str::<Value>(&line).unwrap()["id"] == id {
                 break;
             }
         }
-        assert!(
-            text.contains(&serde_json::to_string(fact).unwrap()),
-            "ACP durable fact 不一致: {fact}; {text}"
-        );
+        if fact.contains("snapshot_revision") {
+            assert_snapshot_projection(&text, fact);
+        } else {
+            assert!(
+                text.contains(&serde_json::to_string(fact).unwrap()),
+                "ACP durable fact 不一致: {fact}; {text}"
+            );
+        }
     }
     acp.kill().await.unwrap();
     acp.wait().await.unwrap();
@@ -581,10 +638,14 @@ async fn entry_views(
             let text = socket.next().await.unwrap().unwrap().into_text().unwrap();
             let value: Value = serde_json::from_str(&text).unwrap();
             if value["id"] == id {
-                assert_eq!(
-                    value["result"]["content"], *fact,
-                    "WebSocket durable fact 不一致"
-                );
+                if fact.contains("snapshot_revision") {
+                    assert_snapshot_projection(value["result"]["content"].as_str().unwrap(), fact);
+                } else {
+                    assert_eq!(
+                        value["result"]["content"], *fact,
+                        "WebSocket durable fact 不一致"
+                    );
+                }
                 break;
             }
         }
@@ -1266,10 +1327,25 @@ async fn session_delete_recreate_and_fork_survive_restart_without_old_history_or
         let (_,response)=chat(&socket,"same-request",key,"旧输入",true).await;assert!(response.unwrap().get("error").is_none());
         let before=rpc(&socket,"before","sessions.read",json!({"session_id":key})).await;
         assert_eq!(before["result"]["transcript_revision"],2);
-        let fork=rpc(&socket,"fork","sessions.fork",json!({"session_id":key,"target_session_id":"session-forked-test.jsonl","operation_id":"fork-original","expected_revision":2})).await;assert_eq!(fork["result"]["forked"],true);
-        let deleted=rpc(&socket,"delete","sessions.delete",json!({"session_id":key,"operation_id":"delete-original"})).await;assert_eq!(deleted["result"]["deleted"],true);
+        let original_lifetime = before["result"]["session_lifetime_id"].as_str().unwrap().to_owned();
+        let fork=rpc(&socket,"fork","sessions.fork",json!({"session_id":key,"target_session_id":"session-forked-test.jsonl","operation_id":"fork-original","expected_revision":2,"expected_lifetime":original_lifetime})).await;assert_eq!(fork["result"]["forked"],true);
+        let deleted=rpc(&socket,"delete","sessions.delete",json!({"session_id":key,"operation_id":"delete-original","expected_lifetime":original_lifetime})).await;assert_eq!(deleted["result"]["deleted"],true);
         let missing=rpc(&socket,"deleted-read","sessions.read",json!({"session_id":key})).await;assert!(missing.get("error").is_some());
         let recreated=rpc(&socket,"recreate","sessions.create",json!({"session_id":key,"operation_id":"create-replacement"})).await;assert_eq!(recreated["result"]["created"],true);
+        let replacement=rpc(&socket,"replacement-read","sessions.read",json!({"session_id":key,"history_mode":"omitted"})).await;
+        let revision = replacement["result"]["snapshot_revision"].clone();
+        assert_ne!(replacement["result"]["session_lifetime_id"],json!(original_lifetime));
+        for (method,params) in [
+            ("sessions.delete",json!({"session_id":key,"operation_id":"late-delete","expected_lifetime":original_lifetime})),
+            ("sessions.clear",json!({"session_id":key,"operation_id":"late-clear","expected_lifetime":original_lifetime})),
+            ("sessions.fork",json!({"session_id":key,"target_session_id":"session-late-fork.jsonl","operation_id":"late-fork","expected_revision":0,"expected_lifetime":original_lifetime})),
+            ("chat.send",json!({"session_id":key,"message":"迟到旧输入","expected_lifetime":original_lifetime})),
+        ] {
+            let late=rpc(&socket,"late-owner",method,params).await;
+            assert!(late.get("error").is_some(),"{late}");
+        }
+        let current=rpc(&socket,"zero-write","sessions.read",json!({"session_id":key,"history_mode":"omitted"})).await;
+        assert_eq!(current["result"]["snapshot_revision"],revision,"迟到请求必须零持久写入");
         let (new_run,response)=chat(&socket,"same-request",key,"新输入",true).await;assert!(response.unwrap().get("error").is_none());
         process.kill().await.unwrap();process.wait().await.unwrap();
         let (mut restarted,socket)=daemon(&workspace,&runtime_dir,&url).await;
@@ -1323,8 +1399,8 @@ async fn compact_memory_receipts_survive_restart_and_all_three_entries() {
         entry_views(&workspace,&runtime_dir,&url,&owner,"子任务完成",None).await;
         let doctor=rpc(&socket,"doctor","runtime.doctor",json!({})).await;
         assert_eq!(doctor["result"]["storage"]["integrity"],"ok");
-        assert_eq!(doctor["result"]["storage"]["schema_version"],13);
-        rpc(&socket,"clear","sessions.clear",json!({"session_id":key,"operation_id":"clear-context"})).await;
+        assert_eq!(doctor["result"]["storage"]["schema_version"],14);
+        rpc(&socket,"clear","sessions.clear",json!({"session_id":key,"operation_id":"clear-context","expected_lifetime":fresh["result"]["session_lifetime_id"]})).await;
         let cleared=rpc(&socket,"clear-read","memory.list",json!({"session_id":key})).await;
         assert_eq!(cleared["result"]["entries"],json!([]));
         let late=rpc(&socket,"late","memory.store",json!({"session_id":key,"owner_run_id":owner,"operation_id":"late-old","content":"迟到旧写入"})).await;

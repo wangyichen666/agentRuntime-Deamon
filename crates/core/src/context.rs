@@ -28,6 +28,7 @@ pub struct ContextProjection {
     pub messages: Vec<Message>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContextEnvelope {
     pub source: ContextSource,
     pub route: String,

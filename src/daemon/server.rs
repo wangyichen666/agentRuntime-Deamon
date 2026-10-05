@@ -36,12 +36,18 @@ impl InMemoryServer {
     pub fn start(state: Arc<DaemonState>) -> DaemonClient {
         let (requests, mut receiver) = mpsc::channel::<InMemoryEnvelope>(64);
         tokio::spawn(async move {
+            let mut connection = agent_daemon_protocol::ConnectionState::default();
             while let Some(envelope) = receiver.recv().await {
+                let Some(request) = accept_connection_request(
+                    &mut connection,
+                    envelope.request,
+                    &envelope.frames.clone().into(),
+                ) else {
+                    continue;
+                };
                 let state = state.clone();
                 tokio::spawn(async move {
-                    state
-                        .handle_request(envelope.request, envelope.frames.into())
-                        .await;
+                    state.handle_request(request, envelope.frames.into()).await;
                 });
             }
         });
@@ -174,6 +180,33 @@ pub async fn run_unix_server(
     Ok(())
 }
 
+fn accept_connection_request(
+    connection: &mut agent_daemon_protocol::ConnectionState,
+    request: super::protocol::JsonRpcRequest,
+    frames: &super::frames::FrameSender,
+) -> Option<super::protocol::JsonRpcRequest> {
+    let id = request.id.clone();
+    match connection.accept(request) {
+        Ok(agent_daemon_protocol::ConnectionRequest::Dispatch(request)) => Some(request),
+        Ok(agent_daemon_protocol::ConnectionRequest::Initialized(result)) => {
+            let response = match serde_json::to_value(result) {
+                Ok(value) => JsonRpcResponse::success(id, value),
+                Err(error) => JsonRpcResponse::failure(id, -32603, error.to_string()),
+            };
+            let _ = frames.send(ServerFrame::Response(response));
+            None
+        }
+        Err(error) => {
+            let _ = frames.send(ServerFrame::Response(JsonRpcResponse::failure(
+                id,
+                -32602,
+                error.to_string(),
+            )));
+            None
+        }
+    }
+}
+
 async fn serve_unix_connection(stream: UnixStream, state: Arc<DaemonState>) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let (frames, mut frame_receiver) = super::frames::frame_channel();
@@ -202,6 +235,7 @@ async fn serve_unix_connection(stream: UnixStream, state: Arc<DaemonState>) -> R
     }));
 
     let mut reader = BufReader::new(reader);
+    let mut connection = agent_daemon_protocol::ConnectionState::default();
     loop {
         let mut line = Vec::new();
         let read = (&mut reader)
@@ -230,6 +264,9 @@ async fn serve_unix_connection(stream: UnixStream, state: Arc<DaemonState>) -> R
                 )));
                 continue;
             }
+        };
+        let Some(request) = accept_connection_request(&mut connection, request, &frames) else {
+            continue;
         };
         let request_frames = frames.clone();
         let request_id = request.id.clone();
@@ -783,6 +820,77 @@ mod tests {
 
         let _ = std::fs::remove_file(session_path);
         let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[tokio::test]
+    async fn readback_does_not_construct_runtime_import_files_or_acquire_run_ownership() {
+        use agent_core::{HistoryReadMode, SessionKey};
+        let (state, _) = test_state().await;
+        let client = InMemoryServer::start(state.clone());
+        let key = SessionKey("session-readonly-contract.jsonl".into());
+        state.run_store.create_session(&key).unwrap();
+        let before = state
+            .run_store
+            .session_readback(&key, HistoryReadMode::Canonical)
+            .unwrap();
+        let path = state.session.path_for_session(&key.0);
+        tokio::fs::write(&path, "invalid legacy JSONL")
+            .await
+            .unwrap();
+        for mode in [
+            HistoryReadMode::Canonical,
+            HistoryReadMode::Omitted,
+            HistoryReadMode::Model,
+        ] {
+            let snapshot = client.read_session(&key, mode).await.unwrap();
+            assert_eq!(snapshot.snapshot_revision, before.snapshot_revision);
+            assert_eq!(snapshot.session_lifetime_id, before.session_lifetime_id);
+            assert!(snapshot.active_owner.is_none());
+        }
+        crate::entry::cli::request_result(&client, "session.resume", json!({"session_id":key}))
+            .await
+            .unwrap();
+        crate::entry::cli::request_result(&client, "session.load_page", json!({"session_id":key}))
+            .await
+            .unwrap();
+        crate::entry::cli::request_result(&client, "memory.list", json!({"session_id":key}))
+            .await
+            .unwrap();
+        crate::entry::cli::request_result(&client, "resources.list", json!({"session_id":key}))
+            .await
+            .unwrap();
+        assert!(
+            !state
+                .session_supervisor
+                .sessions
+                .lock()
+                .await
+                .contains_key(&key.0)
+        );
+        assert!(state.run_coordinator.active.lock().await.is_empty());
+        assert_eq!(
+            state
+                .run_store
+                .session_readback(&key, HistoryReadMode::Canonical)
+                .unwrap()
+                .snapshot_revision,
+            before.snapshot_revision
+        );
+        let missing = SessionKey("session-missing-readonly.jsonl".into());
+        assert!(
+            client
+                .read_session(&missing, HistoryReadMode::Canonical)
+                .await
+                .is_err()
+        );
+        assert!(
+            state
+                .run_store
+                .session_metadata(&missing)
+                .unwrap()
+                .is_none()
+        );
+        let _ = tokio::fs::remove_file(path).await;
     }
 
     #[tokio::test]

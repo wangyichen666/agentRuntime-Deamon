@@ -40,7 +40,7 @@
 
 > 想先看完整流程图和功能全景？打开 [项目系统说明](./docs/agent-system.html)。
 
-Agent Runtime 已接通 Wave 0–7：统一 daemon client、SQLite canonical transcript/lifetime、原子 TurnCommit、持久 compact projection、作用域 MemoryEngine、工具调度与后台资源、HTTPS MCP、secret 引用和 doctor。数据库按 v1→v12 前进迁移，升级前校验备份；原始 transcript 保留，压缩只替换模型输入投影。状态所有权见 [ADR 0001](./docs/adr/0001-runtime-state-ownership.md)，迁移、验收证据与部署限制见 [实施记录](./docs/changes/runtime-architecture.md)。
+Agent Runtime 已有统一 daemon client、SQLite canonical transcript/lifetime、原子 TurnCommit、持久 compact projection 和作用域 MemoryEngine。2026-10-05 补齐连接能力协商、单事务只读恢复快照与公共 lifetime CAS，数据库前进迁移至 v14，升级前校验备份；原始 transcript 保留，压缩只替换模型输入投影。完整 Wave 0–7 验收尚未完成：版本化计划执行、边界 hooks、手动 compact 独立 owner、tool_search 等未实现。实际范围及 302 项 Rust 验收见 [本轮实施记录](./docs/changes/runtime-readback-fences.md)，状态合同见 [ADR 0002](./docs/adr/0002-readback-and-lifecycle-fences.md)，较早阶段见 [历史实施记录](./docs/changes/runtime-architecture.md)。
 
 ## 终端体验
 
@@ -267,7 +267,10 @@ Cron：
 
 | 方法 | 参数要点 | 结果 |
 |---|---|---|
-| `chat.send` | `message`, `session_id?`, `admission_mode?: "queue" \| "reject_if_busy"` | 完成后返回 `content/run_id/turn_id`；重复排队请求返回同一 `run_id` |
+| `connection.initialize` | `protocol_versions`, `capabilities: [{name,schema_version}]` | 当前物理连接的版本/能力交集；v1 先协商，重连重新协商 |
+| `sessions.read` / `session.load` | `session_id`, `history_mode?: canonical/model/omitted`；兼容 `read_model_only: true` | 同事务 metadata/lifetime/revision、历史、owner、queue、pending、terminal、plan、context ledger；不构造执行对象 |
+| `sessions.clear/delete/fork` | `session_id`, `expected_lifetime`, `operation_id`；fork 还需 `target_session_id`, `expected_revision` | 持久事务内 lifetime CAS、幂等 receipt；缺身份的旧请求拒绝 |
+| `chat.send` | `message`, `session_id?`, `expected_lifetime?`, `admission_mode?: "queue" \| "reject_if_busy"` | 完成后返回 `content/run_id/turn_id`；重复排队请求返回同一 `run_id` |
 | `queue.list` / `queue.read` / `queue.remove` | `session_id`；后两者还需 `run_id` | 稳定队列项 ID、位置与状态；remove 只取消指定 queued run |
 | `agent.cancel` | 优先使用 `session_id + run_id`；兼容 `request_id` | 只取消对应 run；无 session 的旧 request ID 若不唯一则冲突 |
 | `interaction.list` / `interaction.read` | `session_id` / `interaction_id` | 返回 owner、kind、status、revision 和类型化 payload |
@@ -279,6 +282,8 @@ Cron：
 | `list_subagents` / `read_subagent` | `root_run_id` / `parent_run_id + child_run_id` | 读取持久委派树或指定 child 的状态与终态 |
 | `wait_subagents` / `cancel_subagent` | `parent_run_id + child_run_ids + timeout_ms? + after_seq?` / `parent_run_id + child_run_id` | 有限时间等待终态或事件游标进展；超时不修改 child；取消只作用于持久证明的委派子树 |
 | `subagent.result.reserve/release/commit` | `parent_run_id`, `child_run_id`, `owner`, `revision` | 结果消费与 child 终态分离；30 秒租约、幂等领取与冲突检测 |
+
+`/snapshot <session_id>` 从 CLI、ACP 和 WebSocket 的共享 slash RPC 读取同一稀疏快照。恢复读取不改变 preferred session。`model` 仅代表已安装模型历史投影，不包括 stable prefix、记忆召回或 turn overlay；省略区在 `omitted` 中明确列出。
 
 新客户端应保存 `run_id` 和事件 `seq`。传输断线或 HTTP 等待超时只结束本次等待；重新连接后用 `run.read`、`queue.list` 与 `agent.subscribe(after_seq)` 读取事实。审批在 daemon 重启后会标为 orphaned，原 LLM 执行体不会自动恢复。`run.reconcile` 仅供本地操作者在检查 `run.audit` 后使用，不会自动重放工具或修改旧 JSONL。运行中的 child 在重启后标为 `unknown_after_restart`，已完成的结果可读回；`steer` 和强沙箱仍属于后续阶段。CLI/ACP/TUI 可使用 `/subagents <root_run_id>`、`/subagent <parent_run_id> <child_run_id>`、`/subagent-wait`、`/subagent-cancel`；Web 的子 Agent 卡片使用相同 RPC。
 

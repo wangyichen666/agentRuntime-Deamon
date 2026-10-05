@@ -573,6 +573,7 @@ mod tests {
         let store = RunStore::open(&path).unwrap();
         let owner = start(&store, "a", 1);
         memory(&store, &owner, "m");
+        crate::readback::remove_v14_for_fixture(&store.lock_connection().unwrap());
         store.lock_connection().unwrap().execute_batch("DROP TABLE memory_exposures; DROP TABLE memory_assessments; DROP TABLE memory_feedback_receipts; DROP TABLE memory_ingest_retries; DELETE FROM schema_migrations WHERE version=13;").unwrap();
         drop(store);
         let store = RunStore::open(&path).unwrap();
@@ -584,7 +585,7 @@ mod tests {
             store.flywheel_report(&owner.session_lifetime_id).unwrap()["exposure_count"],
             0
         );
-        assert_eq!(store.health_report().unwrap()["schema_version"], 13);
+        assert_eq!(store.health_report().unwrap()["schema_version"], 14);
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }

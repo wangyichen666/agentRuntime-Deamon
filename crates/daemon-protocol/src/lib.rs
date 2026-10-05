@@ -4,6 +4,11 @@
     deny(clippy::unwrap_used, clippy::expect_used, clippy::print_stdout)
 )]
 
+mod readback;
+pub use readback::{decode_run_readback, decode_session_readback};
+mod connection;
+pub use agent_core::{HistoryReadMode, SessionKey, SessionReadback, SnapshotRevision};
+pub use connection::*;
 mod methods;
 pub mod params;
 pub use agent_core::{
@@ -228,6 +233,13 @@ pub fn decode_server_frame_for_version(
     let frame = decode_server_frame(bytes)?;
     if version == 1 {
         let value: Value = serde_json::from_slice(bytes)?;
+        if let ServerFrame::Response(response) = &frame {
+            if response.result.is_some() == response.error.is_some() {
+                return Err(ProtocolError::InvalidParams(
+                    "response 必须且只能有 result 或 error".into(),
+                ));
+            }
+        }
         let allowed: &[&str] = match &frame {
             ServerFrame::Response(_) => &["frame", "jsonrpc", "id", "result", "error"],
             ServerFrame::Event(_) => &[
