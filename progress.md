@@ -475,3 +475,120 @@ Rust 基线289→302项，全目标/全特性通过（真实daemon11、架构10�
 ### 云端提交授权
 
 用户明确要求“提交到云端”。已复核当前 main/origin 与本轮变更范围，执行常规提交和推送，不强制覆盖远端。
+
+
+# 实施日志
+
+- 2026-10-05：读取需求、根 manifest、README、ADR 0001/0002、既有变更记录和核心计划路径。记录初始 HEAD/干净状态。
+- 基线 cargo test --locked --workspace --all-targets --all-features：沙箱内退出 101，daemon-client 四项 socket EPERM；日志 /tmp/control-waves-baseline.log。申请同命令环境重跑。
+
+
+### 控制面 Wave 1 验收（2026-10-05）
+
+版本化计划纵切完成：SQLite v15、稳定定义身份/摘要、精确执行/废弃、pending 重启不自启、旧数据证据保留、CLI/ACP/WS/HTTP 合同。Rust 315 项全过，Clippy/MSRV/release/Web28/fmt/check/offline deny 通过；日志与失败修复证据见 docs/changes/governed-runtime-controls.md。下一步 Wave 2 hooks；Wave 2–8 尚未完成。
+
+### 控制面 Wave 2 验收（2026-10-05）
+
+332 项 Rust（真实 daemon19）、Web29 与所有本波门禁通过；离线 deny 使用既有缓存，未在线刷新。新 hooks/default-disabled 配置、v16 审计/outbox/continuation、审批真实 revision、manual/auto compact 顺序、失败重启不重执行和三入口 readback 完成。
+
+失败修复：Serde unit effect 忽略未知字段→严格空 struct；stdin shutdown 后 drop→真实 EOF；shared run decoder 校验新增关联身份；compact 失败重试保留失败；continuation 预算不再借 for_delegation 改写 frozen context policy；最终文本/大输入同样限 token，流式发布前中断。正常进程 fixture 超时调至允许上限5秒，专门100ms超时测试保留。原 memory backlog 合同在并行负载失败后独立诊断与全回归均通过，未更改业务断言。
+
+日志 `/tmp/control-waves-wave2-{tests-verified,clippy-final,msrv-final,release-final,web-final,deny-authorized}.log`。README/roadmap/known issues/ADR/change/Hook API 已同步事实；未提交/推送/部署。继续 Wave 3。
+
+
+## 2026-10-06：heartbeat第五轮实施与验证
+
+已按研究→计划→RED→修复→GREEN完成工具结果元数据预算增量：共享计量补name/tool_call_id，采用饱和累加；固定8项独立预算样本和真实OpenAI出站合同验证，保持thinking排除、参数单次计量、图片与当前轮次保护。flywheel evaluate记忆17/17、上下文29/29，旧计量24/29。Codex固定8d44977/workspace 0.0.0，不标最新。
+
+验证隔离：原工作区含另一轮Wave 3开发，全部保留。捕获快照全测因5项storage迁移断言（v17与旧预期v16）退出101，Clippy因compact_runs既有复杂元组退出101；context与OpenAI本轮合同通过。固定已提交a8ac3dc基线加相同增量303项Rust（11项真实daemon）、严格Clippy、MSRV1.88、Release、Web27、fmt、离线deny通过。本轮不修他轮代码或冒充整体完成。
+
+原目标文件与基线SHA256相同，应用前再校验，代码只写context增量、OpenAI测试和budget JSON；根记录只追加。本地v4主库无飞轮表，反馈证据不可得，未动生产数据或作用域。日志/private/tmp/agent-budget-heartbeat-ifpr94gm/heartbeat-{budget,base}-*，完整合同和失败记录见docs/research/codex-tool-metadata-budget.md。未提交、推送或部署。
+
+应用复核：本轮3个代码/评测文件与通过门禁的隔离验证内容逐字节一致；应用后原仓库`git diff --check`退出0，HEAD仍为a8ac3dc，无新增提交。验证摘要保存在`/private/tmp/agent-budget-heartbeat-ifpr94gm/heartbeat-verification-summary.json`。
+
+
+### Wave 3 验证过程（2026-10-06）
+
+真实native合同已GREEN，Started先于Provider返回、订阅断线只detach、旧聊天owner取消不影响compact、取消后可聊天、kill/restart unknown且不重摘要；三个入口逐字段对比native receipt，并验证HTTP原operation重取/来源身份冒领拒绝。双后端CAS/幂等/busy/terminal故障回滚/损坏与v16迁移备份/未来拒绝通过。多次完整回归曾全绿；最终增量再次门禁进行中。保留早期迁移夹具缺drop新表、菜单顺序改变、frame测试pattern guard move编译错误等日志；已修源码而未删除或放宽断言。原记忆排空间歇失败保留并以稳定RED修复due时序，不增加测试等待。
+
+
+### 控制面 Wave 3 验收完成（2026-10-06）
+
+独立 compact、v17迁移、协议/daemon/CLI/TUI/Web/HTTP纵切与旧unary同owner适配已闭合。全部门禁退出0：Rust341（daemon20）、Web31、严格Clippy、MSRV1.88、Release、fmt/JS/diff和缓存离线deny；日志与修复证据见docs/changes/governed-runtime-controls.md。下一步Wave4冻结generation工具搜索/dispatcher；Wave4–8仍未完成，未提交/推送/部署。
+
+
+### 控制面 Wave 4 接线与终审（2026-10-06）
+
+core字段检索/严格dispatcher DTO、SQLite v18发现receipt和取消发布屏障、冻结schema/小Provider工具面、同dispatcher preflight/resource/safety链、run.discovery和/tools三入口已接线。真实RED保存在/tmp/control-waves-wave4-red.log；搜索/调用/回填、否定准入、跨轮wire id、索引并发复用、取消worker和迁移/回滚/腐败测试已加入。旧审批fixture扩为先搜索再nested invoke，原安全/副作用断言保留；仅core子工具面维持原1项断言。正在运行最后完整门禁，尚不标记本波验收完成；后续Wave5–8未实现。
+
+
+### 控制面 Wave 4 验收完成（2026-10-06）
+
+v18迁移、core检索/strict DTO、冻结小Provider面、统一nested schema/资源/安全审批链、取消publication屏障、readonly RPC与三入口已闭合。最终Rust350（真实daemon22）/Web31及fmt、严格Clippy、MSRV1.88、release、JS/diff、缓存离线deny全部退出0；日志与修复记录见docs/changes/governed-runtime-controls.md，API docs/tool-discovery-api.md。下一步Wave5共享revision-aware reducer；Wave5–8未实现，未提交/推送/部署。
+
+
+## Wave 5 完成：共享 revision reducer 与持久版本封存（2026-10-06）
+
+agent_core 是唯一展示时序规则；SQLite v19 event_view_stamps 是版本事实源。所有事件发布在原 mutation 事务封存最终全版本向量；读取校验 SHA/full ExactOwner，缺戳历史不追补。SessionReadback::supersedes 委托同一 reducer。run_owners additive 读取严格校验；嵌套 slash、native compact、终态和交互回执也接线。去掉 private seq 推断和入口各自比较路径。
+
+Rust DaemonClient 各消费者独立游标，projector actor 保持 next 可取消安全；有界队列溢出 detach。Web 通过纯 views.reduce RPC 调用完全相同函数，256 帧/8MiB 有界串行队列；Gateway 只转协议。resync 先单事务 page 基线，再 32 条 durable 页补充仍活动完整 owner，ViewResynced 不是业务终态。原始审计数据保持，返回帧保留元数据剥离后按 repository 来源添加。
+
+RED /tmp/control-waves-wave5-red.log 缺 RPC 真失败。核心 4 个领域测试覆盖乱序、同版本补充、IR 冲突、多 run、退休 life、durable replay。storage 新 3 项双后端/封存/迁移测试覆盖零写读取、损坏和 fault 回滚。真实 daemon 新 2 项 revision_reducer_rejects_delayed_readback_and_retired_lifetime_over_socket、shared_client_resyncs_real_dropped_frame_and_duplicate_without_provider_replay，后者 proxy 真丢 TextDelta/重复 Started，Provider 次数保持 1。重启 direct run.read 需要完整 source 初始化展示已修复。新增 stamp 使旧测试 helper 误判 compact 为 session，现按完整 compact DTO 逐字段比对，未放宽旧断言。Web 新 4 项连同原 31 项通过。
+
+门禁均退出0：cargo test --locked --workspace --all-targets --all-features 359 项含24真实daemon（/tmp/control-waves-wave5-tests-final-corrected.log）；严格 Clippy（clippy-final-corrected）、MSRV1.88（msrv-final）、release（release-final）、fmt（fmt-final）、diff（diff-final）；Web35（web-final）、JS语法。cargo deny --offline check --hide-inclusion-graph 四项通过（deny-final），仅已有缓存，未在线刷新。API docs/view-reducer-api.md。
+
+Wave6–8尚未完成；真实商业 Provider/MCP、Linux、生产慢消费者和 CI 未验证；未提交/推送/部署。
+
+
+## Wave 6 设计补充（实施前）
+
+Provider 发送前只使用 agent-context 的纯 assembler；同一输入同时产生规范化消息/工具、ContextEnvelope、分区计量、能力降级与请求摘要。SQLite v20 前进迁移保存完整 exact owner 的不可变 request capture 与 SHA；包括该次调用的 source revision/generation、冻结完整 catalog、实际小工具面、route/provider capability、校准与 policy。captured retrieved/overlay 保存为当时材料，不在只读路径重新启动 Git/MCP/Provider/skill 搜索/memory ingest。
+
+context.readback 在同一只读事务核对 current lifetime、owner、capture SHA、source 和冻结 snapshot，再以同一个 assembler 重建。输出明确区分当时可重建的 capture 和当前不可重放的动态环境；不声称其等于后来状态。无 capture 的旧 run 报明确 unavailable，而非空上下文。默认仅元数据/摘要，显式本地诊断才返回经脱敏的完整材料；memory 分区不返回原文，当前权限变化禁止完整诊断。损坏 fail closed。
+
+
+## Wave 6 完成：实际请求 capture 与零写共享重建（2026-10-06）
+
+状态 owner 为 SQLite v20 provider_requests；保存模型/fallback/自动与手动摘要的发送前不可变材料，SHA与ContextEnvelope同事务。实际 Provider 发送与只读 context.readback 都使用 agent-context::assemble_request；删掉 loop_engine 原独立 envelope 计量与媒体降级路径。ContextManager 摘要也接入相同 assembler，避免旁路。cron 新准入保存真正冻结 RunSnapshot，旧 usage fixture 改 canonical 准入，原安全/重启/预算断言保留。完整瞬时 DTO 在 core，不建立 context 私有历史 owner；架构测试未放宽。
+
+capture 明确是当时可重建材料，当前动态环境/skill/plan/memory不重放。默认只返回类型化 envelope/digest，显式 local 诊断保守隐藏凭据/memory/媒体/工具参数/摘要原文；权限变化或凭据不可核对拒绝。读取同一 readonly 事务核对 full owner/life、冻结政策、catalog、source prefix、projection与 SHA，无新 Provider/MCP/runtime/compact/ingest。旧历史无 capture 明确 unavailable，不补身份/空请求。CLI/TUI/ACP v1/WebSocket/HTTP共用 handler；Web 只读不造 chat/run 终态。API docs/provider-context-api.md。
+
+真实 RED /tmp/control-waves-wave6-red.log 缺 context.readback 方法。新纯 assembler 2 项、storage 2 项双后端/迁移/fault/损坏、协议 strict DTO 1项、真实daemon 1项和Web1项；既有compact合同补实际摘要capture与下一chat generation。真实wire消息/小工具SHA与返回一致，三入口及HTTP逐字段相同，读回前后clock/event不变，kill/restart调用次数仍1，权限变化/损坏拒绝。测试 helper 识别新增 DTO，保持完整 JSON 精确比对；child16K预算与route32K取冻结有效最小值，原断言保留。中间失败日志保留，未通过降低测试换绿。
+
+最终门禁全部退出0：Rust365（含25真实daemon）/tmp/control-waves-wave6-tests-final-complete.log；严格Clippy、MSRV1.88、release分别 clippy/msrv/release-final-complete.log；fmt/diff；Web36 web-final-complete.log、JS语法。cargo deny --offline check 四项通过 deny-final.log，仅已有缓存，未刷新在线公告。无新外部依赖，Cargo.lock未修改。Wave7–8未完成；商业Provider、真实MCP/用户hooks、Docker/Keychain、Linux与CI未验证；未提交/推送/部署。
+
+
+## Wave 7 设计补充（实施前）
+
+ACP 默认仍运行 SDK 稳定 v1；editor --acp-v2 显式选择 SDK Agent.v2()/V2ConnectionTo，并仅接受物理连接初始化协商出的 v2。连接保存的只有不可变能力/版本指纹，不保存 plan/session/compact 第二事实。SDK v2 当前没有标准 execute/discard/compact-start 请求，使用命名空间扩展方法，通知优先标准 PlanMarkdown、CompactionUpdate、StateUpdate、RequestPermission。扩展 metadata 严格 schema/fingerprint/完整生命周期及 exact owner；未协商、重复初始化、未知身份字段在 mutation 前拒绝。
+
+prompt 准入后及时响应 accepted，后台消费共享 DaemonClient reducer 的 canonical 事件，终态只来自 durable readback/run；长 prompt 不阻塞控制请求。resume 先单事务 sessions.read，再按 durable active owner/interaction 恢复，不切换业务 session、不重放 Provider；断线 detach。plan/compact/管理命令委托既有 daemon owner，exact cancel 不使用客户端 reservation ID。优先保持原始数据库 schema v20，无新增业务事实或持久迁移。
+
+
+## Wave 7 完成：真实 opt-in ACP v2 与有界传输（2026-10-07）
+
+稳定 v1 默认路径保留，--acp-v2 使用 SDK Agent.v2/V2ConnectionTo/标准 v2 类型；物理连接一次严格协商 schema/fingerprint/capability。未协商、未知身份、版本/重复/热变更在 mutation 前拒绝。计划 Markdown/execute/discard、compact 持久 Started/真实结算/exact cancel、pending interaction 恢复、session readback/new/list/resume/close/delete 共用 daemon 命令；SDK 缺标准请求的操作采用命名空间扩展，未伪造 v1 metadata 为 v2。
+
+prompt 的 durable Started -> accepted response -> 后台 stream 不阻塞 inbound；标准 permission popup Cancelled 不提交决策。canonical message_ids 从真实 batch/native turn 派生，readback/page/replay 一致；foreign batch fail closed。close 使用现有 lifecycle_receipts，取消 captured exact owners 并等待真实结算后发布一次 SessionEnd，保持 lifetime/transcript；重复 receipt 不取消新工作。schema 保持 v20。
+
+v1/v2 物理预算 256 帧/8MiB、4MiB 单帧、128 tasks；v2 请求32。真实慢 stdout 合同首次 RED 发现 Tokio 阻塞 stdin 关闭问题，改为有界独立 I/O 桥接，stderr 测试夹具单独排空；budget detach 不改 canonical，不取消 run，不重放 Provider。严格默认 UI Cancelled 保留 pending。新合同包含严格协商、三入口计划、提前 compact/长 prompt/close、interaction 断线恢复和真实慢消费者。未删除/放宽既有测试。
+
+最终门禁全部退出0：Rust376（30真实daemon）/tmp/control-waves-wave7-tests-accepted.log；严格Clippy/MSRV1.88/release 分别 clippy/msrv/release-accepted.log；fmt/JS/diff static-accepted.log；Web36 web-accepted.log；离线 cargo deny 四项通过 deny-accepted.log，仅已有公告缓存，未在线刷新。Cargo.lock 未变，无新增外部包。API docs/acp-v2-api.md。真实 IDE/商业Provider/MCP/Docker/Keychain/Linux/CI 未验证。Wave8 尚未完成；未提交/推送/部署。
+
+
+## Wave 8 设计补充（实施前，2026-10-07）
+
+在 Wave1–7 门禁已闭合后依次迁移 sandbox -> runtime -> daemon -> entry-support -> CLI/TUI -> ACP -> Gateway/Web。每个 crate 迁移后先 workspace 编译与目标测试，再进行下一步。根 binary 只组合 host 服务、参数和启动；共享 DTO/SQLite owner 不复制。runtime 不反向依赖 daemon/入口，sandbox 接收已冻结 image/owner 和取消端口，不取 repository。生命周期启动/配置组合通过真实 host 端口注入 Gateway，入口生产依赖仅协议/client/共享展示支持，测试可使用 daemon fixture。已有 facade 在迁移期间短暂使用，完成全部删除。
+
+保持 SQLite v20、配置/socket/binary/HTTP/WS/CLI。安全系统调用改用已锁定 rustix 的 safe fd API，保持 O_NOFOLLOW/openat/目录句柄/CAS/原子 rename 与进程组 kill；不退化成路径 reopen。根进程加载环境仅在多线程 runtime 建立前完成，库内移除 unsafe 环境写入。增加真实物理路径/manifest/AST 依赖与 unsafe 护栏，原断言保留迁移后的对应代码，禁止用 src facade 掩盖 owner。Cargo.lock 只允许新增内部 package 及已锁依赖的使用边，不刷新第三方版本。回滚为工作区代码恢复，持久 schema 不做倒退。
+
+
+## Wave 8 完成与最终验收（2026-10-07）
+
+七个新库按 sandbox→runtime→daemon→entry-support→CLI/TUI→ACP→Gateway/Web 顺序迁移，每个均先 workspace check 与目标测试。根仅 main.rs/bootstrap.rs；旧根业务模块及 client/storage/protocol facade 全部删除。唯一 owner、实际物理边与非默认 fixture features 由 12 项架构检查保护。库 forbid unsafe，文件能力使用已锁 rustix safe fd API 保留 no-follow/目录句柄/CAS/原子 rename，环境加载在根多线程 runtime 前执行。配置/binary/socket/HTTP/WS/CLI/schema v20 保持，Cargo.lock 第三方身份/checksum 与基线完全一致。
+
+最终审计补真实 v1 permission RED：SDK 容错解码吞入 v2 owner metadata 并错误执行文件。共享 raw Value strict decoder 在审批前拒绝根/selected 的 my-agent v2 控制字段，保留标准其他 namespace；GREEN 验证 canonical pending 不变、无写文件/Provider 重放，v2 重连可精确恢复批准。日志 /tmp/control-waves-wave8-v1-permission-red.log 与 green-fixed.log。独立 crate 的 policy SHA 序列化、safe fd、锁损坏和测试时间构造问题均修复，原行为断言保持。
+
+修复后所有门禁退出0：Rust379（31真实daemon/入口、12架构）/tmp/control-waves-wave8-tests-audited-final.log；strict Clippy/MSRV1.88/release 对应 clippy/msrv/release-audited-final.log；fmt/JS/diff static-audited-final.log，文档收尾再检查 delivery-static.log；Web36 web-accepted.log。cargo deny --offline check --hide-inclusion-graph 四项通过 deny-accepted.log，仅已有公告缓存，未在线刷新。完整逐项 owner、迁移、删旧路径、兼容、失败、测试和实际环境边界见 docs/changes/governed-runtime-final-report.md；物理 API docs/runtime-crates.md。
+
+八波实现与本地门禁全部完成。商业 Provider/真实 IDE v2/MCP/用户 hook/Docker成功隔离/真实Keychain/Linux/CI仍未验收；不声称这些生产环境已通过。没有提交、推送或部署。

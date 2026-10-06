@@ -55,6 +55,7 @@
     modelConfigPath: "",
     transcriptRenderPending: false,
     thinkingFinished: false,
+    viewCursors: new Map(),
   };
 
   class RpcSocket {
@@ -64,6 +65,9 @@
       this.nextId = 1;
       this.pending = new Map();
       this.socket = null;
+      this.viewQueues = new Map();
+      this.queuedViewFrames = 0;
+      this.queuedViewBytes = 0;
     }
 
     connect() {
@@ -108,13 +112,11 @@
           const id = frame.frame === "event" ? frame.request_id : frame.id;
           const pending = this.pending.get(String(id));
           if (!pending) return;
-          if (frame.frame === "event") {
-            pending.onEvent?.(frame);
-          } else if (frame.frame === "response") {
-            this.pending.delete(String(id));
-            if (frame.error) pending.reject(new Error(frame.error.message));
-            else pending.resolve(frame.result);
-          }
+          if (frame.frame === "response") this.pending.delete(String(id));
+          this.dispatchViewFrame(frame, pending).catch((error) => {
+            if (!error.viewIgnored && (frame.data?._my_agent_view || frame.result?.schema_version === 1 || frame.result?._my_agent_view || frame.error?.data?._my_agent_view)) error.viewResync = true;
+            pending.reject(error);
+          });
         });
         socket.addEventListener("close", () => {
           settle(new Error("WebSocket 已断开"));
@@ -131,13 +133,13 @@
       });
     }
 
-    request(method, params = {}, onEvent) {
+    request(method, params = {}, onEvent, options = {}) {
       if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
         return { id: null, promise: Promise.reject(new Error("尚未连接 daemon")) };
       }
       const id = this.nextId++;
       const promise = new Promise((resolve, reject) => {
-        this.pending.set(String(id), { resolve, reject, onEvent });
+        this.pending.set(String(id), { resolve, reject, onEvent, method, params, view: options.view || "agent", raw: options.raw === true });
       });
       try {
         this.socket.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
@@ -146,6 +148,103 @@
         return { id: null, promise: Promise.reject(error) };
       }
       return { id, promise };
+    }
+
+    dispatchViewFrame(frame, pending) {
+      const response = frame.result || frame.error?.data;
+      const value = response?.kind === "compact_started" ? response.run : response;
+      const stamp = frame.data?._my_agent_view || value?._my_agent_view;
+      const snapshot = frame.frame === "response" && response?.kind === "session_changed" ? response.snapshot : frame.frame === "response" && ["session.load", "session.resume", "session.new", "session.load_page", "sessions.read"].includes(pending.method) ? value : null;
+      const sessionId = stamp?.session_key || snapshot?.session_id || value?.session_id || pending.params.session_id;
+      const key = `${this.workspace}:${pending.view}:${sessionId || "transport"}`;
+      const deliver = async () => {
+        let input = null;
+        if (!pending.raw && (pending.method === "run.read" || response?.kind === "compact_started" || value?.kind === "compact") && (stamp || (value?.turn_id && value?.session_id))) input = { kind: "run", stamp: stamp || null, run: value };
+        else if (!pending.raw && stamp) input = { kind: frame.data?._my_agent_replay ? "replay" : "event", stamp, ...(frame.data?._my_agent_replay ? { after_seq: pending.params.after_seq || 0 } : {}) };
+        else if (!pending.raw && snapshot?.schema_version === 1) input = { kind: pending.method === "session.load_page" ? "page" : "readback", snapshot };
+        if (input) {
+          const reduced = await this.request("views.reduce", { state: state.viewCursors.get(key) || null, input }, undefined, { raw: true }).promise;
+          if (!["accepted", "ignored", "resync"].includes(reduced?.decision)) throw new Error("daemon 展示归约响应无效");
+          if (reduced.state) state.viewCursors.set(key, reduced.state);
+          if (reduced.decision === "resync") {
+            await this.synchronizeView(key, sessionId, pending, frame);
+            if (frame.frame === "event") return;
+            const verified = await this.request("views.reduce", { state: state.viewCursors.get(key) || null, input }, undefined, { raw: true }).promise;
+            if (verified.state) state.viewCursors.set(key, verified.state);
+            if (verified.decision === "accepted" || verified.duplicate) {
+              if (frame.error) pending.reject(new Error(frame.error.message)); else pending.resolve(frame.result);
+            } else pending.resolve({ ...(frame.result || {}), _my_agent_view_decision: "ignored" });
+            return;
+          }
+          if (reduced.decision === "ignored" && !reduced.duplicate) {
+            if (frame.frame === "event") return;
+            if (snapshot) {const error = new Error("旧版本读回已忽略");error.viewIgnored = true;throw error;}
+            pending.resolve({ ...(frame.result || {}), _my_agent_view_decision: "ignored" });
+            return;
+          }
+          if (frame.frame === "event" && reduced.decision !== "accepted") return;
+        }
+        if (frame.frame === "event") {
+          if (state.rpc && state.rpc !== this) return;
+          if (pending.view === "agent" && sessionId && state.agentSessionId && sessionId !== state.agentSessionId) return;
+          pending.onEvent?.(frame);
+        }
+        else if (frame.frame === "response") {
+          if (frame.error) {const error = new Error(frame.error.message);error.data = frame.error.data;pending.reject(error);}
+          else pending.resolve(frame.result);
+        }
+      };
+      if (pending.raw || (!stamp && !snapshot?.schema_version && !(pending.method === "run.read" && value?.turn_id && value?.session_id))) return deliver();
+      const bytes = JSON.stringify(frame).length * 2;
+      if (this.queuedViewFrames >= 256 || this.queuedViewBytes + bytes > 8 * 1024 * 1024) {
+        this.close(); return Promise.reject(new Error("展示消费者超出预算；已断开以便从持久游标恢复"));
+      }
+      this.queuedViewFrames += 1; this.queuedViewBytes += bytes;
+      const queued = (this.viewQueues.get(key) || Promise.resolve()).catch(() => {}).then(deliver);
+      this.viewQueues.set(key, queued);
+      queued.finally(() => {this.queuedViewFrames -= 1;this.queuedViewBytes -= bytes;if (this.viewQueues.get(key) === queued) this.viewQueues.delete(key);}).catch(() => {});
+      return queued;
+    }
+
+    async synchronizeView(key, sessionId, pending, frame) {
+      const runId = frame.run_id || frame.result?.run_id || frame.result?.run?.run_id || frame.data?._my_agent_view?.owner?.run_id || frame.error?.data?._my_agent_view?.owner?.run_id;
+      const previous = state.viewCursors.get(key)?.runs?.[runId]?.event_seq ?? pending.params.after_seq ?? 0;
+      let snapshot = await this.request("session.load_page", { session_id: sessionId, offset: 0, limit: 60 }, undefined, { raw: true }).promise;
+      if (snapshot.total_messages > 60) snapshot = await this.request("session.load_page", { session_id: sessionId, offset: snapshot.total_messages - 60, limit: 60 }, undefined, { raw: true }).promise;
+      const baseline = await this.request("views.reduce", { state: state.viewCursors.get(key) || null, input: { kind: "page", snapshot } }, undefined, { raw: true }).promise;
+      if (baseline.decision !== "accepted" && !baseline.duplicate) {
+        const error = new Error("等待较新的持久基线"); error.viewResync = true; throw error;
+      }
+      state.viewCursors.set(key, baseline.state);
+      const active = snapshot.active_runs?.find((run) => run.run_id === runId);
+      const terminal = snapshot.last_durable_terminal?.run_id === runId ? snapshot.last_durable_terminal : null;
+      if (pending.view === "agent" && this === state.rpc && state.agentSessionId === sessionId) {
+        const draft = active ? state.draftAssistant : null;
+        state.agentSnapshot = snapshot; state.draftAssistant = draft;
+        if (draft) state.agentSnapshot.messages.push(draft);
+        state.pendingApprovals = snapshot.pending_approvals || [];state.pendingApproval = state.pendingApprovals[0] || null;
+        renderAgentTranscript();
+        addActivity("turn", "展示已重新同步", "从 daemon 的事务快照和持久游标恢复");
+        if (terminal) {
+          const run = terminal.kind === "compact" ? await this.request("run.read", { run_id: runId }, undefined, { raw: true }).promise : terminal;
+          showRecoveredTerminal(run);
+        }
+      }
+      if (active) {
+        let cursor = previous;
+        while (cursor < active.last_seq) {
+          const page = await this.request("run.events", { run_id: runId, after_seq: cursor, limit: 32 }, undefined, { raw: true }).promise;
+          if (!page.events?.length) {const error = new Error("持久游标存在缺口");error.viewResync = true;throw error;}
+          for (const event of page.events) {
+            if (event.seq > active.last_seq) break;
+            cursor = event.seq;
+            const reduced = await this.request("views.reduce", { state: state.viewCursors.get(key), input: { kind: "replay", stamp: event.data?._my_agent_view || null, after_seq: previous } }, undefined, { raw: true }).promise;
+            if (reduced.state) state.viewCursors.set(key, reduced.state);
+            if (reduced.decision === "resync") {const error = new Error("持久事件缺少可验证的版本");error.viewResync = true;throw error;}
+            if (reduced.decision === "accepted") pending.onEvent?.({ frame: "event", request_id: frame.request_id, run_id: event.run_id, seq: event.seq, event: event.event === "assistant_content" ? "turn_completed" : event.event, data: event.data });
+          }
+        }
+      }
     }
 
     close() { this.socket?.close(); }
@@ -565,6 +664,7 @@
       renderAgentTranscript();
       updateAgentSessionUi();
     } catch (error) {
+      if (error.viewIgnored) return;
       if (rpc !== state.rpc || state.agentSessionId !== sessionId) return;
       toast(`读取 Agent Session 失败：${error.message}`);
     }
@@ -595,7 +695,7 @@
     $("#trace-count").textContent = "0";
     updateSessionPagers();
     try {
-      const snapshotCall = state.rpc.request("session.load_page", { session_id: sessionId, offset: 0, limit: 60 }).promise;
+      const snapshotCall = state.rpc.request("session.load_page", { session_id: sessionId, offset: 0, limit: 60 }, undefined, { view: "inspected" }).promise;
       const traceCall = state.rpc.request("session.trace_page", { session_id: sessionId, offset: 0, limit: 60 }).promise;
       const [snapshotResult, traceResult] = await Promise.allSettled([snapshotCall, traceCall]);
       if (state.inspectedSessionId !== sessionId || generation !== state.inspectGeneration) return;
@@ -619,6 +719,7 @@
       $("#continue-session").disabled = false;
       updateSessionPagers();
     } catch (error) {
+      if (error.viewIgnored) return;
       if (state.inspectedSessionId !== sessionId || generation !== state.inspectGeneration) return;
       $("#message-pager").classList.add("hidden");
       $("#trace-pager").classList.add("hidden");
@@ -640,7 +741,7 @@
         session_id: sessionId,
         offset: state.inspectedMessageOffset,
         limit: 60,
-      }).promise;
+      }, undefined, { view: "inspected" }).promise;
       if (rpc !== state.rpc || state.inspectedSessionId !== sessionId || generation !== state.inspectGeneration) return;
       state.inspectedSnapshot ||= { messages: [] };
       state.inspectedSnapshot.messages ||= [];
@@ -1077,9 +1178,48 @@
     let sent = false;
     let disconnected = false;
     let optimisticUser = null;
+    let submittedRequest = null;
     try {
       const sessionId = await ensureAgentSession();
       if (!state.connected) throw new Error("连接已断开，任务尚未提交");
+      if (prompt.startsWith("/compact ")) {
+        const rpc = state.rpc;
+        const response = await rpc.request("slash.execute", { line: prompt, session_id: sessionId }).promise;
+        if (rpc !== state.rpc || response?._my_agent_view_decision === "ignored") return;
+        const run = response.run;
+        if (response.kind !== "compact_started" || run?.kind !== "compact" || !run.run_id || !run.compact) {
+          throw new Error(response.content || "压缩响应缺 native owner/source");
+        }
+        sent = true;
+        state.activeRunId = run.run_id;
+        state.activeRunSeq = 0;
+        addActivity("compact", "压缩 Started", run.run_id);
+        setAgentStatus("running", "压缩进行中");
+        $("#prompt").value = "";
+        resizePrompt();
+        $("#cancel-turn").classList.remove("hidden");
+        const call = rpc.request("agent.subscribe", { session_id: run.session_id, request_id: run.request_id, after_seq: 0 }, handleAgentEvent);
+        state.activeRequest = call.id;
+        submittedRequest = call.id;
+        setAgentControls();
+        const result = await call.promise;
+        if (rpc !== state.rpc || result?._my_agent_view_decision === "ignored" || state.activeRequest !== call.id) return;
+        showCompactResult(result);
+        await loadAgentSession(sessionId);
+        return;
+      }
+      if ((prompt.startsWith("/plan ") && !prompt.startsWith("/plan execute ")) || prompt.startsWith("/hooks ") || prompt.startsWith("/context ")) {
+        const rpc = state.rpc;
+        const result = await rpc.request("slash.execute", { line: prompt, session_id: sessionId }).promise;
+        if (rpc !== state.rpc) return;
+        const hookReadback = prompt.startsWith("/hooks ");
+        const contextReadback = prompt.startsWith("/context ");
+        addActivity(contextReadback ? "context" : hookReadback ? "hooks" : "plan", contextReadback ? "Provider 请求摘要" : hookReadback ? "Hook 执行回执" : "计划读回 / 决策", result.content || "");
+        renderActivities();
+        $("#prompt").value = "";
+        resizePrompt();
+        return;
+      }
       state.agentSnapshot ||= { messages: [] };
       state.agentSnapshot.messages ||= [];
       optimisticUser = { role: "user", content: prompt };
@@ -1097,7 +1237,7 @@
       $("#cancel-turn").classList.remove("hidden");
       const call = state.rpc.request(
         "chat.send",
-        { message: prompt, session_id: sessionId },
+        { message: prompt, session_id: sessionId, entry_channel: "web_socket" },
         handleAgentEvent,
       );
       if (call.id == null) {
@@ -1108,12 +1248,20 @@
       $("#prompt").value = "";
       resizePrompt();
       state.activeRequest = call.id;
+      submittedRequest = call.id;
       state.activeRunId = null;
       state.activeRunSeq = 0;
       setAgentControls();
-      await call.promise;
+      const result = await call.promise;
+      if (result?._my_agent_view_decision === "ignored" || state.activeRequest !== call.id || state.agentSessionId !== sessionId) return;
       await finishAgentTurn();
     } catch (error) {
+      if (error.viewIgnored) return;
+      if (error.viewResync) {
+        disconnected = true; state.activeRequest = "reconnecting";
+        addActivity("turn", "展示重新同步", "从 daemon 持久快照和游标恢复");
+        await recoverAgentTurn(); return;
+      }
       disconnected = sent && (!state.connected || error.message === "WebSocket 已断开");
       if (disconnected) {
         state.activeRequest = "reconnecting";
@@ -1132,7 +1280,7 @@
       }
     } finally {
       state.submitting = false;
-      if (!disconnected) clearAgentTurn();
+      if (!disconnected && (!sent || state.activeRequest === submittedRequest)) clearAgentTurn();
       setAgentControls();
       await refreshSessionListOnly().catch(() => {});
     }
@@ -1165,8 +1313,8 @@
     state.activeRunId = null;
     state.activeRunSeq = 0;
     state.draftAssistant = null;
-    state.pendingApproval = null;
-    state.pendingApprovals = [];
+    state.pendingApprovals = state.agentSnapshot?.pending_approvals || [];
+    state.pendingApproval = state.pendingApprovals[0] || null;
     state.cancelling = false;
     $("#cancel-turn").disabled = false;
     $("#cancel-turn").classList.add("hidden");
@@ -1182,9 +1330,10 @@
       const snapshot = await loadLatestAgentSnapshot(rpc, sessionId);
       if (rpc !== state.rpc || state.activeRequest !== "reconnecting") return;
       const active = snapshot.active_requests || [];
-      const run = state.activeRunId
+      let run = state.activeRunId
         ? await rpc.request("run.read", { run_id: state.activeRunId }).promise
         : null;
+      if (run?._my_agent_view_decision === "ignored") {run = null;state.activeRunId = null;state.activeRunSeq = 0;}
       if (rpc !== state.rpc || state.activeRequest !== "reconnecting") return;
       const matches = run && active.some((id) => JSON.stringify(id) === JSON.stringify(run.request_id));
       if (!active.length || (run && !matches)) {
@@ -1217,6 +1366,7 @@
       setAgentControls();
       try {
         const result = await call.promise;
+        if (rpc !== state.rpc || state.activeRequest !== call.id || result?._my_agent_view_decision === "ignored") return;
         if (result?.subscribed === false) {
           state.agentSnapshot = await loadLatestAgentSnapshot(rpc, sessionId);
           renderAgentTranscript();
@@ -1224,7 +1374,10 @@
           addActivity("error", "订阅已结束", "执行体不可用；请查看 Session 与链路记录");
           return;
         }
-        await finishAgentTurn();
+        if (result?.kind === "compact") {
+          showCompactResult(result);
+          await loadAgentSession(sessionId);
+        } else await finishAgentTurn();
       } catch (error) {
         if (rpc !== state.rpc) return;
         if (!state.connected || error.message === "WebSocket 已断开") {
@@ -1242,6 +1395,7 @@
         }
       }
     } catch (error) {
+      if (error.viewIgnored || error.viewResync) {if (rpc === state.rpc) setAgentStatus("waiting", "等待持久基线");return;}
       if (rpc === state.rpc && state.connected && state.activeRequest === "reconnecting") {
         setAgentStatus("error", "恢复失败");
         addActivity("error", "恢复失败", error.message);
@@ -1255,6 +1409,10 @@
   }
 
   function showRecoveredTerminal(run) {
+    if (run?.kind === "compact") {
+      showCompactResult(run);
+      return;
+    }
     const status = run?.status;
     if (status === "completed") {
       setAgentStatus("idle", "已完成");
@@ -1273,7 +1431,12 @@
     if (Number.isInteger(frame.seq)) state.activeRunSeq = Math.max(state.activeRunSeq, frame.seq);
     const event = frame.event;
     const data = frame.data || {};
-    if (event === "text_delta") {
+    if (event === "run_started" && data.kind === "compact") {
+      addActivity("compact", "压缩 Started", frame.run_id || "");
+      setAgentStatus("running", "压缩进行中");
+    } else if (event === "compact_terminal") {
+      addActivity("compact", "压缩结算", data.outcome || "");
+    } else if (event === "text_delta") {
       state.draftAssistant ||= { role: "assistant", content: "" };
       state.draftAssistant.content += data.delta || "";
       scheduleAgentTranscriptRender();
@@ -1303,6 +1466,14 @@
       if (!$("#subagent-root").value && frame.run_id) $("#subagent-root").value = frame.run_id;
       refreshSubagents().catch(() => {});
     }
+  }
+
+  function showCompactResult(run) {
+    const outcome = run?.compact?.outcome;
+    const labels = { committed: "压缩已提交", no_gain: "压缩无收益", rejected: "压缩已拒绝", failed: "压缩失败", cancelled: "压缩已取消", unknown: "压缩状态待核对", started: "压缩进行中" };
+    const label = labels[outcome] || "压缩回执缺失";
+    addActivity("compact", label, run?.run_id || "");
+    setAgentStatus(outcome === "started" ? "running" : outcome === "committed" || outcome === "no_gain" ? "idle" : "error", label);
   }
 
   function addActivity(kind, title, detail) {

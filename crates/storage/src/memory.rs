@@ -481,7 +481,7 @@ impl MemoryRepository for RunStore {
             {
                 return Err(RuntimeError::Protocol("memory id 幂等冲突".into()));
             }
-            tx.commit()?;
+            super::views::commit(tx)?;
             return Ok(previous);
         } else {
             let forgotten: i64 = tx.query_row(
@@ -496,7 +496,7 @@ impl MemoryRepository for RunStore {
             }
             write_in(&tx, entry)?;
         }
-        tx.commit()?;
+        super::views::commit(tx)?;
         Ok(entry.clone())
     }
     fn forget_memory(
@@ -530,7 +530,7 @@ impl MemoryRepository for RunStore {
                 "INSERT INTO memory_forget_receipts VALUES(?1,?2,?3,0)",
                 params![owner.run_id.0, id, revision],
             )?;
-            tx.commit()?;
+            super::views::commit(tx)?;
             return Ok(false);
         };
         let entry: MemoryRecord =
@@ -548,13 +548,19 @@ impl MemoryRepository for RunStore {
             "INSERT INTO memory_forget_receipts VALUES(?1,?2,?3,1)",
             params![owner.run_id.0, id, revision],
         )?;
-        tx.commit()?;
+        super::views::commit(tx)?;
         Ok(true)
     }
     fn ingest_committed_turn(&self, owner: &ExactOwner) -> Result<(), RuntimeError> {
         let mut db = self.lock_connection()?;
         let tx = db.transaction()?;
         writable(&tx, owner)?;
+        if super::read_run_in(&tx, &owner.run_id.0)?.is_some_and(|run| run.kind == RunKind::Compact)
+        {
+            return Err(RuntimeError::Protocol(
+                "compact turn 不能摄入聊天记忆".into(),
+            ));
+        }
         let status: String = tx.query_row(
             "SELECT status FROM turn_commits WHERE run_id=?1",
             params![owner.run_id.0],
@@ -616,7 +622,7 @@ impl MemoryRepository for RunStore {
             "INSERT INTO memory_ingests VALUES(?1,?2,'completed',NULL)",
             params![owner.run_id.0, owner.session_lifetime_id.0],
         )?;
-        tx.commit()?;
+        super::views::commit(tx)?;
         Ok(())
     }
 }
@@ -666,7 +672,7 @@ impl RunStore {
             "INSERT INTO memory_legacy_imports VALUES(?1,?2)",
             params![source, digest],
         )?;
-        tx.commit()?;
+        super::views::commit(tx)?;
         Ok(())
     }
 }
@@ -1051,6 +1057,7 @@ mod tests {
         );
         store.store_memory(&owner, &item).unwrap();
         let snapshot = RunSnapshot {
+            entry_channel: agent_core::HookChannel::DaemonRpc,
             route: None,
             tools: vec![],
             cwd: "p".into(),

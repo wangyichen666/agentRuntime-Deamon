@@ -1,6 +1,88 @@
 use agent_core::{EventSeq, InteractionId, RequestId, RunId, RunStatus, SessionKey as SessionId};
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextReadParams {
+    pub session_id: String,
+    pub expected_lifetime: agent_core::SessionLifetimeId,
+    #[serde(default)]
+    pub run_id: Option<agent_core::RunId>,
+    #[serde(default)]
+    pub capture_id: Option<String>,
+    #[serde(default)]
+    pub local_diagnostics: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ViewReduceParams {
+    pub state: Option<agent_core::ViewState>,
+    pub input: ViewInputParams,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ViewInputParams {
+    Readback {
+        snapshot: serde_json::Value,
+    },
+    Run {
+        stamp: Option<Box<agent_core::ViewStamp>>,
+        run: serde_json::Value,
+    },
+    Page {
+        snapshot: serde_json::Value,
+    },
+    Replay {
+        stamp: Option<Box<agent_core::ViewStamp>>,
+        after_seq: EventSeq,
+    },
+    Event {
+        stamp: Option<Box<agent_core::ViewStamp>>,
+    },
+}
+impl ViewReduceParams {
+    pub fn into_domain(
+        self,
+    ) -> Result<(Option<agent_core::ViewState>, agent_core::ViewInput), crate::ProtocolError> {
+        let input = match self.input {
+            ViewInputParams::Run { stamp, run } => agent_core::ViewInput::Run {
+                stamp,
+                run: Box::new(crate::decode_run_readback(run)?),
+            },
+            ViewInputParams::Readback { snapshot } => agent_core::ViewInput::Readback {
+                snapshot: Box::new(crate::decode_session_readback(snapshot)?),
+            },
+            ViewInputParams::Page { snapshot } => {
+                let (snapshot, page_key) = crate::decode_session_page(snapshot)?;
+                agent_core::ViewInput::Page {
+                    snapshot: Box::new(snapshot),
+                    page_key,
+                }
+            }
+            ViewInputParams::Replay { stamp, after_seq } => {
+                agent_core::ViewInput::Replay { stamp, after_seq }
+            }
+            ViewInputParams::Event { stamp } => agent_core::ViewInput::Event { stamp },
+        };
+        Ok((self.state, input))
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HookReadParams {
+    pub session_id: String,
+    pub expected_lifetime: agent_core::SessionLifetimeId,
+    #[serde(default)]
+    pub after_cursor: u64,
+    #[serde(default = "hook_read_limit")]
+    pub limit: usize,
+}
+fn hook_read_limit() -> usize {
+    32
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MemoryFeedbackParams {
@@ -76,6 +158,18 @@ pub struct SessionCompactParams {
     pub operation_id: String,
     pub expected_revision: agent_core::TranscriptSeq,
 }
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompactStartParams {
+    pub session_id: String,
+    pub expected_lifetime: agent_core::SessionLifetimeId,
+    pub operation_id: String,
+    pub expected_revision: agent_core::TranscriptSeq,
+    pub expected_projection_generation: agent_core::ProjectionGeneration,
+    #[serde(default)]
+    pub entry_channel: agent_core::HookChannel,
+}
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MemoryStoreParams {
@@ -103,6 +197,10 @@ pub struct MemoryForgetParams {
 #[serde(deny_unknown_fields)]
 pub struct ChatSendParams {
     #[serde(default)]
+    pub entry_channel: agent_core::HookChannel,
+    #[serde(default)]
+    pub plan_execution: Option<agent_core::PlanExecution>,
+    #[serde(default)]
     pub expected_lifetime: Option<agent_core::SessionLifetimeId>,
     #[serde(default)]
     pub sandbox: Option<String>,
@@ -118,6 +216,8 @@ pub struct ChatSendParams {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApprovalRespondParams {
+    #[serde(default)]
+    pub exact_owner: Option<agent_core::ExactOwner>,
     #[serde(alias = "interaction_id")]
     pub approval_id: String,
     #[serde(default)]
@@ -139,6 +239,8 @@ pub struct InteractionReadParams {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CancelParams {
+    #[serde(default)]
+    pub exact_owner: Option<agent_core::ExactOwner>,
     #[serde(default)]
     pub request_id: Option<RequestId>,
     #[serde(default)]
@@ -319,6 +421,8 @@ pub struct SlashExecuteParams {
     pub line: String,
     #[serde(default)]
     pub session_id: Option<String>,
+    #[serde(default)]
+    pub entry_channel: agent_core::HookChannel,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Default)]
@@ -368,4 +472,18 @@ pub struct ResourceReconcileParams {
     pub owner_run_id: RunId,
     pub terminal_state: String,
     pub evidence: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanReadParams {
+    pub session_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanDiscardParams {
+    pub session_id: String,
+    pub expected_lifetime: agent_core::SessionLifetimeId,
+    pub identity: agent_core::PlanExecution,
 }

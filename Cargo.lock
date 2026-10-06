@@ -20,6 +20,52 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-acp"
+version = "0.1.0"
+dependencies = [
+ "agent-client-protocol",
+ "agent-core",
+ "agent-daemon",
+ "agent-daemon-client",
+ "agent-daemon-protocol",
+ "agent-entry-support",
+ "agent-runtime",
+ "anyhow",
+ "async-trait",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "agent-cli"
+version = "0.1.0"
+dependencies = [
+ "agent-core",
+ "agent-daemon",
+ "agent-daemon-client",
+ "agent-daemon-protocol",
+ "agent-entry-support",
+ "agent-runtime",
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "clap",
+ "crossterm",
+ "futures-util",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "unicode-segmentation",
+ "unicode-width",
+]
+
+[[package]]
 name = "agent-client-protocol"
 version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -89,6 +135,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-daemon"
+version = "0.1.0"
+dependencies = [
+ "agent-context",
+ "agent-core",
+ "agent-daemon-client",
+ "agent-daemon-protocol",
+ "agent-memory",
+ "agent-runtime",
+ "agent-sandbox",
+ "agent-storage",
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "agent-daemon-client"
 version = "0.1.0"
 dependencies = [
@@ -109,6 +178,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-entry-support"
+version = "0.1.0"
+dependencies = [
+ "agent-daemon-client",
+ "agent-daemon-protocol",
+ "anyhow",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "agent-gateway"
+version = "0.1.0"
+dependencies = [
+ "agent-core",
+ "agent-daemon",
+ "agent-daemon-client",
+ "agent-daemon-protocol",
+ "agent-entry-support",
+ "agent-runtime",
+ "anyhow",
+ "async-trait",
+ "axum",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+]
+
+[[package]]
 name = "agent-memory"
 version = "0.1.0"
 dependencies = [
@@ -116,6 +219,54 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "agent-runtime"
+version = "0.1.0"
+dependencies = [
+ "agent-context",
+ "agent-core",
+ "agent-daemon-protocol",
+ "agent-memory",
+ "agent-sandbox",
+ "agent-storage",
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "cron",
+ "futures-util",
+ "jsonschema",
+ "keyring",
+ "libc",
+ "lopdf",
+ "rcgen",
+ "reqwest",
+ "rusqlite",
+ "rustix",
+ "semver",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+]
+
+[[package]]
+name = "agent-sandbox"
+version = "0.1.0"
+dependencies = [
+ "agent-core",
+ "anyhow",
+ "async-trait",
+ "rustix",
+ "serde",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2115,45 +2266,31 @@ dependencies = [
 name = "my-agent"
 version = "0.1.0"
 dependencies = [
- "agent-client-protocol",
+ "agent-acp",
+ "agent-cli",
  "agent-context",
  "agent-core",
+ "agent-daemon",
  "agent-daemon-client",
  "agent-daemon-protocol",
+ "agent-entry-support",
+ "agent-gateway",
  "agent-memory",
+ "agent-runtime",
  "agent-storage",
  "anyhow",
  "async-trait",
- "axum",
- "base64 0.22.1",
- "chrono",
- "clap",
- "cron",
- "crossterm",
  "futures-util",
- "jsonschema",
- "keyring",
- "libc",
- "lopdf",
- "ratatui",
  "rcgen",
  "reqwest",
  "rusqlite",
- "semver",
- "serde",
  "serde_json",
- "serde_yaml_ng",
- "sha2 0.10.9",
  "syn 2.0.119",
- "thiserror 2.0.20",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
  "toml",
- "tracing",
  "tracing-subscriber",
- "unicode-segmentation",
- "unicode-width",
 ]
 
 [[package]]

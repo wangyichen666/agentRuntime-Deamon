@@ -1,0 +1,194 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "ASCII工具结果名称",
+      "source": [
+        {
+          "role": "tool",
+          "content": "ok"
+        }
+      ],
+      "candidate": [
+        {
+          "role": "tool",
+          "content": "ok",
+          "name": "abcdefghijklmnop"
+        }
+      ],
+      "expected_delta": 4
+    },
+    {
+      "id": "中文工具结果名称",
+      "source": [
+        {
+          "role": "tool",
+          "content": "ok"
+        }
+      ],
+      "candidate": [
+        {
+          "role": "tool",
+          "content": "ok",
+          "name": "甲乙丙丁戊己庚辛壬癸子丑"
+        }
+      ],
+      "expected_delta": 8
+    },
+    {
+      "id": "长工具结果关联ID",
+      "source": [
+        {
+          "role": "tool",
+          "content": "ok"
+        }
+      ],
+      "candidate": [
+        {
+          "role": "tool",
+          "content": "ok",
+          "tool_call_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }
+      ],
+      "expected_delta": 16
+    },
+    {
+      "id": "名称与关联ID分别计量",
+      "source": [
+        {
+          "role": "tool",
+          "content": "ok"
+        }
+      ],
+      "candidate": [
+        {
+          "role": "tool",
+          "content": "ok",
+          "name": "abcdefghijklmnop",
+          "tool_call_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }
+      ],
+      "expected_delta": 20
+    },
+    {
+      "id": "存储思考不回传模型",
+      "source": [
+        {
+          "role": "assistant",
+          "content": "ok"
+        }
+      ],
+      "candidate": [
+        {
+          "role": "assistant",
+          "content": "ok",
+          "thinking": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      ],
+      "expected_delta": 0
+    },
+    {
+      "id": "图片既有预算保持",
+      "source": [
+        {
+          "role": "user",
+          "content": "ok"
+        }
+      ],
+      "candidate": [
+        {
+          "role": "user",
+          "content": "ok",
+          "image_urls": [
+            "image-ref"
+          ]
+        }
+      ],
+      "expected_delta": 384
+    },
+    {
+      "id": "工具参数保持单次计量",
+      "source": [
+        {
+          "role": "assistant",
+          "content": "ok",
+          "tool_calls": [
+            {
+              "id": "a",
+              "name": "t",
+              "arguments": {
+                "value": ""
+              }
+            }
+          ]
+        }
+      ],
+      "candidate": [
+        {
+          "role": "assistant",
+          "content": "ok",
+          "tool_calls": [
+            {
+              "id": "a",
+              "name": "t",
+              "arguments": {
+                "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+              }
+            }
+          ]
+        }
+      ],
+      "expected_delta": 16
+    },
+    {
+      "id": "闭合候选元数据抵消正文收益",
+      "source": [
+        {
+          "role": "assistant",
+          "content": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "tool_calls": [
+            {
+              "id": "a",
+              "name": "t",
+              "arguments": {}
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "ok",
+          "tool_call_id": "a",
+          "name": "t"
+        },
+        {
+          "role": "user",
+          "content": "继续保持中文"
+        }
+      ],
+      "candidate": [
+        {
+          "role": "assistant",
+          "content": "x",
+          "tool_calls": [
+            {
+              "id": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+              "name": "t",
+              "arguments": {}
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "ok",
+          "tool_call_id": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+          "name": "t"
+        },
+        {
+          "role": "user",
+          "content": "继续保持中文"
+        }
+      ],
+      "expected_valid": false
+    }
+  ]
+}

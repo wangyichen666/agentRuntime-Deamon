@@ -4,10 +4,17 @@
     deny(clippy::unwrap_used, clippy::expect_used, clippy::print_stdout)
 )]
 
+pub mod acp;
 mod readback;
-pub use readback::{decode_run_readback, decode_session_readback};
+pub use readback::{
+    decode_provider_request, decode_run_readback, decode_session_page, decode_session_readback,
+    decode_view_sync,
+};
 mod connection;
-pub use agent_core::{HistoryReadMode, SessionKey, SessionReadback, SnapshotRevision};
+pub use agent_core::{
+    HistoryReadMode, ProviderRequestReadback, SessionKey, SessionReadback, SnapshotRevision,
+};
+pub use agent_core::{ViewDecision, ViewInput, ViewReduction, ViewStamp, ViewState, reduce_view};
 pub use connection::*;
 mod methods;
 pub mod params;
@@ -103,6 +110,9 @@ pub struct RpcError {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
+    ViewResynced,
+    RunStarted,
+    CompactTerminal,
     TurnStarted,
     ThinkingDelta,
     ThinkingFinished,
@@ -332,3 +342,5 @@ pub struct RecoverySnapshot {
     pub pending_approvals: Vec<PendingApprovalInfo>,
     pub active_requests: Vec<RequestId>,
 }
+
+pub mod slash;

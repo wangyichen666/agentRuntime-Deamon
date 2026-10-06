@@ -109,6 +109,129 @@ test("WebSocket 握手前关闭立即失败", async () => {
   await assert.rejects(pending, /WebSocket 已断开/);
 });
 
+async function revisionSocket() {
+  const app=createHarness();const rpc=new app.RpcSocket("","/work");
+  const connecting=rpc.connect();const socket=app.FakeWebSocket.instances[0];
+  socket.readyState=1;socket.emit("open");socket.emit("message",{data:JSON.stringify({type:"connected",workspace:"/work"})});await connecting;
+  app.state.rpc=rpc;app.state.connected=true;app.state.agentSessionId="s";
+  const requests=[];const waiting=[];
+  socket.send=(raw)=>{socket.sent.push(raw);const request=JSON.parse(raw);if(!request.method)return;if(waiting.length)waiting.shift()(request);else requests.push(request);};
+  const next=()=>requests.length?Promise.resolve(requests.shift()):new Promise(resolve=>waiting.push(resolve));
+  const receive=frame=>socket.emit("message",{data:JSON.stringify(frame)});
+  const answer=(request,result)=>receive({frame:"response",jsonrpc:"2.0",id:request.id,result});
+  return {app,rpc,socket,next,receive,answer};
+}
+function viewStamp(revision,lifetime="a",seq=2,previous=0) {
+  return {schema_version:1,session_key:"s",session_lifetime_id:lifetime,snapshot_revision:revision,metadata_revision:revision,transcript_revision:1,projection_generation:0,
+    owner:{session_key:"s",session_lifetime_id:lifetime,run_id:"r",run_generation:1,turn_id:"t"},event_seq:seq,previous_visible_seq:previous,terminal:false,interaction:null};
+}
+function viewCursor(stamp,seq=stamp.event_seq) {
+  return {stamp,retired_lifetimes:[],runs:{r:{owner:stamp.owner,event_seq:seq,terminal:false}},interactions:{},history_modes:[],replay_cursors:{r:seq}};
+}
+function viewPage(revision=20,lastSeq=4) {
+  const stamp=viewStamp(revision);
+  return {schema_version:1,session_id:"s",session_lifetime_id:"a",snapshot_revision:revision,metadata_revision:revision,
+    metadata:{key:"s",lifetime:"a",deleted:false,legacy_imported:true,revision:1,updated_at_ms:0},transcript_revision:1,projection_generation:0,
+    history_mode:"canonical",omitted:["complete_messages","batch_ranges","plan_execution_identity"],messages:[{role:"user",content:"任务"}],batch_ranges:[],active_owner:stamp.owner,run_owners:[stamp.owner],
+    active_runs:[{kind:"chat",run_id:"r",turn_id:"t",session_id:"s",request_id:1,status:"running",last_seq:lastSeq,content:null,error_code:null,error_message:null}],queue_rows:[],queue_cursor:null,pending_interactions:[],pending_approvals:[],active_requests:[1],last_durable_terminal:null,current_plan:null,plan_digest:null,context_usage:null,
+    offset:0,cursor:1,total_messages:1,limit:60,has_more:false};
+}
+
+test("版本化 Web 展示串行调用共享 Rust 归约，延迟读回、重复和退休 lifetime 终态不覆盖",async()=>{
+  const {rpc,next,receive,answer}=await revisionSocket();const events=[];
+  const delayed=rpc.request("session.load_page",{session_id:"s",offset:0,limit:60});const delayedRequest=await next();
+  const chat=rpc.request("chat.send",{session_id:"s",message:"任务"},frame=>events.push(frame.seq));await next();
+  const stamp=viewStamp(20);const current=viewCursor(stamp);
+  receive({frame:"event",jsonrpc:"2.0",request_id:chat.id,run_id:"r",seq:2,event:"text_delta",data:{delta:"新",_my_agent_view:stamp}});
+  const fold=await next();assert.equal(fold.method,"views.reduce");assert.equal(fold.params.state,null);assert.equal(fold.params.input.kind,"event");answer(fold,{decision:"accepted",state:current,duplicate:false});
+  answer(delayedRequest,viewPage(10));
+  const stale=await next();assert.equal(stale.params.input.kind,"page");assert.deepEqual(stale.params.state,current);answer(stale,{decision:"ignored",state:current,duplicate:false});
+  await assert.rejects(delayed.promise,error=>error.viewIgnored===true);
+  receive({frame:"event",jsonrpc:"2.0",request_id:chat.id,run_id:"r",seq:2,event:"text_delta",data:{delta:"新",_my_agent_view:stamp}});
+  answer(await next(),{decision:"ignored",state:current,duplicate:false});
+  const fresh=rpc.request("session.load",{session_id:"s"});const freshRequest=await next();answer(freshRequest,{...viewPage(30),session_lifetime_id:"b"});
+  const newLife=viewCursor(viewStamp(30,"b"));newLife.retired_lifetimes=["a"];
+  const replacement=await next();assert.equal(replacement.params.state.stamp.session_lifetime_id,"a");answer(replacement,{decision:"accepted",state:newLife,duplicate:false});await fresh.promise;
+  receive({frame:"response",jsonrpc:"2.0",id:chat.id,error:{code:-32800,message:"旧执行已取消",data:{_my_agent_view:{...viewStamp(25,"a",4,2),terminal:true}}}});
+  const oldTerminal=await next();assert.deepEqual(oldTerminal.params.state,newLife);answer(oldTerminal,{decision:"ignored",state:newLife,duplicate:false});
+  const result=await chat.promise;assert.equal(result._my_agent_view_decision,"ignored");assert.deepEqual(events,[2]);
+  const inspect=rpc.request("session.load_page",{session_id:"s",offset:0,limit:60},undefined,{view:"inspected"});answer(await next(),viewPage(30));
+  const separate=await next();assert.equal(separate.params.state,null,"独立消费者不能共享展示 ACK");answer(separate,{decision:"accepted",state:current,duplicate:false});await inspect.promise;
+});
+
+test("嵌套 slash 读回与 compact Started 仍经过同一个归约器",async()=>{
+  const {rpc,next,answer}=await revisionSocket();
+  const load=rpc.request("slash.execute",{session_id:"s",line:"/resume s"});answer(await next(),{kind:"session_changed",snapshot:viewPage(20)});
+  const read=await next();assert.equal(read.method,"views.reduce");assert.equal(read.params.input.kind,"readback");
+  const current=viewCursor(viewStamp(20));answer(read,{decision:"accepted",state:current,duplicate:false});await load.promise;
+  const compact=rpc.request("slash.execute",{session_id:"s",line:"/compact s a 1 0 op"});
+  const run={kind:"compact",run_id:"r",turn_id:"t",session_id:"s",status:"running",last_seq:2,compact:{outcome:"started"},_my_agent_view:viewStamp(10)};
+  answer(await next(),{kind:"compact_started",run});const fold=await next();assert.equal(fold.method,"views.reduce");assert.equal(fold.params.input.kind,"run");assert.deepEqual(fold.params.state,current);
+  answer(fold,{decision:"ignored",state:current,duplicate:false});assert.equal((await compact.promise)._my_agent_view_decision,"ignored");
+});
+
+test("Web 真缺口先建立基线，再从 durable cursor 补齐增量且不提前终结请求",async()=>{
+  const {app,rpc,next,receive,answer}=await revisionSocket();const events=[];
+  const chat=rpc.request("chat.send",{session_id:"s",message:"任务"},frame=>events.push(frame.data.delta));await next();let finished=false;chat.promise.then(()=>{finished=true;});
+  app.state.activeRequest=chat.id;
+  const first=viewStamp(11,"a",2,0);const current=viewCursor(first);
+  receive({frame:"event",jsonrpc:"2.0",request_id:chat.id,run_id:"r",seq:2,event:"text_delta",data:{delta:"A",_my_agent_view:first}});
+  answer(await next(),{decision:"accepted",state:current,duplicate:false});
+  const lost=viewStamp(14,"a",4,3);
+  receive({frame:"event",jsonrpc:"2.0",request_id:chat.id,run_id:"r",seq:4,event:"text_delta",data:{delta:"C",_my_agent_view:lost}});
+  answer(await next(),{decision:"resync",state:current,duplicate:false});
+  const baselineRequest=await next();assert.equal(baselineRequest.method,"session.load_page");answer(baselineRequest,viewPage());
+  const baselineFold=await next();assert.equal(baselineFold.params.input.kind,"page");const baseline=viewCursor(viewStamp(20),4);baseline.replay_cursors.r=2;answer(baselineFold,{decision:"accepted",state:baseline,duplicate:false});
+  const replayRequest=await next();assert.equal(replayRequest.method,"run.events");assert.deepEqual(replayRequest.params,{run_id:"r",after_seq:2,limit:32});
+  answer(replayRequest,{events:[{run_id:"r",seq:3,event:"text_delta",data:{delta:"B",_my_agent_view:viewStamp(13,"a",3,2)}},{run_id:"r",seq:4,event:"text_delta",data:{delta:"C",_my_agent_view:lost}}]});
+  for(const seq of [3,4]) {const replay=await next();assert.equal(replay.params.input.kind,"replay");assert.equal(replay.params.input.after_seq,2);assert.equal(replay.params.input.stamp.event_seq,seq);baseline.replay_cursors.r=seq;answer(replay,{decision:"accepted",state:baseline,duplicate:false});}
+  assert.equal(finished,false,"快照/重放不是原请求的业务终态");
+  receive({frame:"response",jsonrpc:"2.0",id:chat.id,result:{content:"ABC",run_id:"r",turn_id:"t",_my_agent_view:{...viewStamp(21,"a",5,4),terminal:true}}});
+  const terminal=await next();answer(terminal,{decision:"accepted",state:viewCursor(viewStamp(21,"a",5,4)),duplicate:false});assert.equal((await chat.promise).content,"ABC");
+  assert.deepEqual(events,["A","B","C"]);assert.equal(app.state.agentSnapshot.messages[0].content,"任务");
+});
+
+test("Web 慢展示消费者有数量和字节上限，断开不会改写 canonical 终态",async()=>{
+  const {app,rpc,socket,next,receive}=await revisionSocket();app.state.agentSnapshot={active_runs:[{run_id:"r",status:"running"}],messages:[]};
+  const chat=rpc.request("chat.send",{session_id:"s",message:"任务"},()=>{});await next();
+  const rejected=assert.rejects(chat.promise,/WebSocket 已断开|消费者超出预算/);
+  for(let seq=1;seq<=257;seq++)receive({frame:"event",jsonrpc:"2.0",request_id:chat.id,run_id:"r",seq,event:"text_delta",data:{delta:"x",_my_agent_view:viewStamp(seq,"a",seq,seq-1)}});
+  await rejected;assert.equal(socket.readyState,3);assert.ok(rpc.queuedViewFrames<=256);assert.ok(rpc.queuedViewBytes<=8*1024*1024);assert.equal(app.state.agentSnapshot.active_runs[0].status,"running");
+  await Promise.allSettled([...rpc.viewQueues.values()]);
+});
+
+test("独立 compact 立即展示 Started、精确取消且无收益不产生聊天原文", async () => {
+  const app=createHarness();app.state.connected=true;app.state.agentSessionId="s";app.state.agentSnapshot={messages:[]};
+  app.element("#prompt").value="/compact s life 8 0 op";
+  let settle;const calls=[];
+  const run={kind:"compact",run_id:"native",session_id:"s",request_id:"compact:op",compact:{outcome:"started"}};
+  app.state.rpc={request(method,params,events){calls.push([method,params]);
+    if(method==="slash.execute")return{promise:Promise.resolve({kind:"compact_started",run})};
+    if(method==="agent.subscribe") {events({event:"run_started",run_id:"native",seq:1,data:{kind:"compact"}});return{id:9,promise:new Promise(resolve=>{settle=resolve;})};}
+    if(method==="agent.cancel")return{promise:Promise.resolve({cancelled:true})};
+    if(method==="session.load_page")return{promise:Promise.resolve({session_id:"s",messages:[],active_requests:[]})};
+    if(method==="session.list")return{promise:Promise.resolve({sessions:[]})};throw new Error(method);
+  }};
+  const pending=app.sendPrompt({preventDefault(){}});
+  while(!settle)await Promise.resolve();
+  assert.equal(app.state.activeRunId,"native");assert.equal(app.element("#agent-status").textContent,"压缩进行中");
+  assert.equal(app.state.agentSnapshot.messages.length,0);await app.cancelTurn();
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.find(([method])=>method==="agent.cancel")[1])),{run_id:"native",session_id:"s"});
+  settle({...run,status:"completed",compact:{outcome:"no_gain"}});await pending;
+  assert.equal(app.element("#agent-status").textContent,"压缩无收益");assert.equal(app.state.agentSnapshot.messages.length,0);
+  assert.equal(calls.some(([method])=>method==="chat.send"),false);
+});
+
+test("compact 重连从 native readback 展示 unknown，不伪造完成", async () => {
+  const app=createHarness();app.state.connected=true;app.state.activeRequest="reconnecting";app.state.activeRunId="native";app.state.agentSessionId="s";
+  app.state.rpc={request(method){
+    if(method==="session.load_page")return{promise:Promise.resolve({session_id:"s",messages:[],active_requests:[]})};
+    if(method==="run.read")return{promise:Promise.resolve({kind:"compact",run_id:"native",status:"unknown_after_restart",compact:{outcome:"unknown"}})};
+    throw new Error(method);
+  }};
+  await app.recoverAgentTurn();assert.equal(app.element("#agent-status").textContent,"压缩状态待核对");assert.equal(app.state.agentSnapshot.messages.length,0);
+});
+
 test("WebSocket 握手超时关闭连接", async () => {
   const app = createHarness();
   const socket = new app.RpcSocket("", "/work");
@@ -205,6 +328,55 @@ test("发送未被 socket 接受时保留草稿并移除乐观消息", async () 
   await app.sendPrompt({ preventDefault() {} });
   assert.equal(app.element("#prompt").value, "未发送的任务");
   assert.equal(app.state.agentSnapshot.messages.some((message) => message.role === "user"), false);
+});
+
+test("计划读取和废弃通过 daemon 命令显示，不伪造聊天终态", async () => {
+  for (const line of ["/plan read", "/plan discard s lifetime plan-id 1 digest operation"]) {
+    const app = createHarness();
+    app.state.connected = true;
+    app.state.agentSessionId = "s";
+    app.state.agentSnapshot = { messages: [] };
+    app.element("#prompt").value = line;
+    const calls = [];
+    app.state.rpc = { request(method, params) {
+      calls.push({ method, params });
+      if (method === "slash.execute") return { id: 1, promise: Promise.resolve({ kind: "text", content: "canonical plan" }) };
+      if (method === "session.list") return { id: 2, promise: Promise.resolve({ sessions: [] }) };
+      throw new Error(method);
+    } };
+    await app.sendPrompt({ preventDefault() {} });
+    assert.equal(calls[0].method, "slash.execute");
+    assert.equal(calls[0].params.line, line);
+    assert.equal(calls[0].params.session_id, "s");
+    assert.equal(app.state.agentSnapshot.messages.length, 0);
+    assert.equal(app.state.activeRequest, null);
+    assert.equal(app.state.activities.some((a) => a.title === "任务完成"), false);
+  }
+});
+
+test("Hook 回执读取只显示持久事实，不创建聊天 run 或终态", async () => {
+  const app = createHarness();
+  app.state.connected = true;
+  app.state.agentSessionId = "s";
+  app.state.agentSnapshot = { messages: [] };
+  const line = "/hooks s lifetime 0 32";
+  app.element("#prompt").value = line;
+  const calls = [];
+  app.state.rpc = { request(method, params) {
+    calls.push({ method, params });
+    if (method === "slash.execute") return { id: 1, promise: Promise.resolve({ kind: "text", content: '{"outcomes":[],"cursor":0,"has_more":false}' }) };
+    if (method === "session.list") return { id: 2, promise: Promise.resolve({ sessions: [] }) };
+    throw new Error(method);
+  } };
+  await app.sendPrompt({ preventDefault() {} });
+  assert.deepEqual(calls.map((call) => call.method), ["slash.execute", "session.list"]);
+  assert.equal(calls[0].params.line, line);
+  assert.equal(calls[0].params.session_id, "s");
+  assert.deepEqual(Object.keys(calls[0].params).sort(), ["line", "session_id"]);
+  assert.equal(app.state.agentSnapshot.messages.length, 0);
+  assert.equal(app.state.activeRequest, null);
+  assert.equal(app.state.activities.some((a) => a.title === "Hook 执行回执"), true);
+  assert.equal(app.state.activities.some((a) => a.title === "任务完成"), false);
 });
 
 test("只读历史重绘保留滚动位置，回到最新按钮可在完成后显示", () => {
@@ -537,4 +709,11 @@ test("子 Agent 列表读取共享 RPC 并转义结果内容", async () => {
   assert.match(html, /run-child/);
   assert.match(html, /&lt;script&gt;/);
   assert.doesNotMatch(html, /<script>/);
+});
+
+
+test("Web context 只读摘要不创建聊天草稿或私有 run 终态",async()=>{
+ const app=createHarness();app.state.connected=true;app.state.agentSessionId="s";app.state.agentSnapshot={messages:[]};app.element("#prompt").value="/context s";
+ const calls=[];app.state.rpc={request(method,params){calls.push([method,params]);return {promise:Promise.resolve(method==="session.list" ? [] : {kind:"text",content:JSON.stringify({schema_version:1,replayability:"captured",request_digest:"a".repeat(64)})})};}};
+ await app.sendPrompt({preventDefault(){}});assert.deepEqual(calls.map(([method])=>method),["slash.execute","session.list"]);assert.equal(calls[0][1].line,"/context s");assert.equal(app.state.agentSnapshot.messages.length,0);assert.equal(app.state.activeRequest,null);assert.equal(app.state.activeRunId,null);assert.equal(app.state.draftAssistant,null);
 });

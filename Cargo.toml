@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/core", "crates/daemon-protocol", "crates/daemon-client", "crates/storage", "crates/context", "crates/memory"]
+members = [".", "crates/core", "crates/daemon-protocol", "crates/daemon-client", "crates/storage", "crates/context", "crates/memory", "crates/sandbox", "crates/runtime", "crates/daemon", "crates/entry-support", "crates/cli", "crates/acp", "crates/gateway"]
 resolver = "3"
 
 [package]
@@ -11,41 +11,29 @@ publish = false
 description = "个人使用的轻量 Rust AI 编码 Agent"
 
 [dependencies]
+agent-gateway = { version = "=0.1.0", path = "crates/gateway" }
+agent-acp = { version = "=0.1.0", path = "crates/acp" }
+agent-cli = { version = "=0.1.0", path = "crates/cli" }
+agent-entry-support = { version = "=0.1.0", path = "crates/entry-support" }
+agent-daemon = { version = "=0.1.0", path = "crates/daemon" }
+agent-runtime = { version = "=0.1.0", path = "crates/runtime" }
 agent-memory = { version = "=0.1.0", path = "crates/memory" }
 agent-context = { version = "=0.1.0", path = "crates/context" }
 agent-daemon-client = { version = "=0.1.0", path = "crates/daemon-client" }
-agent-storage = { version = "=0.1.0", path = "crates/storage" }
 agent-core = { version = "=0.1.0", path = "crates/core" }
-agent-daemon-protocol = { version = "=0.1.0", path = "crates/daemon-protocol" }
-agent-client-protocol = "=2.1.0"
 anyhow = "1"
 async-trait = "0.1"
-axum = { version = "=0.8.9", features = ["ws"] }
-base64 = "0.22"
-clap = { version = "4", features = ["derive"] }
-chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
-cron = "=0.17.0"
-crossterm = "=0.29.0"
-futures-util = "0.3"
-lopdf = { version = "0.45", default-features = false }
-libc = "0.2"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
-rusqlite = { version = "0.37", features = ["bundled"] }
-ratatui = "=0.30.2"
-serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
-serde_yaml_ng = "=0.10.0"
-semver = { version = "=1.0.28", features = ["serde"] }
-thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
-tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-unicode-width = "=0.2.2"
-unicode-segmentation = "=1.13.3"
-jsonschema = { version = "=0.33.0", default-features = false }
 
 [dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+agent-daemon-protocol = { version = "=0.1.0", path = "crates/daemon-protocol" }
+futures-util = { version = "0.3", features = ["sink"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+agent-daemon = { version = "=0.1.0", path = "crates/daemon", features = ["test-support"] }
+agent-runtime = { version = "=0.1.0", path = "crates/runtime", features = ["test-support"] }
 agent-storage = { version = "=0.1.0", path = "crates/storage", features = ["test-support"] }
 agent-daemon-client = { version = "=0.1.0", path = "crates/daemon-client", features = ["test-transport"] }
 syn = { version = "2", features = ["full", "visit"] }
@@ -53,6 +41,3 @@ toml = "0.8"
 tokio-tungstenite = "=0.29.0"
 rcgen = "=0.13.2"
 tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring", "tls12"] }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-keyring = { version = "=3.6.3", features = ["apple-native"] }

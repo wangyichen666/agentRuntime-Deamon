@@ -6,6 +6,14 @@ use agent_core::*;
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 
+struct StoredCompactResult {
+    run: String,
+    generation: Option<u64>,
+    source_json: String,
+    state: String,
+    reason: Option<String>,
+}
+
 pub trait ContextRepository: Send + Sync {
     fn compact_result(
         &self,
@@ -75,7 +83,7 @@ pub(crate) fn projection_in(
     }
 }
 
-fn source_check(
+pub(crate) fn source_check(
     db: &Connection,
     key: &SessionKey,
     source: &ContextSource,
@@ -126,6 +134,16 @@ fn source_check(
     }
     Ok(messages)
 }
+pub(crate) fn context_anchor_in(
+    db: &Connection,
+    owner: &ExactOwner,
+    generation: ProjectionGeneration,
+    route: &str,
+    provider_identity: &str,
+) -> Result<Option<(u64, u64)>, RuntimeError> {
+    Ok(db.query_row("SELECT json_extract(a.data_json,'$.usage.input_tokens'),json_extract(l.envelope_json,'$.stable_tokens')+json_extract(l.envelope_json,'$.history_tokens')+json_extract(l.envelope_json,'$.retrieved_tokens')+json_extract(l.envelope_json,'$.overlay_tokens') FROM provider_attempts a JOIN runs r ON r.id=a.run_id JOIN context_ledgers l ON l.run_id=a.run_id AND l.round=a.round WHERE r.lifetime=?1 AND r.status='completed' AND a.status='succeeded' AND json_extract(l.envelope_json,'$.provider_identity')=?4 AND json_extract(l.envelope_json,'$.route')=?2 AND json_extract(a.data_json,'$.model')=?2 AND json_extract(l.envelope_json,'$.source.generation')=?3 AND json_extract(a.data_json,'$.usage.input_tokens')>0 ORDER BY r.rowid DESC,a.round DESC LIMIT 1",params![owner.session_lifetime_id.0,route,generation.0,provider_identity],|r|Ok((r.get(0)?,r.get(1)?))).optional()?)
+}
+
 impl ContextRepository for RunStore {
     fn compact_result(
         &self,
@@ -135,25 +153,38 @@ impl ContextRepository for RunStore {
     ) -> Result<Option<ProjectionGeneration>, RuntimeError> {
         let db = self.lock_connection()?;
         fence_in(&db, owner)?;
-        let record:Option<(String,Option<u64>,String)>=db.query_row("SELECT run_id,result_generation,source_json FROM compact_operations WHERE operation=?1 AND state IN ('committed','rejected')",params![operation],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+        let record:Option<StoredCompactResult>=db.query_row("SELECT run_id,result_generation,source_json,state,reason FROM compact_operations WHERE operation=?1 AND state IN ('committed','rejected')",params![operation],|r|Ok(StoredCompactResult {run:r.get(0)?,generation:r.get(1)?,source_json:r.get(2)?,state:r.get(3)?,reason:r.get(4)?})).optional()?;
         record
-            .map(|(run, generation, source_json)| {
-                let source: ContextSource = serde_json::from_str(&source_json)
-                    .map_err(|e| RuntimeError::Protocol(e.to_string()))?;
-                if expected_revision.is_some_and(|revision| revision != source.source_end) {
-                    return Err(RuntimeError::Protocol(
-                        "compact operation source 冲突".into(),
-                    ));
-                }
-                if run != owner.run_id.0 {
-                    return Err(RuntimeError::Protocol(
-                        "compact operation owner 冲突".into(),
-                    ));
-                }
-                generation
-                    .map(ProjectionGeneration)
-                    .ok_or_else(|| RuntimeError::Protocol("compact 未取得成功回执".into()))
-            })
+            .map(
+                |StoredCompactResult {
+                     run,
+                     generation,
+                     source_json,
+                     state,
+                     reason,
+                 }| {
+                    let source: ContextSource = serde_json::from_str(&source_json)
+                        .map_err(|e| RuntimeError::Protocol(e.to_string()))?;
+                    if expected_revision.is_some_and(|revision| revision != source.source_end) {
+                        return Err(RuntimeError::Protocol(
+                            "compact operation source 冲突".into(),
+                        ));
+                    }
+                    if run != owner.run_id.0 {
+                        return Err(RuntimeError::Protocol(
+                            "compact operation owner 冲突".into(),
+                        ));
+                    }
+                    if state == "rejected" && reason.as_deref() != Some("no_gain") {
+                        return Err(RuntimeError::Protocol(
+                            "compact 已拒绝或失败，禁止重放摘要".into(),
+                        ));
+                    }
+                    generation
+                        .map(ProjectionGeneration)
+                        .ok_or_else(|| RuntimeError::Protocol("compact 未取得成功回执".into()))
+                },
+            )
             .transpose()
     }
     fn context_anchor(
@@ -165,7 +196,7 @@ impl ContextRepository for RunStore {
     ) -> Result<Option<(u64, u64)>, RuntimeError> {
         let db = self.lock_connection()?;
         fence_in(&db, owner)?;
-        Ok(db.query_row("SELECT json_extract(a.data_json,'$.usage.input_tokens'),json_extract(l.envelope_json,'$.stable_tokens')+json_extract(l.envelope_json,'$.history_tokens')+json_extract(l.envelope_json,'$.retrieved_tokens')+json_extract(l.envelope_json,'$.overlay_tokens') FROM provider_attempts a JOIN runs r ON r.id=a.run_id JOIN context_ledgers l ON l.run_id=a.run_id AND l.round=a.round WHERE r.lifetime=?1 AND r.status='completed' AND a.status='succeeded' AND json_extract(l.envelope_json,'$.provider_identity')=?4 AND json_extract(l.envelope_json,'$.route')=?2 AND json_extract(a.data_json,'$.model')=?2 AND json_extract(l.envelope_json,'$.source.generation')=?3 AND json_extract(a.data_json,'$.usage.input_tokens')>0 ORDER BY r.rowid DESC,a.round DESC LIMIT 1",params![owner.session_lifetime_id.0,route,generation.0,provider_identity],|r|Ok((r.get(0)?,r.get(1)?))).optional()?)
+        context_anchor_in(&db, owner, generation, route, provider_identity)
     }
     fn context_projection(
         &self,
@@ -204,6 +235,25 @@ impl ContextRepository for RunStore {
                 "context_read_only 禁止 compact".into(),
             ));
         }
+        let previous: Option<(String, String, String)> = tx
+            .query_row(
+                "SELECT run_id,source_json,state FROM compact_operations WHERE operation=?1",
+                params![intent.operation],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        if let Some((run, source, state)) = previous {
+            if run != intent.owner.run_id.0
+                || source
+                    != serde_json::to_string(&intent.source)
+                        .map_err(|error| RuntimeError::Protocol(error.to_string()))?
+                || state != "pending"
+            {
+                return Err(RuntimeError::Protocol("compact intent 幂等身份冲突".into()));
+            }
+            super::views::commit(tx)?;
+            return Ok(());
+        }
         tx.execute(
             "INSERT INTO compact_operations(operation,run_id,lifetime,source_json,state,reason) VALUES(?1,?2,?3,?4,'pending',NULL)",
             params![
@@ -214,7 +264,7 @@ impl ContextRepository for RunStore {
                     .map_err(|e| RuntimeError::Protocol(e.to_string()))?
             ],
         )?;
-        tx.commit()?;
+        super::views::commit(tx)?;
         Ok(())
     }
     fn settle_compact(
@@ -247,7 +297,18 @@ impl ContextRepository for RunStore {
                 "UPDATE compact_operations SET state='rejected',reason=?2,result_generation=?3 WHERE operation=?1",
                 params![intent.operation, reason,if check.is_ok(){Some(intent.source.generation.0)}else{None}],
             )?;
-            tx.commit()?;
+            super::compact_runs::terminal_in(
+                &tx,
+                &intent.owner.run_id,
+                "rejected",
+                reason,
+                if check.is_ok() {
+                    Some(intent.source.generation)
+                } else {
+                    None
+                },
+            )?;
+            super::views::commit(tx)?;
             check?;
             return Ok(intent.source.generation);
         }
@@ -307,7 +368,14 @@ impl ContextRepository for RunStore {
             "context_compacted",
             &serde_json::json!({"generation":next,"operation":intent.operation,"mode":reason}),
         )?;
-        tx.commit()?;
+        super::compact_runs::terminal_in(
+            &tx,
+            &intent.owner.run_id,
+            "committed",
+            reason,
+            Some(ProjectionGeneration(next)),
+        )?;
+        super::views::commit(tx)?;
         Ok(ProjectionGeneration(next))
     }
     fn record_context(
@@ -320,7 +388,7 @@ impl ContextRepository for RunStore {
         let tx = db.transaction()?;
         fence_in(&tx, owner)?;
         tx.execute("INSERT INTO context_ledgers VALUES(?1,?2,?3) ON CONFLICT(run_id,round) DO UPDATE SET envelope_json=excluded.envelope_json",params![owner.run_id.0,round as i64,serde_json::to_string(envelope).map_err(|e|RuntimeError::Protocol(e.to_string()))?])?;
-        tx.commit()?;
+        super::views::commit(tx)?;
         Ok(())
     }
 }

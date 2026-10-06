@@ -28,6 +28,12 @@ pub trait SessionQuery: Send + Sync {
     fn run_owner(&self, run: &RunId) -> Result<ExactOwner, RuntimeError>;
 }
 pub trait SessionLifecycle: Send + Sync {
+    fn close_receipt(
+        &self,
+        key: &SessionKey,
+        lifetime: &SessionLifetimeId,
+        operation: &str,
+    ) -> Result<Option<SessionMetadata>, RuntimeError>;
     fn execute_lifecycle(
         &self,
         command: &SessionCommand,
@@ -94,7 +100,10 @@ fn create_in(db: &Connection, key: &SessionKey) -> Result<SessionMetadata, Runti
             params![key.0],
         )?;
     }
-    metadata_in(db, key)?.ok_or_else(|| RuntimeError::Internal("缺少创建后的 session".into()))
+    let metadata = metadata_in(db, key)?
+        .ok_or_else(|| RuntimeError::Internal("缺少创建后的 session".into()))?;
+    super::hooks::publish_in(db, &metadata, HookEvent::SessionStart)?;
+    Ok(metadata)
 }
 pub(crate) fn insert_batch(
     db: &Connection,
@@ -234,7 +243,7 @@ impl SessionQuery for RunStore {
         let mut db = self.lock_connection()?;
         let tx = db.transaction()?;
         let snapshot = snapshot_in(&tx, key)?;
-        tx.commit()?;
+        super::views::commit(tx)?;
         Ok(snapshot)
     }
 }
@@ -297,6 +306,33 @@ pub(crate) fn snapshot_in(
 }
 
 impl SessionLifecycle for RunStore {
+    fn close_receipt(
+        &self,
+        key: &SessionKey,
+        lifetime: &SessionLifetimeId,
+        operation: &str,
+    ) -> Result<Option<SessionMetadata>, RuntimeError> {
+        let db = self.lock_connection()?;
+        let payload =
+            serde_json::to_string(&(SessionCommand::Close { key: key.clone() }, Some(lifetime)))
+                .map_err(|e| RuntimeError::Protocol(e.to_string()))?;
+        let prior = db
+            .query_row(
+                "SELECT command_json,result_json FROM lifecycle_receipts WHERE operation_id=?1",
+                params![operation],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        prior
+            .map(|(command, result)| {
+                if command != payload {
+                    return Err(RuntimeError::Protocol("close operation 身份冲突".into()));
+                }
+                serde_json::from_str(&result).map_err(|e| RuntimeError::Protocol(e.to_string()))
+            })
+            .transpose()
+    }
+
     fn set_preferred_session(&self, key: &SessionKey) -> Result<(), RuntimeError> {
         let db = self.lock_connection()?;
         if metadata_in(&db, key)?.is_none_or(|m| m.deleted) {
@@ -343,6 +379,16 @@ impl SessionLifecycle for RunStore {
         }
         let meta = match command {
             SessionCommand::Create { key } => create_in(&tx, key)?,
+            SessionCommand::Close { key } => {
+                let lifetime = expected
+                    .ok_or_else(|| RuntimeError::Protocol("close 缺少 expected lifetime".into()))?;
+                let meta = metadata_in(&tx, key)?
+                    .filter(|meta| !meta.deleted && &meta.lifetime == lifetime)
+                    .ok_or_else(|| RuntimeError::Protocol("close stale lifetime".into()))?;
+                ensure_idle_in(&tx, key, lifetime)?;
+                super::hooks::publish_in(&tx, &meta, HookEvent::SessionEnd)?;
+                meta
+            }
             SessionCommand::End { key, delete } => {
                 let lifetime = expected.ok_or_else(|| {
                     RuntimeError::Protocol("缺少 lifecycle expected lifetime".into())
@@ -372,14 +418,14 @@ impl SessionLifecycle for RunStore {
             "INSERT INTO lifecycle_receipts VALUES (?1,?2,?3)",
             params![operation, payload, result],
         )?;
-        tx.commit()?;
+        super::views::commit(tx)?;
         Ok(meta)
     }
     fn create_session(&self, key: &SessionKey) -> Result<SessionMetadata, RuntimeError> {
         let mut db = self.lock_connection()?;
         let tx = db.transaction()?;
         let meta = create_in(&tx, key)?;
-        tx.commit()?;
+        super::views::commit(tx)?;
         Ok(meta)
     }
     fn end_session(
@@ -391,7 +437,7 @@ impl SessionLifecycle for RunStore {
         let mut db = self.lock_connection()?;
         let tx = db.transaction()?;
         end_in(&tx, key, lifetime, delete)?;
-        tx.commit()?;
+        super::views::commit(tx)?;
         Ok(())
     }
     fn fork_session(
@@ -403,7 +449,7 @@ impl SessionLifecycle for RunStore {
         let mut db = self.lock_connection()?;
         let tx = db.transaction()?;
         let child = fork_in(&tx, source, target, revision)?;
-        tx.commit()?;
+        super::views::commit(tx)?;
         Ok(child)
     }
 }
@@ -429,7 +475,7 @@ impl TranscriptStore for RunStore {
                 params![key.0],
             )?;
         }
-        tx.commit()?;
+        super::views::commit(tx)?;
         Ok(())
     }
     fn append_transcript(
@@ -459,7 +505,7 @@ impl TranscriptStore for RunStore {
             Some(&owner.run_id),
             messages,
         )?;
-        tx.commit()?;
+        super::views::commit(tx)?;
         Ok(revision)
     }
 }
@@ -475,13 +521,7 @@ fn end_in(
     if meta.deleted || meta.lifetime != *lifetime {
         return Err(RuntimeError::Protocol("stale lifecycle owner".into()));
     }
-    let busy:i64=db.query_row("SELECT count(*) FROM runs WHERE session_id=?1 AND lifetime=?2 AND status IN ('queued','running','waiting_interaction')",params![key.0,lifetime.0],|r|r.get(0))?;
-    let resources:i64=db.query_row("SELECT count(*) FROM resources WHERE lifetime=?1 AND state IN ('starting','running','stopping')",params![lifetime.0],|r|r.get(0))?;
-    if busy != 0 || resources != 0 {
-        return Err(RuntimeError::Protocol(
-            "session 仍有受管 run，必须先 cancel/join".into(),
-        ));
-    }
+    ensure_idle_in(db, key, lifetime)?;
     db.execute("DELETE FROM memories WHERE lifetime=?1 AND json_extract(data_json,'$.kind')='turn_summary'",params![lifetime.0])?;
     for table in [
         "memory_exposures",
@@ -506,6 +546,7 @@ fn end_in(
         .checked_add(1)
         .ok_or_else(|| RuntimeError::Protocol("projection generation 耗尽".into()))?;
     db.execute("UPDATE session_heads SET deleted=?2, lifetime=CASE WHEN ?2 THEN lifetime ELSE lower(hex(randomblob(16))) END,revision=0,projection_generation=?4,legacy_imported=1,updated_at_ms=?3 WHERE session_id=?1",params![key.0,delete,now_ms(),next])?;
+    super::hooks::publish_in(db, &meta, HookEvent::SessionEnd)?;
     Ok(())
 }
 
@@ -528,6 +569,21 @@ fn fork_in(
     Ok(child)
 }
 
+pub(crate) fn ensure_idle_in(
+    db: &Connection,
+    key: &SessionKey,
+    lifetime: &SessionLifetimeId,
+) -> Result<(), RuntimeError> {
+    let busy:i64=db.query_row("SELECT count(*) FROM runs WHERE session_id=?1 AND lifetime=?2 AND status IN ('queued','running','waiting_interaction')",params![key.0,lifetime.0],|r|r.get(0))?;
+    let resources:i64=db.query_row("SELECT count(*) FROM resources WHERE lifetime=?1 AND state IN ('starting','running','stopping')",params![lifetime.0],|r|r.get(0))?;
+    if busy != 0 || resources != 0 {
+        return Err(RuntimeError::Protocol(
+            "session 仍有受管 run，必须先 cancel/join".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -540,6 +596,122 @@ mod tests {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ))
     }
+    #[test]
+    fn close_receipts_preserve_lifetime_history_and_are_idempotent_on_both_backends() {
+        fn close_contract(store: &RunStore) {
+            let key = SessionKey("session-close.jsonl".into());
+            let meta = store.create_session(&key).unwrap();
+            let Admission::New(run) = store
+                .admit_with_lifetime(
+                    key.clone(),
+                    Some(&meta.lifetime),
+                    RequestId::Number(99),
+                    "输入",
+                    AdmissionMode::Queue,
+                    None,
+                )
+                .unwrap()
+            else {
+                panic!("new run")
+            };
+            assert!(store.try_start_queued(&run.run_id).unwrap());
+            let owner = store.run_owner(&run.run_id).unwrap();
+            store
+                .append_transcript(
+                    &owner,
+                    "canonical",
+                    &[Message::text(Role::User, "保留原文")],
+                )
+                .unwrap();
+            let command = SessionCommand::Close { key: key.clone() };
+            assert!(
+                store
+                    .execute_lifecycle(&command, Some(&meta.lifetime), "close-op")
+                    .is_err()
+            );
+            assert!(
+                store
+                    .close_receipt(&key, &meta.lifetime, "close-op")
+                    .unwrap()
+                    .is_none()
+            );
+            store
+                .finish(&run.run_id, RunStatus::Completed, Some("完成"), None)
+                .unwrap();
+            let before = store.session_snapshot(&key).unwrap();
+            let closed = store
+                .execute_lifecycle(&command, Some(&meta.lifetime), "close-op")
+                .unwrap();
+            assert_eq!(closed.lifetime, meta.lifetime);
+            assert_eq!(closed.revision, before.revision);
+            assert_eq!(
+                store.session_snapshot(&key).unwrap().messages,
+                before.messages
+            );
+            assert_eq!(
+                store
+                    .close_receipt(&key, &meta.lifetime, "close-op")
+                    .unwrap()
+                    .unwrap()
+                    .lifetime,
+                meta.lifetime
+            );
+            assert_eq!(
+                store
+                    .execute_lifecycle(&command, Some(&meta.lifetime), "close-op")
+                    .unwrap()
+                    .revision,
+                before.revision
+            );
+            assert!(
+                store
+                    .execute_lifecycle(
+                        &command,
+                        Some(&SessionLifetimeId("foreign".into())),
+                        "close-op"
+                    )
+                    .is_err()
+            );
+            assert!(
+                store
+                    .execute_lifecycle(
+                        &SessionCommand::End { key, delete: true },
+                        Some(&meta.lifetime),
+                        "close-op"
+                    )
+                    .is_err()
+            );
+            let db = store.lock_connection().unwrap();
+            assert_eq!(
+                db.query_row::<u64, _, _>(
+                    "SELECT count(*) FROM hook_publications WHERE json_extract(payload_json,'$.event')='session_end'",
+                    [],
+                    |row| row.get(0)
+                )
+                .unwrap(),
+                1
+            );
+        }
+        close_contract(&RunStore::open(std::path::Path::new(":memory:")).unwrap());
+        let path = path();
+        {
+            close_contract(&RunStore::open(&path).unwrap());
+        }
+        let reopened = RunStore::open(&path).unwrap();
+        let meta = reopened
+            .session_metadata(&SessionKey("session-close.jsonl".into()))
+            .unwrap()
+            .unwrap();
+        assert!(
+            reopened
+                .close_receipt(&meta.key, &meta.lifetime, "close-op")
+                .unwrap()
+                .is_some()
+        );
+        drop(reopened);
+        std::fs::remove_file(path).unwrap();
+    }
+
     fn contract(store: &RunStore) {
         let key = SessionKey("session-contract.jsonl".into());
         let meta = store.create_session(&key).unwrap();

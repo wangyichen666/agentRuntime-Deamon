@@ -6,6 +6,14 @@ use agent_core::*;
 use rusqlite::{Connection, OptionalExtension, params};
 
 pub trait TurnRepository: Send + Sync {
+    fn plan_readback(&self, key: &SessionKey) -> Result<PlanReadback, RuntimeError>;
+    fn discard_plan(
+        &self,
+        key: &SessionKey,
+        lifetime: &SessionLifetimeId,
+        identity: &PlanExecution,
+    ) -> Result<PlanDecisionReceipt, RuntimeError>;
+    fn start_plan_execution(&self, owner: &ExactOwner) -> Result<(), RuntimeError>;
     fn read_plan(&self, owner: &ExactOwner) -> Result<PlanSnapshot, RuntimeError>;
     fn stage_plan(
         &self,
@@ -31,6 +39,20 @@ pub trait TurnRepository: Send + Sync {
     fn run_snapshot(&self, run: &RunId) -> Result<Option<RunSnapshot>, RuntimeError>;
 }
 impl TurnRepository for RunStore {
+    fn plan_readback(&self, key: &SessionKey) -> Result<PlanReadback, RuntimeError> {
+        self.read_plan_document(key)
+    }
+    fn discard_plan(
+        &self,
+        key: &SessionKey,
+        lifetime: &SessionLifetimeId,
+        identity: &PlanExecution,
+    ) -> Result<PlanDecisionReceipt, RuntimeError> {
+        self.discard_plan_document(key, lifetime, identity)
+    }
+    fn start_plan_execution(&self, owner: &ExactOwner) -> Result<(), RuntimeError> {
+        self.begin_plan_execution(owner)
+    }
     fn read_plan(&self, owner: &ExactOwner) -> Result<PlanSnapshot, RuntimeError> {
         let db = self.lock_connection()?;
         fence_in(&db, owner)?;
@@ -49,10 +71,10 @@ impl TurnRepository for RunStore {
         if current.revision != expected {
             return Err(RuntimeError::Protocol("plan revision CAS 冲突".into()));
         }
-        let next = expected
-            .checked_add(1)
-            .filter(|n| *n <= i64::MAX as u64)
-            .ok_or_else(|| RuntimeError::Protocol("plan revision 耗尽".into()))?;
+        let document = super::plans::stage_document(owner, &current, value)?;
+        let next = document.revision;
+        let value =
+            serde_json::to_value(&document).map_err(|e| RuntimeError::Protocol(e.to_string()))?;
         let base: u64 = tx
             .query_row(
                 "SELECT revision FROM session_plans WHERE lifetime=?1",
@@ -62,10 +84,10 @@ impl TurnRepository for RunStore {
             .optional()?
             .unwrap_or(0);
         tx.execute("INSERT INTO turn_plan_stages VALUES (?1,?2,?3,?4) ON CONFLICT(run_id) DO UPDATE SET revision=excluded.revision,data_json=excluded.data_json",params![owner.run_id.0,base,next,value.to_string()])?;
-        tx.commit()?;
+        super::views::commit(tx)?;
         Ok(PlanSnapshot {
             revision: next,
-            value: value.clone(),
+            value,
         })
     }
     fn reject_tool_batch(
@@ -107,7 +129,7 @@ impl TurnRepository for RunStore {
             "tool_batch_rejected",
             &serde_json::json!({"round":round,"reason":reason}),
         )?;
-        tx.commit()?;
+        super::views::commit(tx)?;
         Ok(messages)
     }
     fn stage_assistant(&self, owner: &ExactOwner, message: &Message) -> Result<(), RuntimeError> {
@@ -120,7 +142,7 @@ impl TurnRepository for RunStore {
         let payload =
             serde_json::to_string(message).map_err(|e| RuntimeError::Protocol(e.to_string()))?;
         tx.execute("INSERT INTO turn_outputs VALUES(?1,?2) ON CONFLICT(run_id) DO UPDATE SET message_json=excluded.message_json",params![owner.run_id.0,payload])?;
-        tx.commit()?;
+        super::views::commit(tx)?;
         Ok(())
     }
     fn commit_turn(&self, command: &TurnCommit) -> Result<RunRecord, RuntimeError> {
@@ -169,7 +191,7 @@ impl TurnRepository for RunStore {
             params![owner.run_id.0, round as i64],
         )?;
         if changed == 0 {
-            tx.commit()?;
+            super::views::commit(tx)?;
             return Ok(());
         }
         insert_event(
@@ -178,7 +200,7 @@ impl TurnRepository for RunStore {
             "tool_exchange_closed",
             &serde_json::json!({"round":round}),
         )?;
-        tx.commit()?;
+        super::views::commit(tx)?;
         Ok(())
     }
     fn run_snapshot(&self, run: &RunId) -> Result<Option<RunSnapshot>, RuntimeError> {
@@ -344,11 +366,13 @@ pub(crate) fn commit_output_in(
                 "TurnCommit plan source 已变化".into(),
             ));
         }
+        super::plans::publish_document(db, &owner.session_lifetime_id, revision, &payload)?;
         db.execute("INSERT INTO session_plans VALUES(?1,?2,?3) ON CONFLICT(lifetime) DO UPDATE SET revision=excluded.revision,data_json=excluded.data_json",params![owner.session_lifetime_id.0,revision,payload])?;
         Some(revision)
     } else {
         None
     };
+    super::plans::settle_execution_in(db, &owner, status)?;
     db.execute(
         "INSERT INTO turn_commits(run_id,owner_json,usage_json,status,plan_revision) VALUES(?1,?2,?3,?4,?5)",
         params![
@@ -377,11 +401,21 @@ fn read_plan_in(db: &Connection, owner: &ExactOwner) -> Result<PlanSnapshot, Run
             )
             .optional()?);
     match raw {
-        Some((revision, payload)) => Ok(PlanSnapshot {
-            revision,
-            value: serde_json::from_str(&payload)
-                .map_err(|e| RuntimeError::Protocol(e.to_string()))?,
-        }),
+        Some((revision, payload)) => {
+            let value: serde_json::Value = serde_json::from_str(&payload)
+                .map_err(|e| RuntimeError::Protocol(e.to_string()))?;
+            if value.get("plan_id").is_some() {
+                let doc: PlanDocument = serde_json::from_value(value.clone())
+                    .map_err(|e| RuntimeError::Protocol(e.to_string()))?;
+                super::plans::validate_document(&doc)?;
+                if doc.revision != revision {
+                    return Err(RuntimeError::Protocol("plan revision 损坏".into()));
+                }
+            } else {
+                super::plans::validate_legacy_plan(&value)?;
+            }
+            Ok(PlanSnapshot { revision, value })
+        }
         None => Ok(PlanSnapshot {
             revision: 0,
             value: serde_json::json!({"steps":[]}),
@@ -432,13 +466,14 @@ impl RunStore {
                     "INSERT OR IGNORE INTO session_plans VALUES(?1,0,?2)",
                     params![meta.lifetime.0, value.to_string()],
                 )?;
+                tx.execute("INSERT OR IGNORE INTO plan_legacy_evidence SELECT lifetime,revision,data_json FROM session_plans WHERE lifetime=?1",params![meta.lifetime.0])?;
             }
             tx.execute(
                 "INSERT INTO legacy_plan_imports VALUES(?1,?2,?3)",
                 params![source, digest, meta.lifetime.0],
             )?;
         }
-        tx.commit()?;
+        super::views::commit(tx)?;
         Ok(())
     }
 }
@@ -467,6 +502,50 @@ mod tests {
         let owner = store.run_owner(&run.run_id).unwrap();
         (store, owner)
     }
+    #[test]
+    fn plan_definition_revision_ignores_progress_and_publishes_stable_digest() {
+        let (store, owner) = admitted();
+        let first = store
+            .stage_plan(
+                &owner,
+                0,
+                &serde_json::json!({"steps":[{"id":"a","description":"验证","status":"pending"}]}),
+            )
+            .unwrap();
+        assert!(
+            first
+                .value
+                .get("content_digest")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+        );
+        let progress = store
+            .stage_plan(
+                &owner,
+                first.revision,
+                &serde_json::json!({"steps":[{"id":"a","description":"验证","status":"done"}]}),
+            )
+            .unwrap();
+        assert_eq!(first.revision, progress.revision);
+        assert_eq!(first.value["plan_id"], progress.value["plan_id"]);
+        assert_eq!(
+            first.value["content_digest"],
+            progress.value["content_digest"]
+        );
+        let changed = store
+            .stage_plan(
+                &owner,
+                progress.revision,
+                &serde_json::json!({"steps":[{"id":"a","description":"完整验证","status":"done"}]}),
+            )
+            .unwrap();
+        assert_eq!(changed.revision, first.revision + 1);
+        assert_ne!(
+            changed.value["content_digest"],
+            first.value["content_digest"]
+        );
+    }
+
     #[test]
     fn terminal_fault_rolls_back_assistant_plan_usage_and_transcript_revision() {
         let (store, owner) = admitted();

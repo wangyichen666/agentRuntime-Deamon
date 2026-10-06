@@ -3,11 +3,17 @@
     not(test),
     deny(clippy::unwrap_used, clippy::expect_used, clippy::print_stdout)
 )]
+mod request;
 use agent_core::{Message, Role, ToolSpec};
+pub use request::*;
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ContextError {
+    #[error("请求材料身份或预算无效")]
+    InvalidRequest,
+    #[error("完整请求超出冻结的上下文预算")]
+    RequestBudget,
     #[error("上下文操作已取消")]
     Cancelled,
     #[error("上下文序列化失败: {0}")]
@@ -29,21 +35,33 @@ impl TokenEstimator {
                 other += 1;
             }
         }
-        cjk.saturating_mul(2).div_ceil(3) + other.div_ceil(4)
+        cjk.saturating_mul(2)
+            .div_ceil(3)
+            .saturating_add(other.div_ceil(4))
     }
     pub fn messages(self, messages: &[Message]) -> usize {
         messages
             .iter()
             .map(|m| {
-                m.content.as_deref().map_or(0, |t| self.text(t))
-                    + serde_json::to_string(&m.tool_calls).map_or(0, |t| self.text(&t))
-                    + m.image_urls.len().saturating_mul(384)
-                    + 6
+                // 工具结果同样向模型发送名称和关联ID；存储思考不回传。
+                m.content
+                    .as_deref()
+                    .map_or(0, |t| self.text(t))
+                    .saturating_add(
+                        serde_json::to_string(&m.tool_calls).map_or(0, |t| self.text(&t)),
+                    )
+                    .saturating_add(m.name.as_deref().map_or(0, |t| self.text(t)))
+                    .saturating_add(m.tool_call_id.as_deref().map_or(0, |t| self.text(t)))
+                    .saturating_add(m.image_urls.len().saturating_mul(384))
+                    .saturating_add(6)
             })
-            .sum()
+            .fold(0, usize::saturating_add)
     }
     pub fn request(self, messages: &[Message], tools: &[ToolSpec]) -> Result<usize, ContextError> {
-        Ok(self.messages(messages) + self.text(&serde_json::to_string(tools)?) + 8)
+        Ok(self
+            .messages(messages)
+            .saturating_add(self.text(&serde_json::to_string(tools)?))
+            .saturating_add(8))
     }
 }
 /// 只接受宿主持久捕获包；所有元数据和包装均计入后续完整请求预算。
@@ -290,9 +308,29 @@ pub fn evaluate_builtin() -> Result<serde_json::Value, ContextError> {
             .ok_or(ContextError::InvalidCandidate)? as usize;
         outcomes.push(serde_json::json!({"id":case["id"],"expected_complete":expected_complete,"actual_complete":coverage.text_complete,"omitted_lower_bound":coverage.omitted_lower_bound,"passed":contains && coverage.text_complete==expected_complete && coverage.omitted_lower_bound==expected_omitted && TokenEstimator.text(text)<=budget}));
     }
+    let budget: serde_json::Value = serde_json::from_str(include_str!("../eval/budget-v1.json"))?;
+    for case in budget["cases"]
+        .as_array()
+        .ok_or(ContextError::InvalidCandidate)?
+    {
+        let source: Vec<Message> = serde_json::from_value(case["source"].clone())?;
+        let candidate: Vec<Message> = serde_json::from_value(case["candidate"].clone())?;
+        if let Some(expected) = case["expected_delta"].as_i64() {
+            let source_tokens = TokenEstimator.messages(&source);
+            let candidate_tokens = TokenEstimator.messages(&candidate);
+            let actual = candidate_tokens as i128 - source_tokens as i128;
+            outcomes.push(serde_json::json!({"id":case["id"],"expected_delta":expected,"actual_delta":actual,"passed":actual==i128::from(expected)}));
+        } else {
+            let expected = case["expected_valid"]
+                .as_bool()
+                .ok_or(ContextError::InvalidCandidate)?;
+            let accepted = validate_candidate(&source, &candidate).is_ok();
+            outcomes.push(serde_json::json!({"id":case["id"],"expected_valid":expected,"actual_valid":accepted,"passed":expected==accepted}));
+        }
+    }
     let passed = outcomes.iter().filter(|c| c["passed"] == true).count();
     Ok(
-        serde_json::json!({"dataset_version":dataset["version"],"policy":"current-turn-preservation-and-retention-v2","total":outcomes.len(),"passed":passed,"cases":outcomes}),
+        serde_json::json!({"dataset_version":dataset["version"],"dataset_versions":{"protection":dataset["version"],"retention":retention["version"],"budget":budget["version"]},"policy":"current-turn-preservation-retention-and-budget-v3","total":outcomes.len(),"passed":passed,"cases":outcomes}),
     )
 }
 

@@ -5,6 +5,35 @@ fn strict(method: &str, params: serde_json::Value) -> JsonRpcRequest {
     request.protocol_version = Some(1);
     request
 }
+
+#[test]
+fn plan_metadata_cannot_bypass_session_capability_using_chat_method() {
+    let mut connection = ConnectionState::default();
+    let offer = InitializeParams {
+        protocol_versions: vec![1],
+        capabilities: vec![Capability {
+            name: "runs".into(),
+            schema_version: 1,
+        }],
+    };
+    connection
+        .accept(strict(
+            "connection.initialize",
+            serde_json::to_value(offer).unwrap(),
+        ))
+        .unwrap();
+    assert!(
+        connection
+            .accept(strict("chat.send", json!({"message":"正常聊天"})))
+            .is_ok()
+    );
+    assert!(connection.accept(strict("chat.send",json!({"session_id":"s","message":"/plan execute lifetime plan-id 7 digest operation"}))).is_err());
+    assert!(
+        connection
+            .accept(strict("sessions.plan.readback", json!({"session_id":"s"})))
+            .is_err()
+    );
+}
 #[test]
 fn capabilities_are_intersected_by_schema_and_bound_to_the_connection() {
     let mut connection = ConnectionState::default();

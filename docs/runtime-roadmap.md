@@ -1,10 +1,12 @@
 # 本地 Agent Runtime 路线图
 
-更新日期：2026-10-05。本文件只记录已实现的行为与待办，不把下一阶段设计当作现有保证。
+更新日期：2026-10-07。本文件只记录已实现的行为与待办，不把下一阶段设计当作现有保证。
 
-## 当前重构顺序：Wave 0–7
+## 当前控制面任务：Wave 1–8（早期阶段记录保留）
 
-源码复核后更正：完整 Wave 0–7 验收尚未完成，当前 schema v14。本轮完成早期恢复读取/协议/lifetime 屏障纵切，SQLite 提供同事务 canonical facts，context/memory 保留原有接线；新增 13 项后共 302 项 Rust 测试通过。版本化计划执行与 hooks、手动 compact 独立 owner、tool_search、全入口 live revision 防回退及剩余物理 crate 提取**未实现**。按 Wave 的实际状态、owner 变化、迁移、测试和风险见 [最新实施记录](./changes/runtime-readback-fences.md) 与 [ADR 0002](./adr/0002-readback-and-lifecycle-fences.md)。下文 P 阶段和早期 change doc 保留为历史，以本段及最新 known-issues 为准。
+当前 schema v20。早期恢复读取/协议/lifetime 屏障纵切保持；版本化计划支持定义身份/摘要、精确执行/废弃和重启待明确继续。16 类受治理 hooks、publication outbox、分页审计与有界 Stop continuation 已闭合；独立 compact 复用准入/writer，先持久 Started 再后台摘要，receipt/projection/native terminal 同事务，精确取消和 unknown 重启不重放。详情见 [ADR 0003](./adr/0003-governed-runtime-controls.md)、[计划 API](./plan-control-api.md)、[Hook API](./hooks-api.md)、[Compact API](./compact-control-api.md) 、[工具发现 API](./tool-discovery-api.md) 与 [最新实施记录](./changes/governed-runtime-controls.md)。
+
+新的八波任务已完成 Wave 1–8 的实现与本地门禁。冻结工具发现、全入口共享 reducer、完整 Provider 请求 capture/只读重建、opt-in ACP v2 与有界 stdio 均已闭合；runtime、daemon、sandbox、CLI/TUI、ACP、Gateway/Web 已依次迁入真实 crate，旧模块与 facade 删除。当前 workspace 为根 binary 加 13 个库，SQLite 仍是唯一持久事实源，schema 保持 v20。最终 379 项 Rust（含 31 项真实 daemon 合同、12 项架构检查）和 36 项 Web 通过；详见 [最终报告](./changes/governed-runtime-final-report.md) 与 [物理 crate 边界](./runtime-crates.md)。下文 P 阶段及旧 change document 保留为各自日期的历史，不代表当前待实现范围。
 
 ## 阶段与状态
 

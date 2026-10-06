@@ -63,6 +63,21 @@ pub fn normalize_request(mut request: JsonRpcRequest) -> Result<JsonRpcRequest, 
         };
     }
     match request.method.as_str() {
+        "context.readback" => check!(
+            ContextReadParams,
+            "session_id",
+            "expected_lifetime",
+            "run_id",
+            "capture_id",
+            "local_diagnostics"
+        ),
+        "hooks.readback" => check!(
+            HookReadParams,
+            "session_id",
+            "expected_lifetime",
+            "after_cursor",
+            "limit"
+        ),
         "connection.initialize" => {
             check!(crate::InitializeParams, "protocol_versions", "capabilities");
             let offer: crate::InitializeParams = serde_json::from_value(request.params.clone())?;
@@ -75,7 +90,9 @@ pub fn normalize_request(mut request: JsonRpcRequest) -> Result<JsonRpcRequest, 
             "admission_mode",
             "context_read_only",
             "sandbox",
-            "expected_lifetime"
+            "expected_lifetime",
+            "plan_execution",
+            "entry_channel"
         ),
         "artifacts.read" => check!(
             ArtifactReadParams,
@@ -123,6 +140,13 @@ pub fn normalize_request(mut request: JsonRpcRequest) -> Result<JsonRpcRequest, 
             "memory_id",
             "revision"
         ),
+        "sessions.plan.readback" => check!(PlanReadParams, "session_id"),
+        "sessions.plan.discard" => check!(
+            PlanDiscardParams,
+            "session_id",
+            "expected_lifetime",
+            "identity"
+        ),
         "runtime.doctor" => check!(EmptyParams,),
         "memory.feedback" => check!(
             MemoryFeedbackParams,
@@ -140,6 +164,15 @@ pub fn normalize_request(mut request: JsonRpcRequest) -> Result<JsonRpcRequest, 
             "after_source",
             "limit"
         ),
+        "compact.start" => check!(
+            CompactStartParams,
+            "session_id",
+            "expected_lifetime",
+            "operation_id",
+            "expected_revision",
+            "expected_projection_generation",
+            "entry_channel"
+        ),
         "session.compact" => check!(
             SessionCompactParams,
             "session_id",
@@ -148,7 +181,7 @@ pub fn normalize_request(mut request: JsonRpcRequest) -> Result<JsonRpcRequest, 
             "expected_revision"
         ),
         "session.new" => check!(SessionCreateParams, "session_id", "operation_id"),
-        "session.delete" | "session.clear" => {
+        "session.delete" | "session.clear" | "session.close" => {
             check!(
                 SessionEndParams,
                 "session_id",
@@ -215,7 +248,13 @@ pub fn normalize_request(mut request: JsonRpcRequest) -> Result<JsonRpcRequest, 
             check!(SessionPageParams, "session_id", "offset", "limit")
         }
         "agent.subscribe" => check!(SubscribeParams, "request_id", "session_id", "after_seq"),
-        "agent.cancel" => check!(CancelParams, "request_id", "run_id", "session_id"),
+        "agent.cancel" => check!(
+            CancelParams,
+            "request_id",
+            "run_id",
+            "session_id",
+            "exact_owner"
+        ),
         "approval.respond" | "interaction.respond" | "interaction.reject" => check!(
             ApprovalRespondParams,
             "approval_id",
@@ -223,10 +262,12 @@ pub fn normalize_request(mut request: JsonRpcRequest) -> Result<JsonRpcRequest, 
             "approved",
             "session_id",
             "owner_run_id",
-            "revision"
+            "revision",
+            "exact_owner"
         ),
         "interaction.read" => check!(InteractionReadParams, "interaction_id"),
-        "run.read" | "run.tools" | "run.audit" | "run.provider_attempts" => {
+        "views.reduce" => check!(ViewReduceParams, "state", "input"),
+        "run.read" | "run.discovery" | "run.tools" | "run.audit" | "run.provider_attempts" => {
             check!(RunReadParams, "run_id")
         }
         "run.events" => check!(RunEventsParams, "run_id", "after_seq", "limit"),
@@ -280,7 +321,7 @@ pub fn normalize_request(mut request: JsonRpcRequest) -> Result<JsonRpcRequest, 
                 check!(ModelSaveParams<Value>, "profile", "activate");
             }
         }
-        "slash.execute" => check!(SlashExecuteParams, "line", "session_id"),
+        "slash.execute" => check!(SlashExecuteParams, "line", "session_id", "entry_channel"),
         "session.list" => {
             if !strict && request.params.is_null() {
                 request.params = serde_json::json!({});
@@ -294,6 +335,35 @@ pub fn normalize_request(mut request: JsonRpcRequest) -> Result<JsonRpcRequest, 
             check!(EmptyParams,);
         }
         _ => {}
+    }
+    if request.method == "chat.send" {
+        let mut params: ChatSendParams = serde_json::from_value(request.params.clone())?;
+        let words = params.message.split_whitespace().collect::<Vec<_>>();
+        if words.first() == Some(&"/plan") && words.get(1) == Some(&"execute") {
+            if words.len() != 7
+                || params.session_id.is_none()
+                || params.plan_execution.is_some()
+                || params.expected_lifetime.is_some()
+            {
+                return Err(ProtocolError::InvalidParams("用法：/plan execute <lifetime> <plan_id> <revision> <digest> <operation_id>；必须指定 session".into()));
+            }
+            let identity = agent_core::PlanExecution {
+                plan_id: words[3].into(),
+                revision: words[4]
+                    .parse()
+                    .map_err(|_| ProtocolError::InvalidParams("plan revision 无效".into()))?,
+                content_digest: words[5].into(),
+                operation_id: words[6].into(),
+            };
+            params.expected_lifetime = Some(agent_core::SessionLifetimeId(words[2].into()));
+            params.message = format!(
+                "执行已确认计划 {} 版本 {} 摘要 {}。",
+                identity.plan_id, identity.revision, identity.content_digest
+            );
+            params.plan_execution = Some(identity);
+            params.admission_mode = Some("reject_if_busy".into());
+            request.params = serde_json::to_value(params)?;
+        }
     }
     Ok(request)
 }

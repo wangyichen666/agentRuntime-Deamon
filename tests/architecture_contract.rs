@@ -2,17 +2,34 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use syn::parse::Parser;
 use syn::visit::{self, Visit};
 use syn::{Attribute, Item, ItemStruct, UseTree};
 
 fn test_only(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|attr| {
-        attr.path().is_ident("test")
-            || (attr.path().is_ident("cfg")
-                && attr
-                    .parse_args::<syn::Path>()
-                    .is_ok_and(|path| path.is_ident("test")))
+        if attr.path().is_ident("test") { return true; }
+        if !attr.path().is_ident("cfg") { return false; }
+        match attr.parse_args::<syn::Meta>() {
+            Ok(syn::Meta::Path(path)) => path.is_ident("test"),
+            Ok(syn::Meta::List(list)) if list.path.is_ident("any") => {
+                let Ok(parts) = syn::punctuated::Punctuated::<syn::Meta,syn::Token![,]>::parse_terminated.parse2(list.tokens) else { return false; };
+                parts.len() == 2 && parts.iter().any(|part| matches!(part,syn::Meta::Path(path) if path.is_ident("test"))) && parts.iter().any(|part| matches!(part,syn::Meta::NameValue(value) if value.path.is_ident("feature") && matches!(&value.value,syn::Expr::Lit(lit) if matches!(&lit.lit,syn::Lit::Str(name) if name.value()=="test-support"))))
+            }
+            _ => false,
+        }
     })
+}
+fn entry_files(root: &Path) -> Vec<PathBuf> {
+    ["cli", "acp", "gateway", "entry-support"]
+        .into_iter()
+        .flat_map(|name| rust_files(&root.join(format!("crates/{name}/src"))))
+        .collect()
+}
+fn implementation_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = rust_files(&root.join("src"));
+    files.extend(rust_files(&root.join("crates")));
+    files
 }
 
 #[derive(Default)]
@@ -49,6 +66,18 @@ fn use_paths(tree: &UseTree, prefix: &[String], output: &mut Vec<Vec<String>>) {
 }
 
 impl<'ast> Visit<'ast> for Production {
+    fn visit_file(&mut self, file: &'ast syn::File) {
+        if !test_only(&file.attrs) {
+            visit::visit_file(self, file);
+        }
+    }
+
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        if !test_only(&item.attrs) {
+            visit::visit_impl_item_fn(self, item);
+        }
+    }
+
     fn visit_item(&mut self, item: &'ast Item) {
         let attrs: &[Attribute] = match item {
             Item::Mod(i) => &i.attrs,
@@ -127,8 +156,12 @@ fn rust_files(directory: &Path) -> Vec<PathBuf> {
 
 fn has_edge(facts: &Production, module: &str) -> bool {
     facts.paths.iter().any(|path| {
-        path.first().is_some_and(|head| head == "crate")
-            && path.get(1).is_some_and(|target| target == module)
+        (path.first().is_some_and(|head| head == "crate")
+            && path.get(1).is_some_and(|target| target == module))
+            || path.first().is_some_and(|head| {
+                head == &format!("agent_{module}")
+                    || (module == "loop_engine" && head == "agent_runtime")
+            })
     })
 }
 
@@ -151,7 +184,7 @@ fn private_context_state(facts: &Production) -> Vec<String> {
 #[test]
 fn entries_cannot_import_storage_runtime_or_session_concrete_types() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    for file in rust_files(&root.join("src/entry")) {
+    for file in entry_files(root) {
         let facts = production(&std::fs::read_to_string(&file).unwrap());
         for forbidden in [
             "storage",
@@ -175,9 +208,10 @@ fn entries_cannot_import_storage_runtime_or_session_concrete_types() {
 
 #[test]
 fn context_has_no_private_session_map_or_message_history() {
-    let source =
-        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/context.rs"))
-            .unwrap();
+    let source = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/runtime/src/context.rs"),
+    )
+    .unwrap();
     let facts = production(&source);
     assert!(private_context_state(&facts).is_empty());
     for forbidden in ["daemon", "entry", "storage", "session", "memory"] {
@@ -191,8 +225,8 @@ fn context_has_no_private_session_map_or_message_history() {
 #[test]
 fn provider_cannot_import_tool_business_or_control_plane() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut files = rust_files(&root.join("src/provider"));
-    files.push(root.join("src/provider.rs"));
+    let mut files = rust_files(&root.join("crates/runtime/src/provider"));
+    files.push(root.join("crates/runtime/src/provider.rs"));
     // wire_tests.rs 为 #[cfg(test)] 外部模块，只有测试 fixture。
     files.retain(|path| path.file_name().is_none_or(|name| name != "wire_tests.rs"));
     for file in files {
@@ -213,7 +247,7 @@ fn provider_cannot_import_tool_business_or_control_plane() {
 fn long_lived_mutable_transcript_owner_cannot_multiply() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut owners = BTreeSet::new();
-    for file in rust_files(&root.join("src")) {
+    for file in implementation_files(root) {
         let facts = production(&std::fs::read_to_string(&file).unwrap());
         for (owner, field, types) in &facts.fields {
             if types.contains("Message")
@@ -261,6 +295,186 @@ fn storage_cannot_depend_on_daemon_or_entry_control_owners() {
 #[test]
 fn workspace_libraries_have_only_allowed_dependency_edges() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for (name, allowed) in [
+        (
+            "sandbox",
+            vec![
+                "agent-core",
+                "anyhow",
+                "async-trait",
+                "serde",
+                "tokio",
+                "rustix",
+                "tracing",
+            ],
+        ),
+        (
+            "runtime",
+            vec![
+                "agent-core",
+                "agent-context",
+                "agent-memory",
+                "agent-storage",
+                "agent-sandbox",
+                "agent-daemon-protocol",
+                "anyhow",
+                "async-trait",
+                "base64",
+                "chrono",
+                "cron",
+                "futures-util",
+                "lopdf",
+                "libc",
+                "reqwest",
+                "rusqlite",
+                "serde",
+                "serde_json",
+                "sha2",
+                "serde_yaml_ng",
+                "semver",
+                "thiserror",
+                "tokio",
+                "tracing",
+                "jsonschema",
+                "rustix",
+            ],
+        ),
+        (
+            "daemon",
+            vec![
+                "agent-runtime",
+                "agent-sandbox",
+                "agent-storage",
+                "agent-core",
+                "agent-daemon-protocol",
+                "agent-context",
+                "agent-memory",
+                "agent-daemon-client",
+                "anyhow",
+                "async-trait",
+                "base64",
+                "thiserror",
+                "serde",
+                "serde_json",
+                "sha2",
+                "tokio",
+                "tracing",
+            ],
+        ),
+        (
+            "entry-support",
+            vec![
+                "agent-daemon-client",
+                "agent-daemon-protocol",
+                "anyhow",
+                "serde",
+                "serde_json",
+                "reqwest",
+                "tokio",
+            ],
+        ),
+        (
+            "cli",
+            vec![
+                "agent-core",
+                "agent-daemon-client",
+                "agent-daemon-protocol",
+                "agent-entry-support",
+                "anyhow",
+                "clap",
+                "async-trait",
+                "tracing",
+                "futures-util",
+                "serde_json",
+                "serde",
+                "chrono",
+                "crossterm",
+                "ratatui",
+                "unicode-width",
+                "unicode-segmentation",
+                "tokio",
+            ],
+        ),
+        (
+            "acp",
+            vec![
+                "agent-core",
+                "agent-daemon-client",
+                "agent-daemon-protocol",
+                "agent-entry-support",
+                "agent-client-protocol",
+                "anyhow",
+                "serde",
+                "serde_json",
+                "sha2",
+                "futures-util",
+                "tokio",
+                "tracing",
+            ],
+        ),
+        (
+            "gateway",
+            vec![
+                "agent-core",
+                "agent-daemon-client",
+                "agent-daemon-protocol",
+                "agent-entry-support",
+                "anyhow",
+                "async-trait",
+                "axum",
+                "futures-util",
+                "serde",
+                "serde_json",
+                "tokio",
+                "tracing",
+            ],
+        ),
+    ] {
+        let manifest: toml::Value = toml::from_str(
+            &std::fs::read_to_string(root.join(format!("crates/{name}/Cargo.toml"))).unwrap(),
+        )
+        .unwrap();
+        for table in ["dependencies", "build-dependencies"] {
+            for dependency in manifest
+                .get(table)
+                .and_then(toml::Value::as_table)
+                .into_iter()
+                .flat_map(|table| table.keys())
+            {
+                assert!(
+                    allowed.contains(&dependency.as_str()),
+                    "{name} 禁止依赖 {dependency}"
+                );
+            }
+        }
+        if name == "runtime" {
+            let targets = manifest["target"].as_table().unwrap();
+            assert_eq!(targets.len(), 1);
+            let deps = targets["cfg(target_os = \"macos\")"]["dependencies"]
+                .as_table()
+                .unwrap();
+            assert_eq!(deps.len(), 1);
+            assert!(deps.contains_key("keyring"));
+        } else {
+            assert!(
+                manifest.get("target").is_none(),
+                "新增条件依赖必须纳入架构检查"
+            );
+        }
+        if name == "daemon" {
+            assert_eq!(
+                manifest["dependencies"]["agent-daemon-client"]["optional"].as_bool(),
+                Some(true)
+            );
+            assert!(
+                manifest["features"]["test-support"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|v| v.as_str() == Some("dep:agent-daemon-client"))
+            );
+        }
+    }
     for (name, allowed) in [
         ("core", vec!["serde", "serde_json", "thiserror"]),
         // JSON 仅用于有界证据渲染；不允许依赖 storage/context/daemon。
@@ -322,12 +536,7 @@ fn compatibility_facade_does_not_redefine_protocol_or_domain_types() {
         "src/client.rs",
         "src/storage/mod.rs",
     ] {
-        let source = std::fs::read_to_string(root.join(facade)).unwrap();
-        let parsed = syn::parse_file(&source).unwrap();
-        assert!(
-            parsed.items.iter().all(|item| matches!(item, Item::Use(_))),
-            "{facade} 不能保留平行实现"
-        );
+        assert!(!root.join(facade).exists(), "旧 facade {facade} 必须删除");
     }
     let ids = [
         "SessionKey",
@@ -348,7 +557,10 @@ fn compatibility_facade_does_not_redefine_protocol_or_domain_types() {
         "SessionStatus",
         "RunStatus",
     ];
-    for file in rust_files(&root.join("src")) {
+    for file in implementation_files(root) {
+        if file.starts_with(root.join("crates/core")) {
+            continue;
+        }
         let facts = production(&std::fs::read_to_string(&file).unwrap());
         for id in ids {
             assert!(
@@ -385,17 +597,40 @@ fn checker_detects_grouped_aliased_and_fully_qualified_imports() {
 #[derive(Default)]
 struct ForbiddenLibraryOperations(Vec<String>);
 impl<'ast> Visit<'ast> for ForbiddenLibraryOperations {
+    fn visit_file(&mut self, file: &'ast syn::File) {
+        if !test_only(&file.attrs) {
+            visit::visit_file(self, file);
+        }
+    }
+
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        if !test_only(&item.attrs) {
+            visit::visit_impl_item_fn(self, item);
+        }
+    }
+
     fn visit_item(&mut self, item: &'ast Item) {
         // 使用相同的生产分支排除规则；不能因测试 fixture 触发库规则。
         let attrs: &[Attribute] = match item {
             Item::Mod(i) => &i.attrs,
             Item::Fn(i) => &i.attrs,
             Item::Impl(i) => &i.attrs,
+            Item::Use(i) => &i.attrs,
             _ => &[],
         };
         if !test_only(attrs) {
             visit::visit_item(self, item);
         }
+    }
+    fn visit_expr_unsafe(&mut self, expr: &'ast syn::ExprUnsafe) {
+        self.0.push("unsafe".into());
+        visit::visit_expr_unsafe(self, expr);
+    }
+    fn visit_signature(&mut self, signature: &'ast syn::Signature) {
+        if signature.unsafety.is_some() {
+            self.0.push("unsafe fn".into());
+        }
+        visit::visit_signature(self, signature);
     }
     fn visit_expr_method_call(&mut self, expr: &'ast syn::ExprMethodCall) {
         if expr.method == "unwrap" || expr.method == "expect" {
@@ -447,4 +682,54 @@ fn extracted_context_cannot_acquire_session_or_storage_owners() {
             );
         }
     }
+}
+
+#[test]
+fn physical_runtime_and_adapter_crates_have_real_implementations() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for (name, implementation) in [
+        ("sandbox", "lib.rs"),
+        ("runtime", "loop_engine.rs"),
+        ("daemon", "handlers.rs"),
+        ("entry-support", "web.rs"),
+        ("cli", "cli.rs"),
+        ("acp", "editor_v2.rs"),
+        ("gateway", "serve.rs"),
+    ] {
+        assert!(
+            root.join(format!("crates/{name}/Cargo.toml")).is_file(),
+            "缺少真实 {name} crate"
+        );
+        let source =
+            std::fs::read_to_string(root.join(format!("crates/{name}/src/{implementation}")))
+                .unwrap();
+        assert!(source.len() > 2_000, "{name} 不得是 facade 或未接线骨架");
+    }
+}
+
+#[test]
+fn root_is_composition_only_and_test_support_is_not_a_production_bypass() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let files = rust_files(&root.join("src"));
+    assert_eq!(files.len(), 2);
+    assert!(
+        files.iter().all(
+            |p| ["main.rs", "bootstrap.rs"].contains(&p.file_name().unwrap().to_str().unwrap())
+        )
+    );
+    let main = std::fs::read_to_string(root.join("src/main.rs")).unwrap();
+    assert!(main.lines().count() < 40);
+    assert!(!main.contains("struct Cli"));
+    let unsafe_source = "fn f() { unsafe { f(); } } unsafe fn g() {}";
+    let mut operations = ForbiddenLibraryOperations::default();
+    operations.visit_file(&syn::parse_file(unsafe_source).unwrap());
+    assert_eq!(operations.0, ["unsafe", "unsafe fn"]);
+    let facts = production(
+        "#[cfg(any(test, target_os=\"linux\"))] fn f() { agent_storage::RunStore::open(); } #[cfg(any(test, feature=\"test-support\"))] fn fixture() { agent_storage::RunStore::open(); }",
+    );
+    assert!(has_edge(&facts, "storage"));
+    let fixture = production(
+        "#[cfg(any(test, feature=\"test-support\"))] fn fixture() { agent_storage::RunStore::open(); }",
+    );
+    assert!(!has_edge(&fixture, "storage"));
 }

@@ -33,6 +33,10 @@ pub enum SessionCommand {
         key: SessionKey,
         delete: bool,
     },
+    /// 结算工作并释放 runtime；保留 canonical history/lifetime。
+    Close {
+        key: SessionKey,
+    },
     Fork {
         source: SessionKey,
         target: SessionKey,
@@ -69,8 +73,13 @@ pub struct SessionReadback {
     pub history_mode: HistoryReadMode,
     pub omitted: Vec<String>,
     pub messages: Vec<Message>,
+    /// 由 canonical batch 的原生 turn/seq 派生；不额外保存历史。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub message_ids: Vec<String>,
     pub batch_ranges: Vec<(u64, u64)>,
     pub active_owner: Option<crate::ExactOwner>,
+    #[serde(default)]
+    pub run_owners: Vec<crate::ExactOwner>,
     pub active_runs: Vec<crate::RunRecord>,
     pub queue_rows: Vec<crate::QueuedMessage>,
     pub queue_cursor: Option<i64>,
@@ -84,10 +93,19 @@ pub struct SessionReadback {
 impl SessionReadback {
     /// 相同 session 的旧读回不能覆盖更晚的 durable/live 投影。
     pub fn supersedes(&self, current: &Self) -> bool {
-        self.session_id == current.session_id
-            && (self.snapshot_revision > current.snapshot_revision
-                || (self.snapshot_revision == current.snapshot_revision
-                    && self.session_lifetime_id == current.session_lifetime_id
-                    && self.projection_generation >= current.projection_generation))
+        let baseline = crate::reduce_view(
+            None,
+            crate::ViewInput::Readback {
+                snapshot: Box::new(current.clone()),
+            },
+        );
+        crate::reduce_view(
+            baseline.state,
+            crate::ViewInput::Readback {
+                snapshot: Box::new(self.clone()),
+            },
+        )
+        .decision
+            == crate::ViewDecision::Accepted
     }
 }

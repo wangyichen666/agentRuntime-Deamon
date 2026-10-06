@@ -102,7 +102,7 @@ impl ResourceRepository for RunStore {
             &serde_json::json!({"resource_id":id,"state":state,"evidence":evidence,"kill_sent":false}),
         )?;
         let record = read_in(&tx, id)?;
-        tx.commit()?;
+        super::views::commit(tx)?;
         Ok(record)
     }
     fn create_resource(
@@ -133,7 +133,7 @@ impl ResourceRepository for RunStore {
         }
         tx.execute("INSERT INTO resources(run_id,lifetime,state,owner_json,cwd,requested,effective,updated_at_ms) VALUES(?1,?2,'starting',?3,?4,?5,?6,?7)",params![owner.run_id.0,owner.session_lifetime_id.0,serde_json::to_string(owner).map_err(|e|RuntimeError::Protocol(e.to_string()))?,cwd,requested,effective,super::now_ms()])?;
         let record = read_in(&tx, ResourceId(tx.last_insert_rowid() as u64))?;
-        tx.commit()?;
+        super::views::commit(tx)?;
         Ok(record)
     }
     fn read_resource(&self, id: ResourceId) -> Result<ResourceRecord, RuntimeError> {
@@ -193,7 +193,7 @@ impl ResourceRepository for RunStore {
             "resource_updated",
             &serde_json::json!({"resource_id":id,"state":state}),
         )?;
-        tx.commit()?;
+        super::views::commit(tx)?;
         Ok(record)
     }
     fn append_resource_log(
@@ -237,7 +237,7 @@ impl ResourceRepository for RunStore {
             "UPDATE resources SET log_cursor=?2 WHERE id=?1",
             params![id.0, next],
         )?;
-        tx.commit()?;
+        super::views::commit(tx)?;
         Ok(next)
     }
     fn resource_logs(

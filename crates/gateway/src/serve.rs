@@ -1,0 +1,1731 @@
+use crate::host::GatewayHost;
+use std::collections::HashMap;
+use std::convert::Infallible;
+use std::io::Write;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::{Context, Result};
+use axum::extract::ws::{Message as WebSocketMessage, WebSocket, WebSocketUpgrade};
+use axum::extract::{Query, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::sse::{Event, KeepAlive};
+use axum::response::{IntoResponse, Response, Sse};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use futures_util::stream::{self, Stream};
+use futures_util::{SinkExt, StreamExt};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use tokio::sync::{Mutex, mpsc};
+use tokio::task::JoinSet;
+
+use agent_daemon_client::{DaemonClient, RpcStream};
+use agent_daemon_protocol::{
+    EventKind, JsonRpcRequest, JsonRpcResponse, MAX_FRAME_BYTES, RequestId, ServerFrame,
+    decode_request,
+};
+use agent_entry_support::recovery;
+
+#[derive(Clone)]
+struct ApiState {
+    workspaces: WorkspaceRouter,
+    model: String,
+    bearer_token: Option<String>,
+    workspace: PathBuf,
+}
+
+#[derive(Clone)]
+struct WorkspaceRouter {
+    default_workspace: PathBuf,
+    clients: Arc<Mutex<HashMap<PathBuf, DaemonClient>>>,
+    host: Arc<dyn GatewayHost>,
+}
+
+impl ApiState {
+    fn active_model(&self) -> String {
+        self.workspaces.host.active_model(&self.model)
+    }
+}
+
+impl WorkspaceRouter {
+    #[cfg(test)]
+    fn new(default_workspace: PathBuf, default_client: DaemonClient) -> Self {
+        Self::with_optional(
+            default_workspace,
+            Some(default_client.clone()),
+            Arc::new(TestHost(default_client)),
+        )
+    }
+
+    fn with_optional(
+        default_workspace: PathBuf,
+        default_client: Option<DaemonClient>,
+        host: Arc<dyn GatewayHost>,
+    ) -> Self {
+        let mut clients = HashMap::new();
+        if let Some(default_client) = default_client {
+            clients.insert(default_workspace.clone(), default_client);
+        }
+        Self {
+            default_workspace,
+            host,
+            clients: Arc::new(Mutex::new(clients)),
+        }
+    }
+
+    async fn client_for(&self, requested: Option<&Path>) -> Result<(PathBuf, DaemonClient)> {
+        let requested = requested.unwrap_or(&self.default_workspace);
+        let candidate = if requested.is_absolute() {
+            requested.to_path_buf()
+        } else {
+            self.default_workspace.join(requested)
+        };
+        let workspace = canonical_directory(&candidate)?;
+        let cached = self.clients.lock().await.get(&workspace).cloned();
+        if let Some(client) = cached
+            && agent_entry_support::rpc::request_result(&client, "session.list", json!({}))
+                .await
+                .is_ok()
+        {
+            return Ok((workspace, client.protocol_adapter()));
+        }
+
+        self.clients.lock().await.remove(&workspace);
+        let client = self.host.connect_workspace(&workspace).await?;
+        self.clients
+            .lock()
+            .await
+            .insert(workspace.clone(), client.clone());
+        Ok((workspace, client.protocol_adapter()))
+    }
+}
+
+const WEB_INDEX: &str = include_str!("../../../web/index.html");
+const WEB_APP: &str = include_str!("../../../web/app.js");
+const WEB_STYLES: &str = include_str!("../../../web/styles.css");
+
+#[derive(Deserialize)]
+struct ChatCompletionRequest {
+    model: Option<String>,
+    messages: Vec<OpenAiMessage>,
+    #[serde(default)]
+    stream: bool,
+}
+
+#[derive(Deserialize)]
+struct OpenAiMessage {
+    role: String,
+    content: Value,
+}
+
+#[derive(Deserialize)]
+struct WebSocketConnect {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    token: Option<String>,
+    #[serde(default)]
+    workspace: Option<PathBuf>,
+}
+
+#[derive(Deserialize)]
+struct DirectoryQuery {
+    path: Option<PathBuf>,
+}
+
+#[derive(Deserialize)]
+struct ModelSaveRequest {
+    profile: Value,
+    #[serde(default)]
+    activate: bool,
+    #[serde(default)]
+    workspace: Option<PathBuf>,
+}
+
+#[derive(Deserialize)]
+struct ModelUseRequest {
+    profile_id: String,
+    #[serde(default)]
+    workspace: Option<PathBuf>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlanReadQuery {
+    session_id: String,
+    workspace: Option<PathBuf>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HookReadQuery {
+    session_id: String,
+    expected_lifetime: agent_core::SessionLifetimeId,
+    workspace: Option<PathBuf>,
+    #[serde(default)]
+    after_cursor: u64,
+    #[serde(default = "hook_read_limit")]
+    limit: usize,
+}
+fn hook_read_limit() -> usize {
+    32
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HttpPlanRequest<P> {
+    workspace: Option<PathBuf>,
+    params: P,
+}
+
+#[allow(dead_code)]
+pub async fn run_http_server(
+    client: DaemonClient,
+    address: SocketAddr,
+    model: String,
+    bearer_token: Option<String>,
+    workspace: PathBuf,
+    host: Arc<dyn GatewayHost>,
+) -> Result<()> {
+    run_http_server_optional(Some(client), address, model, bearer_token, workspace, host).await
+}
+
+pub async fn run_http_server_optional(
+    client: Option<DaemonClient>,
+    address: SocketAddr,
+    model: String,
+    bearer_token: Option<String>,
+    workspace: PathBuf,
+    host: Arc<dyn GatewayHost>,
+) -> Result<()> {
+    let workspaces = WorkspaceRouter::with_optional(workspace.clone(), client, host);
+    let state = ApiState {
+        workspaces,
+        model,
+        bearer_token,
+        workspace,
+    };
+    let app = api_router(state);
+    let listener = tokio::net::TcpListener::bind(address)
+        .await
+        .with_context(|| format!("监听本地 API 失败: {address}"))?;
+    writeln!(
+        std::io::stdout().lock(),
+        "my-agent 本地 API 正在监听 http://{address}"
+    )?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await
+        .context("本地 API 服务异常退出")
+}
+
+fn api_router(state: ApiState) -> Router {
+    Router::new()
+        .route("/", get(web_index))
+        .route("/app.js", get(web_app))
+        .route("/styles.css", get(web_styles))
+        .route("/health", get(health))
+        .route("/api/directories", get(list_directories))
+        .route("/api/models", get(list_models).post(save_models))
+        .route("/api/models/activate", post(activate_model))
+        .route("/api/plans/readback", get(plan_readback))
+        .route("/api/hooks/readback", get(hook_readback))
+        .route("/api/context/readback", post(context_readback))
+        .route("/api/compact/start", post(compact_start))
+        .route("/api/plans/discard", post(plan_discard))
+        .route("/api/plans/execute", post(plan_execute))
+        .route("/v1/chat/completions", post(chat_completions))
+        .route("/ws", get(websocket_upgrade))
+        .with_state(state)
+}
+
+async fn web_index() -> Response {
+    static_asset("text/html; charset=utf-8", WEB_INDEX)
+}
+
+async fn hook_readback(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(query): Query<HookReadQuery>,
+) -> Response {
+    plan_rpc(&state,&headers,query.workspace.as_deref(),"hooks.readback",serde_json::json!({"session_id":query.session_id,"expected_lifetime":query.expected_lifetime,"after_cursor":query.after_cursor,"limit":query.limit})).await
+}
+
+async fn context_readback(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<HttpPlanRequest<agent_daemon_protocol::params::ContextReadParams>>,
+) -> Response {
+    let params = match serde_json::to_value(request.params) {
+        Ok(params) => params,
+        Err(error) => return api_error(StatusCode::BAD_REQUEST, error.to_string()),
+    };
+    plan_rpc(
+        &state,
+        &headers,
+        request.workspace.as_deref(),
+        "context.readback",
+        params,
+    )
+    .await
+}
+
+async fn compact_start(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(mut request): Json<HttpPlanRequest<agent_daemon_protocol::params::CompactStartParams>>,
+) -> Response {
+    request.params.entry_channel = agent_core::HookChannel::Http;
+    let params = match serde_json::to_value(request.params) {
+        Ok(params) => params,
+        Err(error) => return api_error(StatusCode::BAD_REQUEST, error.to_string()),
+    };
+    plan_rpc(
+        &state,
+        &headers,
+        request.workspace.as_deref(),
+        "compact.start",
+        params,
+    )
+    .await
+}
+
+async fn plan_readback(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(query): Query<PlanReadQuery>,
+) -> Response {
+    plan_rpc(
+        &state,
+        &headers,
+        query.workspace.as_deref(),
+        "sessions.plan.readback",
+        json!({"session_id":query.session_id}),
+    )
+    .await
+}
+
+async fn plan_discard(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<HttpPlanRequest<agent_daemon_protocol::params::PlanDiscardParams>>,
+) -> Response {
+    let params = match serde_json::to_value(request.params) {
+        Ok(params) => params,
+        Err(error) => return api_error(StatusCode::BAD_REQUEST, error.to_string()),
+    };
+    plan_rpc(
+        &state,
+        &headers,
+        request.workspace.as_deref(),
+        "sessions.plan.discard",
+        params,
+    )
+    .await
+}
+
+async fn plan_execute(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<HttpPlanRequest<agent_daemon_protocol::params::ChatSendParams>>,
+) -> Response {
+    if request.params.plan_execution.is_none() {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "计划执行必须携带 plan_execution 身份",
+        );
+    }
+    let mut params = match serde_json::to_value(request.params) {
+        Ok(params) => params,
+        Err(error) => return api_error(StatusCode::BAD_REQUEST, error.to_string()),
+    };
+    params["entry_channel"] = json!("http");
+    plan_rpc(
+        &state,
+        &headers,
+        request.workspace.as_deref(),
+        "chat.send",
+        params,
+    )
+    .await
+}
+
+async fn plan_rpc(
+    state: &ApiState,
+    headers: &HeaderMap,
+    workspace: Option<&Path>,
+    method: &str,
+    params: Value,
+) -> Response {
+    if !is_authorized(headers, state.bearer_token.as_deref()) {
+        return api_error(StatusCode::UNAUTHORIZED, "Bearer Token 无效或缺失");
+    }
+    let (_, client) = match state.workspaces.client_for(workspace).await {
+        Ok(connection) => connection,
+        Err(error) => return api_error(StatusCode::BAD_GATEWAY, format!("{error:#}")),
+    };
+    let mut stream = match client.request(method, params).await {
+        Ok(stream) => stream,
+        Err(error) => return api_error(StatusCode::BAD_REQUEST, format!("{error:#}")),
+    };
+    while let Some(frame) = stream.next().await {
+        match frame {
+            ServerFrame::Event(event) if event.event == EventKind::ApprovalRequired => {
+                if let Err(error) = deny_approval(&client, &event.data).await {
+                    return api_error(StatusCode::CONFLICT, error);
+                }
+            }
+            ServerFrame::Event(_) => {}
+            ServerFrame::Response(response) => {
+                if let Some(error) = response.error {
+                    return api_error(
+                        StatusCode::CONFLICT,
+                        format!("daemon RPC {}: {}", error.code, error.message),
+                    );
+                }
+                return match response.result {
+                    Some(result) => Json(result).into_response(),
+                    None => api_error(StatusCode::BAD_GATEWAY, "daemon response 缺少 result"),
+                };
+            }
+        }
+    }
+    api_error(StatusCode::BAD_GATEWAY, "daemon 在终态响应前断开")
+}
+
+async fn web_app() -> Response {
+    static_asset("text/javascript; charset=utf-8", WEB_APP)
+}
+
+async fn web_styles() -> Response {
+    static_asset("text/css; charset=utf-8", WEB_STYLES)
+}
+
+fn static_asset(content_type: &'static str, body: &'static str) -> Response {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, content_type),
+            (axum::http::header::CACHE_CONTROL, "no-cache"),
+            (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+fn canonical_directory(path: &Path) -> Result<PathBuf> {
+    let path = std::fs::canonicalize(path)
+        .with_context(|| format!("无法解析工作目录: {}", path.display()))?;
+    if !path.is_dir() {
+        anyhow::bail!("工作目录不是文件夹: {}", path.display());
+    }
+    Ok(path)
+}
+
+async fn directory_listing(requested: Option<&Path>, default: &Path) -> Result<Value> {
+    let requested = requested.unwrap_or(default);
+    let candidate = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        default.join(requested)
+    };
+    let path = canonical_directory(&candidate)?;
+    let mut reader = tokio::fs::read_dir(&path)
+        .await
+        .with_context(|| format!("无法读取目录: {}", path.display()))?;
+    let mut directories = Vec::new();
+    while let Some(entry) = reader.next_entry().await? {
+        let metadata = match entry.metadata().await {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        if !metadata.is_dir() {
+            continue;
+        }
+        directories.push(json!({
+            "name": entry.file_name().to_string_lossy(),
+            "path": entry.path(),
+        }));
+        if directories.len() >= 1_000 {
+            break;
+        }
+    }
+    directories.sort_by(|left, right| {
+        left["name"]
+            .as_str()
+            .unwrap_or_default()
+            .to_lowercase()
+            .cmp(&right["name"].as_str().unwrap_or_default().to_lowercase())
+    });
+
+    let mut favorites = vec![default.to_path_buf()];
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .and_then(|home| canonical_directory(&home).ok());
+    if let Some(home) = home
+        && !favorites.contains(&home)
+    {
+        favorites.push(home);
+    }
+    let parent = path.parent().map(Path::to_path_buf);
+    Ok(json!({
+        "path": path,
+        "parent": parent,
+        "directories": directories,
+        "favorites": favorites,
+    }))
+}
+
+fn websocket_origin_allowed(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return true;
+    };
+    let Some(host) = headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    let origin_host = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+        .and_then(|value| value.split('/').next());
+    origin_host.is_some_and(|origin_host| origin_host.eq_ignore_ascii_case(host))
+}
+
+async fn websocket_upgrade(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    if !websocket_origin_allowed(&headers) {
+        return api_error(StatusCode::FORBIDDEN, "WebSocket Origin 与当前服务不一致");
+    }
+    upgrade
+        .max_message_size(MAX_FRAME_BYTES)
+        .on_upgrade(move |socket| handle_websocket(socket, state))
+}
+
+async fn handle_websocket(mut socket: WebSocket, state: ApiState) {
+    let connect = match socket.recv().await {
+        Some(Ok(WebSocketMessage::Text(text))) if text.len() <= MAX_FRAME_BYTES => {
+            serde_json::from_str::<WebSocketConnect>(&text)
+        }
+        Some(Ok(_)) => {
+            send_websocket_control_error(&mut socket, "第一帧必须是文本 connect 帧").await;
+            return;
+        }
+        Some(Err(error)) => {
+            tracing::debug!(%error, "读取 WebSocket connect 帧失败");
+            return;
+        }
+        None => return,
+    };
+    let connect = match connect {
+        Ok(connect) if connect.kind == "connect" => connect,
+        Ok(_) | Err(_) => {
+            send_websocket_control_error(&mut socket, "第一帧必须是合法 connect 帧").await;
+            return;
+        }
+    };
+    if !token_matches(connect.token.as_deref(), state.bearer_token.as_deref()) {
+        send_websocket_control_error(&mut socket, "Token 无效或缺失").await;
+        return;
+    }
+    let (workspace, client) = match state
+        .workspaces
+        .client_for(connect.workspace.as_deref())
+        .await
+    {
+        Ok(connection) => connection,
+        Err(error) => {
+            send_websocket_control_error(&mut socket, &format!("无法连接所选工作目录：{error:#}"))
+                .await;
+            return;
+        }
+    };
+    if socket
+        .send(WebSocketMessage::Text(
+            json!({
+                "type": "connected",
+                "protocol": "my-agent-jsonrpc",
+                "version": 1,
+                "workspace": workspace,
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    let (mut websocket_writer, mut websocket_reader) = socket.split();
+    let (outgoing, mut outgoing_receiver) = mpsc::unbounded_channel::<WebSocketMessage>();
+    let writer = tokio::spawn(async move {
+        while let Some(message) = outgoing_receiver.recv().await {
+            if websocket_writer.send(message).await.is_err() {
+                break;
+            }
+        }
+    });
+    let active_ids = std::sync::Arc::new(Mutex::new(std::collections::HashMap::<
+        RequestId,
+        RequestId,
+    >::new()));
+    let mut jobs = JoinSet::new();
+    if let Err(error) = start_websocket_recovery(&client, &active_ids, &outgoing, &mut jobs).await {
+        let _ = outgoing.send(WebSocketMessage::Text(
+            json!({"type": "recovery_error", "error": format!("{error:#}")})
+                .to_string()
+                .into(),
+        ));
+    }
+
+    while let Some(message) = websocket_reader.next().await {
+        let message = match message {
+            Ok(message) => message,
+            Err(error) => {
+                tracing::debug!(%error, "WebSocket 读取结束");
+                break;
+            }
+        };
+        match message {
+            WebSocketMessage::Text(text) => {
+                let request = match decode_request(text.as_bytes()) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        send_ws_server_frame(
+                            &outgoing,
+                            ServerFrame::Response(JsonRpcResponse::failure(
+                                RequestId::String("protocol".to_owned()),
+                                if text.len() > MAX_FRAME_BYTES {
+                                    -32002
+                                } else {
+                                    -32700
+                                },
+                                error.to_string(),
+                            )),
+                        );
+                        continue;
+                    }
+                };
+                start_websocket_request(&client, request, &active_ids, &outgoing, &mut jobs).await;
+            }
+            WebSocketMessage::Ping(payload) => {
+                let _ = outgoing.send(WebSocketMessage::Pong(payload));
+            }
+            WebSocketMessage::Close(_) => break,
+            WebSocketMessage::Pong(_) | WebSocketMessage::Binary(_) => {}
+        }
+    }
+
+    jobs.abort_all();
+    while jobs.join_next().await.is_some() {}
+    drop(outgoing);
+    let _ = writer.await;
+}
+
+async fn start_websocket_request(
+    client: &DaemonClient,
+    mut request: JsonRpcRequest,
+    active_ids: &std::sync::Arc<Mutex<std::collections::HashMap<RequestId, RequestId>>>,
+    outgoing: &mpsc::UnboundedSender<WebSocketMessage>,
+    jobs: &mut JoinSet<()>,
+) {
+    if request.method == "agent.cancel"
+        && let Some(target) = request
+            .params
+            .get("request_id")
+            .and_then(|value| serde_json::from_value::<RequestId>(value.clone()).ok())
+        && let Some(internal) = active_ids.lock().await.get(&target).cloned()
+    {
+        request.params["request_id"] = json!(internal);
+    }
+    let external_id = request.id;
+    let is_chat = request.method == "chat.send";
+    if is_chat || matches!(request.method.as_str(), "compact.start" | "slash.execute") {
+        request.params["entry_channel"] = json!("web_socket");
+    }
+    let stream = match client.request(&request.method, request.params).await {
+        Ok(stream) => stream,
+        Err(error) => {
+            send_ws_server_frame(
+                outgoing,
+                ServerFrame::Response(JsonRpcResponse::failure(
+                    external_id,
+                    -32000,
+                    format!("{error:#}"),
+                )),
+            );
+            return;
+        }
+    };
+    if is_chat {
+        active_ids
+            .lock()
+            .await
+            .insert(external_id.clone(), stream.request_id().clone());
+    }
+    spawn_websocket_stream(stream, external_id, is_chat, active_ids, outgoing, jobs);
+}
+
+fn spawn_websocket_stream(
+    mut stream: RpcStream,
+    external_id: RequestId,
+    is_chat: bool,
+    active_ids: &std::sync::Arc<Mutex<std::collections::HashMap<RequestId, RequestId>>>,
+    outgoing: &mpsc::UnboundedSender<WebSocketMessage>,
+    jobs: &mut JoinSet<()>,
+) {
+    let task_ids = active_ids.clone();
+    let task_outgoing = outgoing.clone();
+    jobs.spawn(async move {
+        while let Some(mut frame) = stream.next().await {
+            let terminal = matches!(frame, ServerFrame::Response(_));
+            remap_frame_id(&mut frame, &external_id);
+            send_ws_server_frame(&task_outgoing, frame);
+            if terminal {
+                break;
+            }
+        }
+        if is_chat {
+            task_ids.lock().await.remove(&external_id);
+        }
+    });
+}
+
+async fn start_websocket_recovery(
+    client: &DaemonClient,
+    active_ids: &std::sync::Arc<Mutex<std::collections::HashMap<RequestId, RequestId>>>,
+    outgoing: &mpsc::UnboundedSender<WebSocketMessage>,
+    jobs: &mut JoinSet<()>,
+) -> Result<()> {
+    let snapshot = recovery::load_snapshot(client).await?;
+    let active_set = snapshot
+        .active_requests
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<RequestId>>();
+    let _ = outgoing.send(WebSocketMessage::Text(
+        json!({"type": "recovery", "snapshot": &snapshot})
+            .to_string()
+            .into(),
+    ));
+    for approval in &snapshot.pending_approvals {
+        if active_set.contains(&approval.request_id) {
+            continue;
+        }
+        send_ws_server_frame(
+            outgoing,
+            ServerFrame::Event(agent_daemon_protocol::EventFrame::new(
+                RequestId::String("recovery".to_owned()),
+                EventKind::ApprovalRequired,
+                json!({"approval": approval}),
+            )),
+        );
+    }
+    for request_id in snapshot.active_requests {
+        let stream = recovery::subscribe(client, &request_id).await?;
+        active_ids
+            .lock()
+            .await
+            .insert(request_id.clone(), request_id.clone());
+        spawn_websocket_stream(stream, request_id, true, active_ids, outgoing, jobs);
+    }
+    Ok(())
+}
+
+fn remap_frame_id(frame: &mut ServerFrame, external_id: &RequestId) {
+    match frame {
+        ServerFrame::Event(event) => event.request_id = external_id.clone(),
+        ServerFrame::Response(response) => response.id = external_id.clone(),
+    }
+}
+
+fn send_ws_server_frame(outgoing: &mpsc::UnboundedSender<WebSocketMessage>, frame: ServerFrame) {
+    let message = match serde_json::to_string(&frame) {
+        Ok(message) if message.len() <= MAX_FRAME_BYTES => message,
+        Ok(_) => serde_json::to_string(&ServerFrame::Response(JsonRpcResponse::failure(
+            agent_daemon_protocol::server_frame_request_id(&frame).clone(),
+            -32002,
+            "WebSocket 响应超过帧大小限制",
+        )))
+        .unwrap_or_else(|_| "{\"type\":\"error\"}".to_owned()),
+        Err(error) => {
+            tracing::warn!(%error, "序列化 WebSocket daemon 帧失败");
+            return;
+        }
+    };
+    let _ = outgoing.send(WebSocketMessage::Text(message.into()));
+}
+
+async fn send_websocket_control_error(socket: &mut WebSocket, message: &str) {
+    let _ = socket
+        .send(WebSocketMessage::Text(
+            json!({"type": "error", "error": message})
+                .to_string()
+                .into(),
+        ))
+        .await;
+    let _ = socket.send(WebSocketMessage::Close(None)).await;
+}
+
+async fn health(State(state): State<ApiState>, headers: HeaderMap) -> Response {
+    if !is_authorized(&headers, state.bearer_token.as_deref()) {
+        return api_error(StatusCode::UNAUTHORIZED, "Bearer Token 无效或缺失");
+    }
+    let model = state.active_model();
+    Json(json!({
+        "status": "ok",
+        "daemon": "managed",
+        "workspace": state.workspace,
+        "model": model,
+    }))
+    .into_response()
+}
+
+async fn list_directories(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(query): Query<DirectoryQuery>,
+) -> Response {
+    if !is_authorized(&headers, state.bearer_token.as_deref()) {
+        return api_error(StatusCode::UNAUTHORIZED, "Bearer Token 无效或缺失");
+    }
+    match directory_listing(query.path.as_deref(), &state.workspace).await {
+        Ok(listing) => Json(listing).into_response(),
+        Err(error) => api_error(StatusCode::BAD_REQUEST, format!("{error:#}")),
+    }
+}
+
+async fn list_models(State(state): State<ApiState>, headers: HeaderMap) -> Response {
+    if !is_authorized(&headers, state.bearer_token.as_deref()) {
+        return api_error(StatusCode::UNAUTHORIZED, "Bearer Token 无效或缺失");
+    }
+    match state.workspaces.host.list_models() {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")),
+    }
+}
+
+async fn save_models(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<ModelSaveRequest>,
+) -> Response {
+    if !is_authorized(&headers, state.bearer_token.as_deref()) {
+        return api_error(StatusCode::UNAUTHORIZED, "Bearer Token 无效或缺失");
+    }
+    let requested_workspace = request.workspace.clone();
+    let profile = request.profile.clone();
+    match state
+        .workspaces
+        .client_for(requested_workspace.as_deref())
+        .await
+    {
+        Ok((_, client)) => {
+            let result = match agent_entry_support::rpc::request_result(
+                &client,
+                "models.save",
+                json!({"profile": profile, "activate": request.activate}),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => return api_error(StatusCode::CONFLICT, format!("{error:#}")),
+            };
+            let mut response = result;
+            response["runtime_applied"] = json!(true);
+            response["warning"] = Value::Null;
+            response["config_path"] = json!(state.workspaces.host.config_path());
+            Json(response).into_response()
+        }
+        Err(error) => {
+            match state
+                .workspaces
+                .host
+                .save_configuration(request.profile, request.activate)
+            {
+                Ok(mut response) => {
+                    response["runtime_applied"] = json!(false);
+                    response["warning"] =
+                        json!(format!("配置已保存，daemon 将在下次启动时应用：{error:#}"));
+                    Json(response).into_response()
+                }
+                Err(error) => api_error(StatusCode::BAD_REQUEST, format!("{error:#}")),
+            }
+        }
+    }
+}
+
+async fn activate_model(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<ModelUseRequest>,
+) -> Response {
+    if !is_authorized(&headers, state.bearer_token.as_deref()) {
+        return api_error(StatusCode::UNAUTHORIZED, "Bearer Token 无效或缺失");
+    }
+    let requested_workspace = request.workspace.clone();
+    match state
+        .workspaces
+        .client_for(requested_workspace.as_deref())
+        .await
+    {
+        Ok((_, client)) => {
+            let result = match agent_entry_support::rpc::request_result(
+                &client,
+                "models.use",
+                json!({"profile_id": request.profile_id}),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => return api_error(StatusCode::CONFLICT, format!("{error:#}")),
+            };
+            let mut response = result;
+            response["runtime_applied"] = json!(true);
+            response["warning"] = Value::Null;
+            response["config_path"] = json!(state.workspaces.host.config_path());
+            Json(response).into_response()
+        }
+        Err(error) => match state
+            .workspaces
+            .host
+            .activate_configuration(&request.profile_id)
+        {
+            Ok(mut response) => {
+                response["runtime_applied"] = json!(false);
+                response["warning"] = json!(format!("已保存为下次启动的活动模型：{error:#}"));
+                Json(response).into_response()
+            }
+            Err(error) => api_error(StatusCode::BAD_REQUEST, format!("{error:#}")),
+        },
+    }
+}
+
+async fn chat_completions(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<ChatCompletionRequest>,
+) -> Response {
+    if !is_authorized(&headers, state.bearer_token.as_deref()) {
+        return api_error(StatusCode::UNAUTHORIZED, "Bearer Token 无效或缺失");
+    }
+    let active_model = state.active_model();
+    if let Some(requested) = &request.model
+        && requested != &active_model
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            format!("当前 daemon 模型为 {active_model}，不支持请求模型 {requested}"),
+        );
+    }
+    let Some(prompt) = extract_latest_user_prompt(&request.messages) else {
+        return api_error(StatusCode::BAD_REQUEST, "messages 中缺少非空 user 消息");
+    };
+    let (_, client) = match state.workspaces.client_for(None).await {
+        Ok(connection) => connection,
+        Err(error) => return api_error(StatusCode::BAD_GATEWAY, format!("{error:#}")),
+    };
+    let rpc = match client
+        .request(
+            "chat.send",
+            json!({"message": prompt,"entry_channel":"http"}),
+        )
+        .await
+    {
+        Ok(rpc) => rpc,
+        Err(error) => return api_error(StatusCode::BAD_GATEWAY, format!("{error:#}")),
+    };
+    let completion_id = format!("chatcmpl-{}", request_id_text(rpc.request_id()));
+    let created = unix_time();
+    if request.stream {
+        let stream = completion_stream(rpc, client, active_model.clone(), completion_id, created);
+        return Sse::new(stream)
+            .keep_alive(KeepAlive::default())
+            .into_response();
+    }
+
+    match collect_answer(rpc, &client).await {
+        Ok(content) => Json(json!({
+            "id": completion_id,
+            "object": "chat.completion",
+            "created": created,
+            "model": active_model,
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": "stop"
+            }]
+        }))
+        .into_response(),
+        Err(error) => api_error(StatusCode::BAD_GATEWAY, error),
+    }
+}
+
+fn completion_stream(
+    rpc: RpcStream,
+    client: DaemonClient,
+    model: String,
+    completion_id: String,
+    created: u64,
+) -> impl Stream<Item = Result<Event, Infallible>> {
+    struct StreamState {
+        rpc: RpcStream,
+        client: DaemonClient,
+        model: String,
+        completion_id: String,
+        created: u64,
+        done_pending: bool,
+        finished: bool,
+    }
+
+    stream::unfold(
+        StreamState {
+            rpc,
+            client,
+            model,
+            completion_id,
+            created,
+            done_pending: false,
+            finished: false,
+        },
+        |mut state| async move {
+            if state.finished {
+                return None;
+            }
+            if state.done_pending {
+                state.finished = true;
+                return Some((Ok(Event::default().data("[DONE]")), state));
+            }
+            loop {
+                let Some(frame) = state.rpc.next().await else {
+                    let event = Event::default()
+                        .data(json!({"error": {"message": "daemon 在终态响应前断开"}}).to_string());
+                    state.done_pending = true;
+                    return Some((Ok(event), state));
+                };
+                match frame {
+                    ServerFrame::Event(event) if event.event == EventKind::TextDelta => {
+                        let delta = event.data["delta"].as_str().unwrap_or_default();
+                        let chunk = completion_chunk(
+                            &state.completion_id,
+                            state.created,
+                            &state.model,
+                            json!({"content": delta}),
+                            Value::Null,
+                        );
+                        return Some((Ok(Event::default().data(chunk.to_string())), state));
+                    }
+                    ServerFrame::Event(event) if event.event == EventKind::ApprovalRequired => {
+                        if let Err(error) = deny_approval(&state.client, &event.data).await {
+                            let event = Event::default()
+                                .data(json!({"error": {"message": error}}).to_string());
+                            state.done_pending = true;
+                            return Some((Ok(event), state));
+                        }
+                    }
+                    ServerFrame::Event(_) => {}
+                    ServerFrame::Response(response) => {
+                        let chunk = if let Some(error) = response.error {
+                            json!({"error": {"code": error.code, "message": error.message}})
+                        } else {
+                            completion_chunk(
+                                &state.completion_id,
+                                state.created,
+                                &state.model,
+                                json!({}),
+                                json!("stop"),
+                            )
+                        };
+                        state.done_pending = true;
+                        return Some((Ok(Event::default().data(chunk.to_string())), state));
+                    }
+                }
+            }
+        },
+    )
+}
+
+async fn collect_answer(mut rpc: RpcStream, client: &DaemonClient) -> Result<String, String> {
+    while let Some(frame) = rpc.next().await {
+        match frame {
+            ServerFrame::Event(event) if event.event == EventKind::ApprovalRequired => {
+                deny_approval(client, &event.data).await?;
+            }
+            ServerFrame::Event(_) => {}
+            ServerFrame::Response(response) => {
+                if let Some(error) = response.error {
+                    return Err(format!("daemon RPC {}: {}", error.code, error.message));
+                }
+                return response
+                    .result
+                    .and_then(|result| result["content"].as_str().map(str::to_owned))
+                    .ok_or_else(|| "daemon 响应缺少 content".to_owned());
+            }
+        }
+    }
+    Err("daemon 在终态响应前断开".to_owned())
+}
+
+async fn deny_approval(client: &DaemonClient, data: &Value) -> Result<(), String> {
+    let approval_id = data["approval"]["id"]
+        .as_str()
+        .ok_or_else(|| "审批事件缺少 id".to_owned())?;
+    agent_entry_support::rpc::request_result(
+        client,
+        "approval.respond",
+        json!({"approval_id": approval_id, "approved": false}),
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| format!("自动拒绝 HTTP 审批失败: {error:#}"))
+}
+
+fn is_authorized(headers: &HeaderMap, required_token: Option<&str>) -> bool {
+    let Some(required_token) = required_token else {
+        return true;
+    };
+    let provided = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    token_matches(provided, Some(required_token))
+}
+
+fn token_matches(provided: Option<&str>, required: Option<&str>) -> bool {
+    match required {
+        Some(required) => provided == Some(required),
+        None => true,
+    }
+}
+
+fn extract_latest_user_prompt(messages: &[OpenAiMessage]) -> Option<String> {
+    messages.iter().rev().find_map(|message| {
+        if message.role != "user" {
+            return None;
+        }
+        let content = match &message.content {
+            Value::String(content) => content.clone(),
+            Value::Array(parts) => parts
+                .iter()
+                .filter(|part| part["type"] == "text")
+                .filter_map(|part| part["text"].as_str())
+                .collect::<Vec<&str>>()
+                .join("\n"),
+            _ => String::new(),
+        };
+        (!content.trim().is_empty()).then_some(content)
+    })
+}
+
+fn completion_chunk(
+    id: &str,
+    created: u64,
+    model: &str,
+    delta: Value,
+    finish_reason: Value,
+) -> Value {
+    json!({
+        "id": id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}]
+    })
+}
+
+fn api_error(status: StatusCode, message: impl Into<String>) -> Response {
+    (
+        status,
+        Json(json!({"error": {"message": message.into(), "type": "my_agent_error"}})),
+    )
+        .into_response()
+}
+
+fn request_id_text(id: &RequestId) -> String {
+    match id {
+        RequestId::Number(value) => value.to_string(),
+        RequestId::String(value) => value.clone(),
+    }
+}
+
+fn unix_time() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
+}
+
+#[cfg(test)]
+struct TestHost(DaemonClient);
+#[cfg(test)]
+#[async_trait::async_trait]
+impl GatewayHost for TestHost {
+    async fn connect_workspace(&self, _workspace: &Path) -> Result<DaemonClient> {
+        Ok(self.0.clone())
+    }
+    fn active_model(&self, fallback: &str) -> String {
+        fallback.to_owned()
+    }
+    fn config_path(&self) -> PathBuf {
+        PathBuf::from("test-config.json")
+    }
+    fn list_models(&self) -> Result<Value> {
+        anyhow::bail!("此 fixture 不提供配置")
+    }
+    fn save_configuration(&self, _value: Value, _activate: bool) -> Result<Value> {
+        anyhow::bail!("此 fixture 不写配置")
+    }
+    fn activate_configuration(&self, _profile_id: &str) -> Result<Value> {
+        anyhow::bail!("此 fixture 不写配置")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+    use std::sync::Arc;
+    use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use super::*;
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use tokio_tungstenite::connect_async;
+    use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
+
+    use agent_daemon::DaemonState;
+    use agent_daemon::approval::ApprovalBroker;
+    use agent_daemon::server::InMemoryServer;
+    use agent_runtime::context::{ContextConfig, ContextManager};
+    use agent_runtime::loop_engine::LoopEngine;
+    use agent_runtime::plan::PlanStore;
+    use agent_runtime::provider::{Message, Provider, Response, ToolCall, ToolSpec};
+    use agent_runtime::safety::Approval;
+    use agent_runtime::session::SessionStore;
+    use agent_runtime::tools::{Tool, ToolRegistry};
+
+    static NEXT_TEST: AtomicUsize = AtomicUsize::new(0);
+
+    struct MockProvider {
+        responses: StdMutex<VecDeque<Response>>,
+    }
+
+    #[async_trait]
+    impl Provider for MockProvider {
+        async fn chat(&self, _messages: &[Message], _tools: &[ToolSpec]) -> Result<Response> {
+            self.responses
+                .lock()
+                .map_err(|_| anyhow::anyhow!("mock provider 锁已损坏"))?
+                .pop_front()
+                .ok_or_else(|| anyhow::anyhow!("mock 响应不足"))
+        }
+    }
+
+    struct ApprovalTool {
+        approvals: ApprovalBroker,
+    }
+
+    #[async_trait]
+    impl Tool for ApprovalTool {
+        fn name(&self) -> &str {
+            "danger"
+        }
+
+        fn description(&self) -> &str {
+            "测试 WebSocket 审批往返"
+        }
+
+        fn parameters(&self) -> Value {
+            json!({"type": "object"})
+        }
+
+        async fn execute(&self, _args: Value) -> Result<String> {
+            if self
+                .approvals
+                .request("执行高风险 WebSocket 测试动作")
+                .await?
+            {
+                Ok("approved".to_owned())
+            } else {
+                anyhow::bail!("测试动作被拒绝")
+            }
+        }
+    }
+
+    async fn websocket_test_state() -> (ApiState, std::path::PathBuf) {
+        let id = NEXT_TEST.fetch_add(1, Ordering::SeqCst);
+        let session_path = std::env::temp_dir().join(format!(
+            "my-agent-websocket-{}-{id}.jsonl",
+            std::process::id()
+        ));
+        let provider: Arc<dyn Provider> = Arc::new(MockProvider {
+            responses: StdMutex::new(VecDeque::from([
+                Response::ToolCalls(vec![ToolCall {
+                    id: "ws-danger-search".to_owned(),
+                    name: "tool_search".to_owned(),
+                    arguments: json!({"query":"select:danger","limit":1}),
+                }]),
+                Response::ToolCalls(vec![ToolCall {
+                    id: "ws-danger".to_owned(),
+                    name: "tool_search".to_owned(),
+                    arguments: json!({"name":"danger","arguments":{}}),
+                }]),
+                Response::Text("WebSocket 审批后完成".to_owned()),
+            ])),
+        });
+        let approvals = ApprovalBroker::new();
+        let mut tools = ToolRegistry::new();
+        tools.register(ApprovalTool {
+            approvals: approvals.clone(),
+        });
+        let context = ContextManager::new(
+            provider.clone(),
+            std::env::current_dir().expect("测试工作区应存在"),
+            ContextConfig {
+                token_budget: 1_000_000,
+                recent_messages: 100,
+                mild_compression_percent: 60,
+                strong_compression_percent: 85,
+                summary_chunk_tokens: 100_000,
+            },
+            Arc::new(PlanStore::memory_only()),
+        )
+        .expect("测试上下文应可创建");
+        let session = Arc::new(SessionStore::new(&session_path));
+        let engine = Arc::new(LoopEngine::new(provider, tools, context, session.clone()));
+        let daemon = Arc::new(DaemonState::new(engine, Vec::new(), session, approvals));
+        let workspace = std::env::current_dir().expect("测试工作区应存在");
+        let client = InMemoryServer::start(daemon);
+        (
+            ApiState {
+                workspaces: WorkspaceRouter::new(workspace.clone(), client),
+                model: "test-model".to_owned(),
+                bearer_token: Some("test-token".to_owned()),
+                workspace,
+            },
+            session_path,
+        )
+    }
+
+    #[test]
+    fn extracts_latest_string_or_content_parts() {
+        let messages = vec![
+            OpenAiMessage {
+                role: "user".to_owned(),
+                content: Value::String("旧问题".to_owned()),
+            },
+            OpenAiMessage {
+                role: "assistant".to_owned(),
+                content: Value::String("旧回答".to_owned()),
+            },
+            OpenAiMessage {
+                role: "user".to_owned(),
+                content: json!([
+                    {"type": "text", "text": "第一段"},
+                    {"type": "image_url", "image_url": {"url": "ignored"}},
+                    {"type": "text", "text": "第二段"}
+                ]),
+            },
+        ];
+
+        assert_eq!(
+            extract_latest_user_prompt(&messages).as_deref(),
+            Some("第一段\n第二段")
+        );
+    }
+
+    #[tokio::test]
+    async fn embeds_the_web_console_assets() {
+        let index = web_index().await;
+        assert_eq!(index.status(), StatusCode::OK);
+        assert_eq!(
+            index.headers()[axum::http::header::CONTENT_TYPE],
+            "text/html; charset=utf-8"
+        );
+        let body = axum::body::to_bytes(index.into_body(), usize::MAX)
+            .await
+            .expect("首页 body 应可读取");
+        let html = String::from_utf8(body.to_vec()).expect("首页应为 UTF-8");
+        assert!(html.contains("my-agent · 本地工作台"));
+        assert!(html.contains("id=\"agent-view\""));
+        assert!(html.contains("id=\"sessions-view\""));
+        assert!(html.contains("id=\"workspace-dialog\""));
+        assert!(html.contains("id=\"permissions-dialog\""));
+        assert!(html.contains("id=\"session-list\""));
+        assert!(WEB_APP.contains("session.trace"));
+        assert!(WEB_APP.contains("session.load_page"));
+        assert!(WEB_APP.contains("session.trace_page"));
+        assert!(WEB_APP.contains("loadMoreMessages"));
+        assert!(WEB_APP.contains("loadMoreTraces"));
+        assert!(WEB_APP.contains("permissions.get"));
+        assert!(WEB_APP.contains("permissions.set"));
+        assert!(WEB_APP.contains("scheduleAgentTranscriptRender"));
+        assert!(WEB_APP.contains("renderMarkdown"));
+        assert!(WEB_APP.contains("isTableSeparator"));
+        assert!(WEB_APP.contains("safeMarkdownUrl"));
+        assert!(WEB_APP.contains("thinking_delta"));
+        assert!(WEB_APP.contains("thinking_finished"));
+        assert!(WEB_APP.contains("工具动态 · "));
+        assert!(WEB_APP.contains("workspace:"));
+        assert!(WEB_APP.contains("sessionDayKey"));
+        assert!(WEB_APP.contains("toggleSessionDay"));
+        assert!(WEB_STYLES.contains(".agent-layout"));
+        assert!(WEB_STYLES.contains(".session-day.is-collapsed"));
+        assert!(WEB_STYLES.contains(".streaming-cursor"));
+        assert!(WEB_STYLES.contains(".tool-details"));
+        assert!(WEB_STYLES.contains(".thinking-details"));
+        assert!(WEB_STYLES.contains(".message-content table"));
+    }
+
+    #[test]
+    fn bearer_auth_is_only_enforced_when_configured() {
+        let mut headers = HeaderMap::new();
+        assert!(is_authorized(&headers, None));
+        assert!(!is_authorized(&headers, Some("secret")));
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer secret".parse().unwrap(),
+        );
+        assert!(is_authorized(&headers, Some("secret")));
+    }
+
+    #[test]
+    fn websocket_origin_must_match_the_host_when_present() {
+        let mut headers = HeaderMap::new();
+        assert!(websocket_origin_allowed(&headers));
+        headers.insert(axum::http::header::HOST, "127.0.0.1:8787".parse().unwrap());
+        headers.insert(
+            axum::http::header::ORIGIN,
+            "http://127.0.0.1:8787".parse().unwrap(),
+        );
+        assert!(websocket_origin_allowed(&headers));
+        headers.insert(
+            axum::http::header::ORIGIN,
+            "https://example.com".parse().unwrap(),
+        );
+        assert!(!websocket_origin_allowed(&headers));
+    }
+
+    #[tokio::test]
+    async fn directory_listing_only_returns_directories() {
+        let id = NEXT_TEST.fetch_add(1, Ordering::SeqCst);
+        let root = std::env::temp_dir().join(format!(
+            "my-agent-directory-listing-{}-{id}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(root.join("alpha")).unwrap();
+        std::fs::create_dir_all(root.join("beta")).unwrap();
+        std::fs::write(root.join("notes.txt"), b"not a directory").unwrap();
+
+        let listing = directory_listing(Some(&root), &root)
+            .await
+            .expect("目录应可列出");
+        let names = listing["directories"]
+            .as_array()
+            .expect("directories 应为数组")
+            .iter()
+            .filter_map(|entry| entry["name"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["alpha", "beta"]);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn websocket_requires_token_and_supports_interactive_approval() {
+        let (state, session_path) = websocket_test_state().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("测试端口应可监听");
+        let address = listener.local_addr().expect("测试端口应有地址");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, api_router(state))
+                .await
+                .expect("测试 Web 服务应正常运行");
+        });
+        let url = format!("ws://{address}/ws");
+
+        let (mut rejected, _) = connect_async(&url).await.expect("WebSocket 应可升级");
+        rejected
+            .send(TungsteniteMessage::Text(
+                json!({"type": "connect", "token": "wrong"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .expect("错误 token 帧应可发送");
+        let rejected_message = rejected
+            .next()
+            .await
+            .expect("应返回鉴权错误")
+            .expect("鉴权错误帧应可读取")
+            .into_text()
+            .expect("鉴权错误应为文本");
+        assert_eq!(
+            serde_json::from_str::<Value>(&rejected_message).expect("错误帧应为 JSON")["type"],
+            "error"
+        );
+
+        let (mut socket, _) = connect_async(&url).await.expect("WebSocket 应可再次升级");
+        socket
+            .send(TungsteniteMessage::Text(
+                json!({"type": "connect", "token": "test-token"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .expect("connect 帧应可发送");
+        let connected = socket
+            .next()
+            .await
+            .expect("应返回 connected")
+            .expect("connected 帧应可读取")
+            .into_text()
+            .expect("connected 应为文本");
+        let connected = serde_json::from_str::<Value>(&connected).expect("connected 应为 JSON");
+        assert_eq!(connected["type"], "connected");
+        assert_eq!(
+            connected["workspace"],
+            std::env::current_dir()
+                .expect("测试工作区应存在")
+                .to_string_lossy()
+                .as_ref()
+        );
+        let recovery = socket
+            .next()
+            .await
+            .expect("应返回恢复快照")
+            .expect("恢复快照应可读取")
+            .into_text()
+            .expect("恢复快照应为文本");
+        assert_eq!(
+            serde_json::from_str::<Value>(&recovery).expect("恢复快照应为 JSON")["type"],
+            "recovery"
+        );
+        socket
+            .send(TungsteniteMessage::Text(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "web-chat",
+                    "method": "chat.send",
+                    "params": {"message": "执行测试动作"}
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .expect("chat 请求应可发送");
+
+        let mut saw_approval = false;
+        let mut saw_text = false;
+        let mut completed = false;
+        while !completed {
+            let message = tokio::time::timeout(std::time::Duration::from_secs(2), socket.next())
+                .await
+                .expect("WebSocket 响应不应超时")
+                .expect("WebSocket 不应提前关闭")
+                .expect("WebSocket 帧应可读取")
+                .into_text()
+                .expect("daemon 帧应为文本");
+            let frame: ServerFrame =
+                serde_json::from_str(&message).expect("daemon 帧应符合 ServerFrame");
+            match frame {
+                ServerFrame::Event(event) if event.event == EventKind::ApprovalRequired => {
+                    saw_approval = true;
+                    let approval_id = event.data["approval"]["id"]
+                        .as_str()
+                        .expect("审批事件应有 id");
+                    socket
+                        .send(TungsteniteMessage::Text(
+                            json!({
+                                "jsonrpc": "2.0",
+                                "id": "web-approval",
+                                "method": "approval.respond",
+                                "params": {"approval_id": approval_id, "approved": true}
+                            })
+                            .to_string()
+                            .into(),
+                        ))
+                        .await
+                        .expect("审批响应应可发送");
+                }
+                ServerFrame::Event(event) if event.event == EventKind::TextDelta => {
+                    saw_text |= event.data["delta"] == "WebSocket 审批后完成";
+                }
+                ServerFrame::Response(response)
+                    if response.id == RequestId::String("web-chat".to_owned()) =>
+                {
+                    assert!(response.error.is_none());
+                    completed = true;
+                }
+                ServerFrame::Event(_) | ServerFrame::Response(_) => {}
+            }
+        }
+
+        assert!(saw_approval);
+        assert!(saw_text);
+        server.abort();
+        let _ = server.await;
+        let _ = std::fs::remove_file(session_path);
+    }
+
+    #[tokio::test]
+    async fn websocket_reconnect_recovers_pending_approval_and_active_output() {
+        let (state, session_path) = websocket_test_state().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("测试端口应可监听");
+        let address = listener.local_addr().expect("测试端口应有地址");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, api_router(state))
+                .await
+                .expect("测试 Web 服务应正常运行");
+        });
+        let url = format!("ws://{address}/ws");
+
+        let (mut first, _) = connect_async(&url).await.expect("首次连接应成功");
+        first
+            .send(TungsteniteMessage::Text(
+                json!({"type": "connect", "token": "test-token"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .expect("首次 connect 应可发送");
+        let _ = first.next().await.expect("应收到 connected");
+        let _ = first.next().await.expect("应收到首次 recovery");
+        first
+            .send(TungsteniteMessage::Text(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "lost-ws-chat",
+                    "method": "chat.send",
+                    "params": {"message": "断线 WebSocket 恢复"}
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .expect("chat 请求应可发送");
+        loop {
+            let message = tokio::time::timeout(Duration::from_secs(2), first.next())
+                .await
+                .expect("首次连接应收到审批")
+                .expect("首次连接不应提前结束")
+                .expect("首次 WebSocket 帧应可读取")
+                .into_text()
+                .expect("首次 daemon 帧应为文本");
+            let frame: ServerFrame = serde_json::from_str(&message).expect("daemon 帧应为 JSON");
+            if matches!(
+                frame,
+                ServerFrame::Event(event) if event.event == EventKind::ApprovalRequired
+            ) {
+                break;
+            }
+        }
+        drop(first);
+
+        let (mut second, _) = connect_async(&url).await.expect("重连应成功");
+        second
+            .send(TungsteniteMessage::Text(
+                json!({"type": "connect", "token": "test-token"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .expect("重连 connect 应可发送");
+        assert_eq!(
+            serde_json::from_str::<Value>(
+                &second
+                    .next()
+                    .await
+                    .expect("应收到重连 connected")
+                    .expect("connected 帧应可读取")
+                    .into_text()
+                    .expect("connected 应为文本"),
+            )
+            .expect("connected 应为 JSON")["type"],
+            "connected"
+        );
+        let recovery = second
+            .next()
+            .await
+            .expect("应收到重连 recovery")
+            .expect("recovery 帧应可读取")
+            .into_text()
+            .expect("recovery 应为文本");
+        let recovery_value: Value = serde_json::from_str(&recovery).expect("recovery 应为 JSON");
+        assert_eq!(recovery_value["type"], "recovery");
+        assert_eq!(
+            recovery_value["snapshot"]["pending_approvals"]
+                .as_array()
+                .expect("恢复快照应包含审批")
+                .len(),
+            1
+        );
+
+        let mut saw_text = false;
+        let mut completed = false;
+        while !completed {
+            let message = tokio::time::timeout(Duration::from_secs(2), second.next())
+                .await
+                .expect("重连订阅不应超时")
+                .expect("重连 WebSocket 不应提前关闭")
+                .expect("重连帧应可读取")
+                .into_text()
+                .expect("重连 daemon 帧应为文本");
+            let frame: ServerFrame = serde_json::from_str(&message).expect("重连帧应为 JSON");
+            match frame {
+                ServerFrame::Event(event) if event.event == EventKind::ApprovalRequired => {
+                    let approval_id = event.data["approval"]["id"]
+                        .as_str()
+                        .expect("恢复审批应包含 id");
+                    second
+                        .send(TungsteniteMessage::Text(
+                            json!({
+                                "jsonrpc": "2.0",
+                                "id": "reconnect-approval",
+                                "method": "approval.respond",
+                                "params": {"approval_id": approval_id, "approved": true}
+                            })
+                            .to_string()
+                            .into(),
+                        ))
+                        .await
+                        .expect("恢复审批响应应可发送");
+                }
+                ServerFrame::Event(event) if event.event == EventKind::TextDelta => {
+                    saw_text |= event.data["delta"] == "WebSocket 审批后完成";
+                }
+                ServerFrame::Response(response)
+                    if response
+                        .result
+                        .as_ref()
+                        .is_some_and(|result| result.get("content").is_some()) =>
+                {
+                    assert!(response.error.is_none());
+                    completed = true;
+                }
+                ServerFrame::Event(_) | ServerFrame::Response(_) => {}
+            }
+        }
+        assert!(saw_text);
+        server.abort();
+        let _ = server.await;
+        let _ = std::fs::remove_file(session_path);
+    }
+}

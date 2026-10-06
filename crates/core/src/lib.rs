@@ -7,33 +7,43 @@
 mod attempt;
 mod context;
 mod control;
+mod hooks;
 mod identity;
 mod memory;
 mod message;
+mod plan;
 mod provider;
+mod provider_request;
 mod resource;
 mod retry;
 mod run;
 mod session;
 mod tool;
+mod tool_search;
 mod transcript;
 mod turn;
+mod view;
 mod wire;
 
 pub use attempt::*;
 pub use context::*;
 pub use control::*;
+pub use hooks::*;
 pub use identity::*;
 pub use memory::*;
 pub use message::{Message, Role, ToolCall, ToolSpec};
+pub use plan::*;
 pub use provider::*;
+pub use provider_request::*;
 pub use resource::*;
 pub use retry::*;
 pub use run::RunStatus;
 pub use session::{SessionInfo, SessionStatus};
 pub use tool::*;
+pub use tool_search::*;
 pub use transcript::*;
 pub use turn::*;
+pub use view::*;
 pub use wire::{PendingApprovalInfo, RequestId};
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]

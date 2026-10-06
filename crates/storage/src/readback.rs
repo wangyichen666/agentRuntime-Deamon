@@ -138,21 +138,44 @@ impl RunStore {
                 })
             })
             .transpose()?;
+        let versioned = current_plan
+            .as_ref()
+            .is_some_and(|p| p.value.get("plan_id").is_some());
         let plan_digest = current_plan
             .as_ref()
             .map(|plan| {
-                serde_json::to_vec(&plan.value).map(|bytes| format!("{:x}", Sha256::digest(bytes)))
+                if versioned {
+                    let document: PlanDocument = serde_json::from_value(plan.value.clone())
+                        .map_err(|e| RuntimeError::Protocol(e.to_string()))?;
+                    crate::plans::validate_document(&document)?;
+                    Ok(document.content_digest)
+                } else {
+                    crate::plans::validate_legacy_plan(&plan.value)?;
+                    serde_json::to_vec(&plan.value)
+                        .map(|bytes| format!("{:x}", Sha256::digest(bytes)))
+                        .map_err(|e| RuntimeError::Protocol(e.to_string()))
+                }
             })
-            .transpose()
-            .map_err(|e| RuntimeError::Protocol(e.to_string()))?;
-        // 旧计划只读兼容：digest 用于展示，不授予 execute 身份。
-        omitted.push("plan_execution_identity".into());
+            .transpose()?;
+        if !versioned {
+            omitted.push("plan_execution_identity".into());
+        }
         let ledger: Option<String> = tx.query_row("SELECT l.envelope_json FROM context_ledgers l JOIN runs r ON r.id=l.run_id WHERE r.lifetime=?1 AND json_extract(l.envelope_json,'$.source.generation')=?2 ORDER BY r.generation DESC,l.round DESC LIMIT 1", params![meta.lifetime.0,generation], |r| r.get(0)).optional()?;
         let context_usage = ledger
             .map(|raw| {
                 serde_json::from_str(&raw).map_err(|e| RuntimeError::Protocol(e.to_string()))
             })
             .transpose()?;
+        let run_owners = active_runs
+            .iter()
+            .chain(last_durable_terminal.iter())
+            .map(|run| owner_in(&tx, &run.run_id))
+            .collect::<Result<Vec<_>, _>>()?;
+        let message_ids = if mode == HistoryReadMode::Canonical {
+            canonical_message_ids(&tx, key, &meta.lifetime, &messages)?
+        } else {
+            Vec::new()
+        };
         let result = SessionReadback {
             schema_version: 1,
             session_id: key.clone(),
@@ -165,8 +188,10 @@ impl RunStore {
             history_mode: mode,
             omitted,
             messages,
+            message_ids,
             batch_ranges,
             active_owner,
+            run_owners,
             active_runs,
             queue_cursor: queue_rows.last().map(|r| r.id),
             queue_rows,
@@ -181,6 +206,67 @@ impl RunStore {
     }
 }
 
+/// 同一已校验 snapshot 的批次 provenance；最后 assistant 与 live turn identity 一致。
+fn canonical_message_ids(
+    db: &rusqlite::Connection,
+    key: &SessionKey,
+    life: &SessionLifetimeId,
+    messages: &[Message],
+) -> Result<Vec<String>, RuntimeError> {
+    let mut query=db.prepare("SELECT b.start_seq,b.end_seq,t.id,b.run_id,r.lifetime,r.session_id FROM transcript_batches b LEFT JOIN runs r ON r.id=b.run_id LEFT JOIN turns t ON t.run_id=b.run_id WHERE b.lifetime=?1 ORDER BY b.start_seq,b.rowid")?;
+    let ranges = query
+        .query_map(params![life.0], |row| {
+            Ok((
+                row.get::<_, u64>(0)?,
+                row.get::<_, u64>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut turns = Vec::with_capacity(messages.len());
+    for (start, end, turn, run, run_life, run_key) in ranges {
+        if run.is_some()
+            && (turn.is_none()
+                || run_life.as_ref() != Some(&life.0)
+                || run_key.as_ref() != Some(&key.0))
+        {
+            return Err(RuntimeError::Protocol("canonical batch owner 损坏".into()));
+        }
+        for _ in start..end {
+            turns.push(turn.clone());
+        }
+    }
+    if turns.len() != messages.len() {
+        return Err(RuntimeError::Protocol(
+            "canonical message identity 范围损坏".into(),
+        ));
+    }
+    let mut last_assistant = std::collections::BTreeMap::new();
+    for (index, (message, turn)) in messages.iter().zip(&turns).enumerate() {
+        if message.role == Role::Assistant
+            && let Some(turn) = turn
+        {
+            last_assistant.insert(turn.clone(), index);
+        }
+    }
+    Ok(turns
+        .into_iter()
+        .enumerate()
+        .map(|(index, turn)| {
+            if let Some(turn) = turn
+                && last_assistant.get(&turn) == Some(&index)
+            {
+                format!("{turn}:assistant")
+            } else {
+                format!("{}:canonical:{index}", life.0)
+            }
+        })
+        .collect())
+}
+
 #[cfg(test)]
 pub(crate) fn remove_v14_for_fixture(db: &rusqlite::Connection) {
     let mut query = db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND (name LIKE 'snapshot_%' OR name='session_metadata_revision')").unwrap();
@@ -193,13 +279,13 @@ pub(crate) fn remove_v14_for_fixture(db: &rusqlite::Connection) {
     for name in names {
         db.execute_batch(&format!("DROP TRIGGER {name}")).unwrap();
     }
-    db.execute_batch("ALTER TABLE session_heads DROP COLUMN metadata_revision; DROP TABLE snapshot_clock; DELETE FROM schema_migrations WHERE version=14;").unwrap();
+    db.execute_batch("ALTER TABLE session_heads DROP COLUMN metadata_revision; DROP TABLE provider_requests; DROP TABLE event_view_stamps; DROP TABLE tool_discoveries; DROP TABLE snapshot_clock; DROP TABLE compact_run_links; DROP TABLE plan_versions; DROP TABLE plan_decisions; DROP TABLE plan_legacy_evidence; DROP TABLE hook_outcomes; DROP TABLE hook_publications; DROP TABLE hook_continuations; DELETE FROM schema_migrations WHERE version>=14;").unwrap();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Admission, AdmissionMode, SessionLifecycle, SessionQuery};
+    use crate::{Admission, AdmissionMode, SessionLifecycle, SessionQuery, TranscriptStore};
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     fn path() -> std::path::PathBuf {
@@ -209,6 +295,67 @@ mod tests {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ))
     }
+    #[test]
+    fn canonical_message_ids_use_native_turn_and_reject_foreign_batch_owner() {
+        fn identities(store: &RunStore) {
+            let key = SessionKey("session-message-ids.jsonl".into());
+            let meta = store.create_session(&key).unwrap();
+            let run = admit(store, &key, 90);
+            assert!(store.try_start_queued(&run.run_id).unwrap());
+            let owner = store.run_owner(&run.run_id).unwrap();
+            store
+                .append_transcript(&owner, "reply", &[Message::text(Role::Assistant, "回答")])
+                .unwrap();
+            store
+                .finish(&run.run_id, RunStatus::Completed, Some("回答"), None)
+                .unwrap();
+            let read = store
+                .session_readback(&key, HistoryReadMode::Canonical)
+                .unwrap();
+            assert_eq!(
+                read.message_ids,
+                vec![
+                    format!("{}:canonical:0", meta.lifetime.0),
+                    format!("{}:assistant", run.turn_id.0)
+                ]
+            );
+            assert_eq!(
+                read.message_ids,
+                store
+                    .session_readback(&key, HistoryReadMode::Canonical)
+                    .unwrap()
+                    .message_ids
+            );
+            assert!(
+                store
+                    .session_readback(&key, HistoryReadMode::Model)
+                    .unwrap()
+                    .message_ids
+                    .is_empty()
+            );
+            let foreign = SessionKey("session-foreign-ids.jsonl".into());
+            store.create_session(&foreign).unwrap();
+            let run = admit(store, &foreign, 91);
+            store
+                .lock_connection()
+                .unwrap()
+                .execute(
+                    "UPDATE transcript_batches SET run_id=?1 WHERE lifetime=?2",
+                    params![run.run_id.0, meta.lifetime.0],
+                )
+                .unwrap();
+            assert!(
+                store
+                    .session_readback(&key, HistoryReadMode::Canonical)
+                    .is_err()
+            );
+        }
+        identities(&RunStore::open(std::path::Path::new(":memory:")).unwrap());
+        let path = path();
+        identities(&RunStore::open(&path).unwrap());
+        std::fs::remove_file(path).unwrap();
+    }
+
     fn admit(store: &RunStore, key: &SessionKey, request: u64) -> RunRecord {
         let Admission::New(run) = store
             .admit_with_route(

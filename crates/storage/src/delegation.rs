@@ -172,7 +172,7 @@ impl RunStore {
                     "相同 spawn_key 的委派参数冲突".into(),
                 ));
             }
-            transaction.commit()?;
+            super::views::commit(transaction)?;
             return Ok(record);
         }
         if !matches!(
@@ -255,6 +255,7 @@ impl RunStore {
         if let Some(raw) = parent_snapshot {
             let mut snapshot: agent_core::RunSnapshot =
                 serde_json::from_str(&raw).map_err(|e| RuntimeError::Protocol(e.to_string()))?;
+            snapshot.entry_channel = agent_core::HookChannel::Subagent;
             // 仅显式选择本父 run 的来源；祖先捕获包不自动传给孙任务。
             snapshot.delegation_context = if request.context_source_ids.is_empty() {
                 None
@@ -377,7 +378,7 @@ impl RunStore {
         )?;
         let record = read_delegation_in(&transaction, &child_run_id.0)?
             .ok_or_else(|| RuntimeError::Internal("缺少持久记录：new delegation".into()))?;
-        transaction.commit()?;
+        super::views::commit(transaction)?;
         Ok(record)
     }
 
@@ -463,7 +464,7 @@ impl RunStore {
                         .reservation_expires_at_ms
                         .is_some_and(|expires| expires > now_ms()))
         {
-            transaction.commit()?;
+            super::views::commit(transaction)?;
             return Ok(record);
         }
         if !record.status.terminal() || record.revision != revision {
@@ -492,7 +493,7 @@ impl RunStore {
         )?;
         let result = read_delegation_in(&transaction, &child_run_id.0)?
             .ok_or_else(|| RuntimeError::Internal("缺少持久记录：delegation".into()))?;
-        transaction.commit()?;
+        super::views::commit(transaction)?;
         Ok(result)
     }
 
@@ -529,7 +530,7 @@ impl RunStore {
             && record.result_state == "delivered"
             && record.reservation_owner.as_deref() == Some(owner)
         {
-            transaction.commit()?;
+            super::views::commit(transaction)?;
             return Ok(record);
         }
         if record.result_state != "reserved"
@@ -551,7 +552,7 @@ impl RunStore {
             revision=revision+1 WHERE child_run_id=?1", params![child_run_id.0, target, now_ms()])?;
         let result = read_delegation_in(&transaction, &child_run_id.0)?
             .ok_or_else(|| RuntimeError::Internal("缺少持久记录：delegation".into()))?;
-        transaction.commit()?;
+        super::views::commit(transaction)?;
         Ok(result)
     }
 }
@@ -733,6 +734,7 @@ mod context_tests {
         let key = SessionKey(key.into());
         store.create_session(&key).unwrap();
         let snapshot = RunSnapshot {
+            entry_channel: agent_core::HookChannel::DaemonRpc,
             route: None,
             tools: vec![ToolSpec {
                 name: "read_file".into(),
@@ -758,6 +760,7 @@ mod context_tests {
         let Admission::New(run) = store
             .admit_run(
                 &RunAdmission {
+                    plan_execution: None,
                     session_key: key,
                     expected_lifetime: None,
                     request_id: RequestId::Number(1),

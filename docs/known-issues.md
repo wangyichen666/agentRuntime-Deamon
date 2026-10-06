@@ -1,14 +1,14 @@
 # 已知问题
 
-## Runtime 部署与验证边界（2026-10-02）
+## Runtime 部署与验证边界（2026-10-07）
 
-当前 schema v14。2026-10-05 源码复核更正“全部 Wave 完成”的历史结论：本轮只补齐早期恢复读取/协议/lifetime 屏障纵切，302 项 Rust 和 27 项 Web 测试通过；完整 Wave 0–7 验收**未完成**。证据见 [最新实施记录](./changes/runtime-readback-fences.md)。
+当前 schema v20。版本化计划、受治理 hooks、Stop continuation、独立 compact 和冻结工具发现已接通 SQLite 与三入口；证据见 [最新实施记录](./changes/governed-runtime-controls.md)。八波任务已完成实现与本地门禁；逐项 owner、迁移、失败语义和真实环境边界见 [最终报告](./changes/governed-runtime-final-report.md)。
 
-- Wave 5B：stable plan identity、digest CAS execute/discard、pending_execution/executing、受治理 boundary hooks **未实现**。readback 的 plan_digest 只供展示。
-- 手动 compact 独立 canonical run/Started/exact cancel **未实现**，仍复用历史 run owner。
-- 所有入口 live event/readback 的统一 revision 防回退 **未实现**；领域比较 helper 已提供但未统一接线。
-- generation-scoped tool_search 与 runtime/daemon/sandbox/cli/acp/gateway 最终物理 crate 提取 **未实现**。
-- 新 model readback 只返回已安装模型历史 projection+suffix，完整四层 Provider 请求只读重建**未实现**；`/context` 保留既有读取路径。
+- Hook 配置默认禁用，须显式选择受信私有配置目录；超时/取消/未知回执不重放。配置和读回合同见 [Hook API](./hooks-api.md)。真实用户脚本、Linux 和商业 Provider 的续跑预算尚未做生产验证。
+- 手动 compact 已有独立 canonical run/Started/exact cancel、后台摘要和 unknown 重启读回；旧 unary 等待同一 native receipt，ACP v1 只读 native /run，ACP v2 已接通 opt-in 标准投影。商业摘要 Provider、跨平台生产负载仍未验证。见 [Compact API](./compact-control-api.md)。
+- 共享 revision reducer 已接通 Rust 客户端与 Web 的纯 RPC 归约；真实丢帧/重复/重启与三入口合同已验证。真实生产慢消费者、跨平台网络负载尚未验证，见 [视图归约 API](./view-reducer-api.md)。
+- generation-scoped tool_search 已通过冻结schema、缓存失效、取消发布屏障、nested安全链与三入口本地合同；真实商业Provider、大型远端MCP目录和生产reload负载尚未验证，见 [工具发现 API](./tool-discovery-api.md)。runtime/daemon/sandbox/cli/acp/gateway 已完成物理 crate 提取，旧根业务模块删除，见 [crate 文档](./runtime-crates.md)。
+- 完整 Provider 请求重建已保存发送前材料，实际模型/压缩摘要与只读路径复用同一纯 assembler。动态环境与 plan/skill/memory 当前状态明确不可重放，旧 run 无 capture 返回 unavailable；本地诊断隐藏 memory/凭据/媒体/工具参数，权限变化拒绝完整诊断。真实商业 Provider tokenizer 与生产凭据组合尚未验证，见 [请求上下文 API](./provider-context-api.md)。
 - clear/delete/fork 所有版本现在要求 expected_lifetime；兼容方法名保留，缺身份的旧客户端需先 readback 后发请求。恢复读取不切换 preferred session。
 
 - Native 仍是软边界，不能阻止同 UID shell 访问宿主。Docker foreground exec 已接通；后台 Docker resource **未实现**，强隔离后台请求 fail closed。
@@ -16,7 +16,8 @@
 - 远程 MCP 本地 TLS/JSON/SSE 合同已验证；真实远端服务、OAuth 和跨服务互操作验收 **未实现**。目前授权使用环境 token 引用。
 - macOS Keychain 适配器已编译，自动化故障测试使用测试 secret store，未修改真实 Keychain。其他平台 native secret store **未实现**，使用 `env:NAME`。
 - token meter 是确定性估算器，使用同 lifetime/route/projection generation 的成功 usage 校准；不宣称等同各厂商 tokenizer。各候选 route 使用显式冻结的配置预算。
-- 已运行本地 workspace/MSRV/release/Web/离线依赖审计，GitHub Actions 与在线漏洞公告刷新未运行。
+- ACP v1 默认兼容，v2 须 `editor --acp-v2` 并协商；真实 IDE 的 v2 互操作仍待验证，见 [ACP v2 API](./acp-v2-api.md)。
+- 已运行本地 workspace/MSRV/release/Web/离线依赖审计：379 项 Rust（31 真实 daemon/入口、12 架构）与 36 项 Web 均通过；GitHub Actions 与在线漏洞公告刷新未运行。
 
 > 本文件仅记录待处理问题；在用户明确要求“开始修复/开发”前，不修改相关实现。
 
@@ -90,3 +91,6 @@ P5 本轮重新执行在线检查时 GitHub 443 连接超时；离线使用本�
 - 结果 reservation 为 30 秒租约。客户端收到 reserve 后需调用 commit 或 release；断线时无需服务端推断业务终态，租约过期后可重领。
 - token 上限依据已报告的 Provider usage 和本地估算在响应后检查；Provider 单次超额输出无法事前完全阻止。活动 child 的 steer、terminal revival 尚未实现。
 - 父 run 若先于 child 结束，其原有流已经关闭；child 终态仍可经 `list_subagents`、`read_subagent` 与 child session 订阅读取。真实商业 Provider 的异步委派兼容性尚未用密钥验证。
+
+
+2026-10-07：Wave7 真实 opt-in ACP v2 完成，默认 v1 回归通过；Rust376/Web36。本机真实 stdio/daemon/mock Provider 合同已验证，真实 IDE 的 draft v2 互操作未验证。Wave8 物理 crate 拆分尚未完成。

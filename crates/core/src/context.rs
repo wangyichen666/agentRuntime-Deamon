@@ -2,6 +2,7 @@ use crate::{ExactOwner, Message, ProjectionGeneration, Role, SessionLifetimeId, 
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ContextSource {
     pub lifetime: SessionLifetimeId,
     #[serde(default = "source_start")]
@@ -20,6 +21,41 @@ pub struct CompactIntent {
     pub operation: String,
     pub owner: ExactOwner,
     pub source: ContextSource,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompactRunRequest {
+    pub session_key: crate::SessionKey,
+    pub session_lifetime_id: SessionLifetimeId,
+    pub operation_id: String,
+    pub expected_revision: TranscriptSeq,
+    pub expected_projection_generation: ProjectionGeneration,
+    #[serde(default)]
+    pub compatibility_owner_run_id: Option<crate::RunId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactRunOutcome {
+    Started,
+    Committed,
+    NoGain,
+    Rejected,
+    Failed,
+    Cancelled,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompactRunReadback {
+    pub schema_version: u16,
+    pub owner: ExactOwner,
+    pub operation_id: String,
+    pub source: ContextSource,
+    pub outcome: CompactRunOutcome,
+    pub result_generation: Option<ProjectionGeneration>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ContextProjection {

@@ -7,6 +7,8 @@ use serde_json::Value;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunRecord {
+    #[serde(default)]
+    pub kind: RunKind,
     pub run_id: RunId,
     pub turn_id: TurnId,
     pub session_id: SessionId,
@@ -16,6 +18,14 @@ pub struct RunRecord {
     pub content: Option<String>,
     pub error_code: Option<i64>,
     pub error_message: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunKind {
+    #[default]
+    Chat,
+    Compact,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

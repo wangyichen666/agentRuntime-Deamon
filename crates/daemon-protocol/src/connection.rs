@@ -129,10 +129,14 @@ fn required_capability(method: &str) -> Option<&'static str> {
     match method {
         "ping" | "session.new" | "session.load" | "session.load_page" | "session.list"
         | "session.resume" | "session.clear" | "session.delete" | "session.fork"
-        | "session.trace" | "session.trace_page" => Some("session"),
+        | "session.trace" | "session.trace_page" | "session.close" => Some("session"),
+        "sessions.plan.readback" | "sessions.plan.discard" | "hooks.readback" | "views.reduce" => {
+            Some("session")
+        }
         "chat.send"
         | "run.read"
         | "run.events"
+        | "run.discovery"
         | "run.tools"
         | "run.audit"
         | "run.provider_attempts"
@@ -147,7 +151,7 @@ fn required_capability(method: &str) -> Option<&'static str> {
         | "interaction.reject"
         | "interaction.read"
         | "interaction.list" => Some("interactions"),
-        "session.compact" => Some("context"),
+        "session.compact" | "compact.start" | "context.readback" => Some("context"),
         "memory.store" | "memory.recall" | "memory.list" | "memory.forget" | "memory.scope"
         | "memory.feedback" | "memory.flywheel" | "memory.evidence" => Some("memory"),
         "resources.list"
@@ -205,6 +209,12 @@ impl ConnectionState {
         if let Some(negotiated) = &self.negotiated {
             if request.protocol_version != Some(negotiated.protocol_version)
                 || !negotiated.permits(&request.method)
+                || (request.method == "chat.send"
+                    && request
+                        .params
+                        .get("plan_execution")
+                        .is_some_and(|v| !v.is_null())
+                    && !negotiated.permits("sessions.plan.readback"))
             {
                 return Err(ProtocolError::InvalidParams(
                     "方法/版本/schema 能力未协商".into(),

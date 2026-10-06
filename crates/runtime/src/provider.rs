@@ -1,0 +1,664 @@
+mod anthropic;
+mod attempt;
+mod circuit;
+mod error;
+mod ollama;
+mod openai;
+mod retry;
+mod route;
+pub(crate) mod wire_tests;
+
+use std::env;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock, RwLockReadGuard};
+
+use anyhow::{Context, Result, bail};
+use async_trait::async_trait;
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
+
+pub use anthropic::AnthropicProvider;
+pub use attempt::{AttemptStatus, ProviderAttempt, ProviderUsage};
+pub use circuit::{CircuitBreaker, CircuitState};
+pub use error::{ProviderError, ProviderErrorKind, TimeoutPhase};
+pub use ollama::OllamaProvider;
+pub use openai::OpenAiProvider;
+pub use retry::{RetryDecision, RetryPolicy};
+pub use route::{ContextPolicySnapshot, FrozenRoute, RouteSnapshot, TimeoutPolicy};
+
+async fn checked_response(mut response: reqwest::Response) -> Result<reqwest::Response> {
+    if response.status().is_success() {
+        return Ok(response);
+    }
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = match response.chunk().await {
+        Ok(Some(chunk)) => String::from_utf8_lossy(&chunk[..chunk.len().min(4096)]).into_owned(),
+        _ => String::new(),
+    };
+    Err(ProviderError::from_http(status, &headers, &body).into())
+}
+
+fn sanitize_provider_error(error: anyhow::Error) -> anyhow::Error {
+    if error.downcast_ref::<ProviderError>().is_some() {
+        return error;
+    }
+    if let Some(reqwest) = error.downcast_ref::<reqwest::Error>() {
+        return ProviderError::from_reqwest(reqwest).into();
+    }
+    ProviderError::new(ProviderErrorKind::Protocol, "Provider 协议数据无效").into()
+}
+
+fn stream_transport_error(error: reqwest::Error) -> ProviderError {
+    if error.is_timeout() {
+        ProviderError::timeout(TimeoutPhase::StreamIdle)
+    } else {
+        ProviderError::new(ProviderErrorKind::Transport, "Provider 流读取失败")
+    }
+}
+
+pub use agent_core::{Message, Role, ToolCall, ToolSpec};
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Response {
+    Text(String),
+    ToolCalls(Vec<ToolCall>),
+    ToolAssemblyFailed(ToolCallStreamError),
+}
+
+pub use agent_core::ApiType;
+#[cfg(test)]
+pub use agent_core::RouteCandidate;
+
+/// 一个可持久化的模型连接配置。api_key 在配置中保存 env:/keychain: 引用，
+/// 对外展示时应使用 `config::ProfileSummary`，不要把密钥序列化返回给 Web。
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ProviderProfile {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    pub api_type: ApiType,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub base_url: String,
+    pub model: String,
+}
+
+impl std::fmt::Debug for ProviderProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderProfile")
+            .field("id", &self.id)
+            .field("api_type", &self.api_type)
+            .field("model", &self.model)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[已隐藏]"))
+            .finish()
+    }
+}
+
+impl ProviderProfile {
+    #[allow(dead_code)]
+    pub fn from_env() -> Result<Self> {
+        let api_type = api_type_from_env()?;
+        let api_key = env::var("OPENAI_API_KEY")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let base_url = env::var("OPENAI_BASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| match api_type {
+                ApiType::Ollama => "http://127.0.0.1:11434".to_owned(),
+                _ => String::new(),
+            });
+        let model = required_env("MODEL_NAME")?;
+        Ok(Self {
+            id: "environment".to_owned(),
+            name: "环境变量配置".to_owned(),
+            api_type,
+            api_key,
+            base_url,
+            model,
+        })
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.id.trim().is_empty() {
+            bail!("模型配置 ID 不能为空");
+        }
+        if self.model.trim().is_empty() {
+            bail!("模型名称不能为空");
+        }
+        if !matches!(self.api_type, ApiType::Ollama)
+            && self
+                .api_key
+                .as_deref()
+                .is_none_or(|key| key.trim().is_empty())
+        {
+            bail!("{} 配置需要 API key", self.api_type);
+        }
+        if self.base_url.trim().is_empty() {
+            bail!("服务地址不能为空");
+        }
+        let url =
+            reqwest::Url::parse(&self.base_url).context("服务地址不是合法 URL，已隐藏正文")?;
+        if !url.username().is_empty() || url.password().is_some() || url.query().is_some() {
+            bail!("服务地址不得包含凭据或 query，请使用 secret 引用");
+        }
+        if !matches!(url.scheme(), "http" | "https") {
+            bail!("服务地址必须使用 http:// 或 https://");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct ProviderSnapshot {
+    profile: ProviderProfile,
+    provider: Arc<dyn Provider>,
+}
+
+/// 运行时可热切换的 Provider。LoopEngine、上下文、子 Agent 和 Cron 都持有
+/// 这个稳定的 trait object，切换只替换内部实现，不会让已有 Session 失效。
+pub struct ProviderManager {
+    current: RwLock<ProviderSnapshot>,
+    fallbacks: RwLock<Vec<ProviderSnapshot>>,
+    generation: AtomicU64,
+    circuit: Arc<CircuitBreaker>,
+}
+
+impl ProviderManager {
+    pub fn new(profile: ProviderProfile) -> Result<Self> {
+        profile.validate()?;
+        let provider: Arc<dyn Provider> = Arc::from(build_provider_from_profile(&profile)?);
+        Ok(Self {
+            current: RwLock::new(ProviderSnapshot { profile, provider }),
+            fallbacks: RwLock::new(Vec::new()),
+            generation: AtomicU64::new(1),
+            circuit: Arc::new(CircuitBreaker::default()),
+        })
+    }
+
+    fn read(&self) -> RwLockReadGuard<'_, ProviderSnapshot> {
+        match self.current.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    pub fn profile(&self) -> ProviderProfile {
+        self.read().profile.clone()
+    }
+
+    pub fn switch(&self, profile: ProviderProfile) -> Result<()> {
+        profile.validate()?;
+        let provider: Arc<dyn Provider> = Arc::from(build_provider_from_profile(&profile)?);
+        match self.current.write() {
+            Ok(mut guard) => *guard = ProviderSnapshot { profile, provider },
+            Err(poisoned) => *poisoned.into_inner() = ProviderSnapshot { profile, provider },
+        }
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub fn set_fallbacks(&self, profiles: Vec<ProviderProfile>) -> Result<()> {
+        let mut fallbacks = Vec::new();
+        let active_id = self.profile().id;
+        let mut seen = std::collections::HashSet::new();
+        for profile in profiles {
+            if profile.id == active_id || !seen.insert(profile.id.clone()) {
+                continue;
+            }
+            profile.validate()?;
+            let provider: Arc<dyn Provider> = Arc::from(build_provider_from_profile(&profile)?);
+            fallbacks.push(ProviderSnapshot { profile, provider });
+        }
+        match self.fallbacks.write() {
+            Ok(mut guard) => *guard = fallbacks,
+            Err(poisoned) => *poisoned.into_inner() = fallbacks,
+        }
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub fn freeze(&self, token_budget: usize) -> FrozenRoute {
+        let current = self.read();
+        let fallbacks = match self.fallbacks.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let candidates = std::iter::once(&*current)
+            .chain(fallbacks.iter())
+            .collect::<Vec<_>>();
+        FrozenRoute {
+            snapshot: RouteSnapshot {
+                candidates: candidates
+                    .iter()
+                    .map(|item| route::candidate_from_profile(&item.profile))
+                    .collect(),
+                retry_policy: RetryPolicy::default(),
+                timeout_policy: TimeoutPolicy::default(),
+                context_policy: ContextPolicySnapshot { token_budget },
+                config_generation: self.generation.load(Ordering::SeqCst),
+            },
+            providers: candidates
+                .iter()
+                .map(|item| item.provider.clone())
+                .collect(),
+            circuit: self.circuit.clone(),
+        }
+    }
+
+    pub fn restore(
+        &self,
+        snapshot: RouteSnapshot,
+        profiles: &[ProviderProfile],
+    ) -> Result<FrozenRoute> {
+        FrozenRoute::restore(snapshot, profiles, self.circuit.clone())
+    }
+}
+
+#[async_trait]
+impl Provider for ProviderManager {
+    fn api_type(&self) -> ApiType {
+        self.read().provider.api_type()
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        self.read().provider.capabilities()
+    }
+
+    async fn chat(&self, messages: &[Message], tools: &[ToolSpec]) -> Result<Response> {
+        let provider = self.read().provider.clone();
+        provider.chat(messages, tools).await
+    }
+
+    async fn chat_stream(
+        &self,
+        messages: &[Message],
+        tools: &[ToolSpec],
+        events: mpsc::UnboundedSender<ProviderEvent>,
+    ) -> Result<()> {
+        let provider = self.read().provider.clone();
+        provider.chat_stream(messages, tools, events).await
+    }
+}
+
+pub fn api_type_from_env() -> Result<ApiType> {
+    match env::var("API_TYPE") {
+        Ok(value) => Ok(value.parse()?),
+        Err(env::VarError::NotPresent) => Ok(ApiType::OpenaiChat),
+        Err(error) => Err(error).context("读取环境变量 API_TYPE 失败"),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProviderCapabilities {
+    pub images: bool,
+    pub tools: bool,
+}
+
+impl ProviderCapabilities {
+    pub const fn new(images: bool, tools: bool) -> Self {
+        Self { images, tools }
+    }
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub enum IdentitySource {
+    WireId(String),
+    Position(u64),
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ExecutionIdentity {
+    pub domain: ApiType,
+    pub source: IdentitySource,
+}
+
+impl ExecutionIdentity {
+    pub fn wire(domain: ApiType, id: impl Into<String>) -> Self {
+        Self {
+            domain,
+            source: IdentitySource::WireId(id.into()),
+        }
+    }
+
+    pub const fn position(domain: ApiType, position: u64) -> Self {
+        Self {
+            domain,
+            source: IdentitySource::Position(position),
+        }
+    }
+
+    pub fn wire_id(&self) -> Option<&str> {
+        match &self.source {
+            IdentitySource::WireId(id) => Some(id),
+            IdentitySource::Position(_) => None,
+        }
+    }
+
+    pub fn encode(&self) -> String {
+        match &self.source {
+            IdentitySource::WireId(id) => format!(
+                "tc1:{}:id:{}",
+                self.domain,
+                URL_SAFE_NO_PAD.encode(id.as_bytes())
+            ),
+            IdentitySource::Position(position) => {
+                format!("tc1:{}:pos:{position}", self.domain)
+            }
+        }
+    }
+
+    pub fn decode(value: &str) -> Option<Self> {
+        let mut parts = value.splitn(4, ':');
+        if parts.next()? != "tc1" {
+            return None;
+        }
+        let domain = parts.next()?.parse().ok()?;
+        let source_kind = parts.next()?;
+        let source = parts.next()?;
+        match source_kind {
+            "id" => {
+                let bytes = URL_SAFE_NO_PAD.decode(source).ok()?;
+                let id = String::from_utf8(bytes).ok()?;
+                Some(Self::wire(domain, id))
+            }
+            "pos" => source
+                .parse::<u64>()
+                .ok()
+                .map(|position| Self::position(domain, position)),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ToolArgumentsFragment {
+    Append(String),
+    AuthoritativeSnapshot(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolCallStreamError {
+    pub code: String,
+    pub message: String,
+}
+
+impl ToolCallStreamError {
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProviderEvent {
+    ResponseStarted,
+    ProtocolDone,
+    Usage(ProviderUsage),
+    TextDelta(String),
+    ThinkingDelta(String),
+    /// Provider 因输出 token 上限截断了本轮响应。
+    OutputTruncated,
+    ToolCallStarted {
+        exec_id: ExecutionIdentity,
+        name: String,
+    },
+    ToolCallDelta {
+        exec_id: ExecutionIdentity,
+        fragment: ToolArgumentsFragment,
+    },
+    ToolCallCompleted {
+        exec_id: ExecutionIdentity,
+    },
+    ToolCallFailed(ToolCallStreamError),
+}
+
+impl ProviderEvent {
+    pub fn is_semantic(&self) -> bool {
+        matches!(self,
+            Self::TextDelta(text) | Self::ThinkingDelta(text) if !text.is_empty()
+        ) || matches!(
+            self,
+            Self::ToolCallStarted { .. }
+                | Self::ToolCallDelta { .. }
+                | Self::ToolCallCompleted { .. }
+                | Self::ToolCallFailed(_)
+                | Self::OutputTruncated
+        )
+    }
+}
+
+#[async_trait]
+pub trait Provider: Send + Sync {
+    fn api_type(&self) -> ApiType {
+        ApiType::OpenaiChat
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::new(true, true)
+    }
+
+    async fn chat(&self, _messages: &[Message], _tools: &[ToolSpec]) -> Result<Response> {
+        bail!("该 provider 仅实现流式事件接口")
+    }
+
+    async fn chat_stream(
+        &self,
+        messages: &[Message],
+        tools: &[ToolSpec],
+        events: mpsc::UnboundedSender<ProviderEvent>,
+    ) -> Result<()> {
+        let response = self.chat(messages, tools).await?;
+        emit_legacy_response(response, self.api_type(), &events)?;
+        send_event(&events, ProviderEvent::ProtocolDone)
+    }
+}
+
+fn emit_legacy_response(
+    response: Response,
+    domain: ApiType,
+    events: &mpsc::UnboundedSender<ProviderEvent>,
+) -> Result<()> {
+    match response {
+        Response::Text(text) => send_event(events, ProviderEvent::TextDelta(text)),
+        Response::ToolCalls(calls) => {
+            if calls.is_empty() {
+                return send_event(
+                    events,
+                    ProviderEvent::ToolCallFailed(ToolCallStreamError::new(
+                        "empty_tool_calls",
+                        "provider 返回了空工具调用批次",
+                    )),
+                );
+            }
+            for (position, call) in calls.into_iter().enumerate() {
+                let identity = ExecutionIdentity::decode(&call.id).unwrap_or_else(|| {
+                    if call.id.is_empty() {
+                        ExecutionIdentity::position(domain, position as u64)
+                    } else {
+                        ExecutionIdentity::wire(domain, call.id)
+                    }
+                });
+                send_event(
+                    events,
+                    ProviderEvent::ToolCallStarted {
+                        exec_id: identity.clone(),
+                        name: call.name,
+                    },
+                )?;
+                send_event(
+                    events,
+                    ProviderEvent::ToolCallDelta {
+                        exec_id: identity.clone(),
+                        fragment: ToolArgumentsFragment::AuthoritativeSnapshot(
+                            call.arguments.to_string(),
+                        ),
+                    },
+                )?;
+                send_event(
+                    events,
+                    ProviderEvent::ToolCallCompleted { exec_id: identity },
+                )?;
+            }
+            Ok(())
+        }
+        Response::ToolAssemblyFailed(error) => {
+            send_event(events, ProviderEvent::ToolCallFailed(error))
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub fn build_provider_from_env() -> Result<Box<dyn Provider>> {
+    let profile = ProviderProfile::from_env()?;
+    build_provider_from_profile(&profile)
+}
+
+pub fn build_provider_from_profile(profile: &ProviderProfile) -> Result<Box<dyn Provider>> {
+    profile.validate()?;
+    match profile.api_type {
+        ApiType::OpenaiChat => Ok(Box::new(OpenAiProvider::new(
+            profile
+                .api_key
+                .as_deref()
+                .map(crate::secrets::resolve)
+                .transpose()?
+                .unwrap_or_default(),
+            profile.base_url.clone(),
+            profile.model.clone(),
+        ))),
+        ApiType::AnthropicMessages => Ok(Box::new(AnthropicProvider::new(
+            profile
+                .api_key
+                .as_deref()
+                .map(crate::secrets::resolve)
+                .transpose()?
+                .unwrap_or_default(),
+            profile.base_url.clone(),
+            profile.model.clone(),
+        ))),
+        ApiType::Ollama => Ok(Box::new(OllamaProvider::new(
+            profile.base_url.clone(),
+            profile.model.clone(),
+            optional_bool_env("OLLAMA_TOOLS_ENABLED", true)?,
+        ))),
+    }
+}
+
+pub(crate) fn required_env(name: &str) -> Result<String> {
+    let value = env::var(name).with_context(|| format!("缺少环境变量 {name}"))?;
+    if value.trim().is_empty() {
+        bail!("环境变量 {name} 不能为空");
+    }
+    Ok(value)
+}
+
+pub(crate) fn optional_bool_env(name: &str, default: bool) -> Result<bool> {
+    match env::var(name) {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Ok(true),
+            "0" | "false" | "no" | "off" => Ok(false),
+            _ => bail!("环境变量 {name} 必须是 true/false、1/0、yes/no 或 on/off"),
+        },
+        Err(env::VarError::NotPresent) => Ok(default),
+        Err(error) => Err(error).with_context(|| format!("读取环境变量 {name} 失败")),
+    }
+}
+
+pub(crate) fn send_event(
+    events: &mpsc::UnboundedSender<ProviderEvent>,
+    event: ProviderEvent,
+) -> Result<()> {
+    events
+        .send(event)
+        .map_err(|_| anyhow::anyhow!("provider 事件接收端已关闭"))
+}
+
+pub(crate) fn outbound_wire_id(internal_id: &str) -> Option<String> {
+    ExecutionIdentity::decode(internal_id)
+        .and_then(|identity| identity.wire_id().map(str::to_owned))
+        .or_else(|| (!internal_id.is_empty()).then(|| internal_id.to_owned()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn execution_identity_is_reversible_and_domain_scoped() {
+        let openai = ExecutionIdentity::wire(ApiType::OpenaiChat, "same-id");
+        let anthropic = ExecutionIdentity::wire(ApiType::AnthropicMessages, "same-id");
+
+        assert_ne!(openai.encode(), anthropic.encode());
+        assert_eq!(ExecutionIdentity::decode(&openai.encode()), Some(openai));
+        assert_eq!(
+            ExecutionIdentity::decode(&anthropic.encode()),
+            Some(anthropic)
+        );
+    }
+
+    #[test]
+    fn positional_identity_has_no_wire_id() {
+        let identity = ExecutionIdentity::position(ApiType::Ollama, 2);
+        assert_eq!(identity.wire_id(), None);
+        assert_eq!(
+            ExecutionIdentity::decode(&identity.encode()),
+            Some(identity)
+        );
+    }
+
+    #[test]
+    fn provider_manager_switches_without_replacing_shared_handle() {
+        let first = ProviderProfile {
+            id: "qwen".to_owned(),
+            name: "Qwen".to_owned(),
+            api_type: ApiType::Ollama,
+            api_key: None,
+            base_url: "http://127.0.0.1:11434".to_owned(),
+            model: "qwen3".to_owned(),
+        };
+        let second = ProviderProfile {
+            model: "llama3".to_owned(),
+            ..first.clone()
+        };
+        let manager = ProviderManager::new(first).unwrap();
+        assert_eq!(manager.profile().model, "qwen3");
+        manager.switch(second).unwrap();
+        assert_eq!(manager.profile().model, "llama3");
+        assert_eq!(manager.api_type(), ApiType::Ollama);
+    }
+
+    #[test]
+    fn frozen_route_keeps_old_candidate_after_hot_switch_and_never_stores_key() {
+        let first = ProviderProfile {
+            id: "first".into(),
+            name: "first".into(),
+            api_type: ApiType::OpenaiChat,
+            api_key: Some("never-persist-this-key".into()),
+            base_url: "http://127.0.0.1:12345".into(),
+            model: "model-a".into(),
+        };
+        let second = ProviderProfile {
+            id: "second".into(),
+            model: "model-b".into(),
+            ..first.clone()
+        };
+        let manager = ProviderManager::new(first).unwrap();
+        let old = manager.freeze(8192);
+        manager.switch(second).unwrap();
+        let new = manager.freeze(8192);
+        assert_eq!(old.snapshot.candidates[0].model, "model-a");
+        assert_eq!(new.snapshot.candidates[0].model, "model-b");
+        assert!(new.snapshot.config_generation > old.snapshot.config_generation);
+        let serialized = serde_json::to_string(&old.snapshot).unwrap();
+        assert!(!serialized.contains("never-persist-this-key"));
+        assert!(!serialized.contains("127.0.0.1"));
+    }
+}

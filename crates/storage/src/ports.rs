@@ -671,6 +671,11 @@ pub trait SessionRepository:
     + crate::ContextRepository
     + crate::MemoryRepository
     + crate::ResourceRepository
+    + crate::HookRepository
+    + crate::CompactRunRepository
+    + crate::RequestRepository
+    + crate::ViewRepository
+    + crate::DiscoveryRepository
 {
 }
 impl<
@@ -684,7 +689,12 @@ impl<
         + TurnRepository
         + crate::ContextRepository
         + crate::MemoryRepository
-        + crate::ResourceRepository,
+        + crate::ResourceRepository
+        + crate::HookRepository
+        + crate::CompactRunRepository
+        + crate::RequestRepository
+        + crate::ViewRepository
+        + crate::DiscoveryRepository,
 > ControlRepository for T
 {
 }

@@ -3,10 +3,20 @@
     not(test),
     deny(clippy::unwrap_used, clippy::expect_used, clippy::print_stdout)
 )]
+mod requests;
+pub use requests::*;
+mod views;
+pub use views::*;
+mod compact_runs;
+pub use compact_runs::*;
+mod discovery;
+pub use discovery::*;
 mod context_projection;
 mod flywheel;
+mod hooks;
 mod memory;
 mod resources;
+pub use hooks::*;
 pub use memory::*;
 pub use resources::*;
 mod ports;
@@ -101,12 +111,12 @@ impl RunStore {
             [],
             |row| row.get(0),
         )?;
-        if version > 14 {
+        if version > 20 {
             return Err(RuntimeError::Protocol(format!(
                 "SQLite schema 版本 {version} 比当前程序支持的版本新"
             )));
         }
-        if version > 0 && version < 14 {
+        if version > 0 && version < 20 {
             backup_database(&connection, path, version)?;
         }
         if version < 1 {
@@ -247,6 +257,24 @@ impl RunStore {
         if version < 14 {
             connection.execute_batch(include_str!("readback_migration.sql"))?;
         }
+        if version < 15 {
+            connection.execute_batch(include_str!("plan_migration.sql"))?;
+        }
+        if version < 16 {
+            connection.execute_batch(include_str!("hook_migration.sql"))?;
+        }
+        if version < 17 {
+            connection.execute_batch(include_str!("compact_run_migration.sql"))?;
+        }
+        if version < 18 {
+            connection.execute_batch(include_str!("discovery_migration.sql"))?;
+        }
+        if version < 19 {
+            connection.execute_batch(include_str!("view_migration.sql"))?;
+        }
+        if version < 20 {
+            connection.execute_batch(include_str!("request_migration.sql"))?;
+        }
         Ok(Self {
             connection: Mutex::new(connection),
             artifact_dir: path.with_extension("artifacts"),
@@ -297,32 +325,48 @@ impl RunStore {
         route: Option<&RouteSnapshot>,
     ) -> Result<Admission, RuntimeError> {
         let admission = agent_core::RunAdmission {
+            plan_execution: None,
             session_key: session_id,
             expected_lifetime: expected.cloned(),
             request_id,
             input: input.into(),
             mode,
         };
-        self.admit_run_inner(&admission, route, None)
+        self.admit_run_inner(&admission, route, None, None, None)
     }
     pub fn admit_run(
         &self,
         admission: &agent_core::RunAdmission,
         snapshot: &agent_core::RunSnapshot,
     ) -> Result<Admission, RuntimeError> {
-        self.admit_run_inner(admission, snapshot.route.as_ref(), Some(snapshot))
+        self.admit_run_inner(
+            admission,
+            snapshot.route.as_ref(),
+            Some(snapshot),
+            None,
+            None,
+        )
     }
     fn admit_run_inner(
         &self,
         admission: &agent_core::RunAdmission,
         route: Option<&RouteSnapshot>,
         snapshot: Option<&agent_core::RunSnapshot>,
+        hook_parent: Option<(&agent_core::ExactOwner, &str)>,
+        compact: Option<&agent_core::CompactRunRequest>,
     ) -> Result<Admission, RuntimeError> {
         let session_id = &admission.session_key;
         let expected = admission.expected_lifetime.as_ref();
         let request_id = &admission.request_id;
         let input = admission.input.as_str();
         let mode = admission.mode;
+        let plan_input = serde_json::json!({
+            "message":input,
+            "reject_if_busy":mode==AdmissionMode::RejectIfBusy,
+            "sandbox":snapshot.map(|s|s.sandbox_requested.as_str()),
+            "context_read_only":snapshot.map(|s|s.context_read_only),
+        })
+        .to_string();
         let mut connection = self.lock_connection()?;
         let transaction = connection.transaction()?;
         let request_json = serde_json::to_string(&request_id)
@@ -337,6 +381,44 @@ impl RunStore {
         if expected.is_some_and(|l| *l != _metadata.lifetime) {
             return Err(RuntimeError::Protocol("stale admission lifetime".into()));
         }
+        if let Some(compact) = compact {
+            if let Some(existing) = compact_runs::existing_in(&transaction, compact)? {
+                return Ok(Admission::Existing(existing));
+            }
+        }
+        if let Some((parent, operation)) = hook_parent {
+            if parent.session_key != *session_id {
+                return Err(RuntimeError::Protocol("continuation session 冲突".into()));
+            }
+            hooks::validate_continuation_in(&transaction, parent, operation, input, snapshot)?;
+        }
+        if let Some(identity) = &admission.plan_execution {
+            if expected.is_none() {
+                return Err(RuntimeError::Protocol(
+                    "plan execution 必须携带 lifetime".into(),
+                ));
+            }
+            if let Some(receipt) = plans::receipt_in(
+                &transaction,
+                session_id,
+                &_metadata.lifetime,
+                identity,
+                agent_core::PlanDecision::Execute,
+                &plan_input,
+            )? {
+                let run_id = receipt
+                    .run_id
+                    .ok_or_else(|| RuntimeError::Protocol("plan execute receipt 缺 run".into()))?;
+                let run = read_run_in(&transaction, &run_id.0)?
+                    .ok_or_else(|| RuntimeError::Protocol("plan receipt run 缺失".into()))?;
+                return Ok(Admission::Existing(run));
+            }
+            if mode != AdmissionMode::RejectIfBusy {
+                return Err(RuntimeError::Protocol(
+                    "plan execution 必须 reject_if_busy".into(),
+                ));
+            }
+        }
         if let Some(id) = transaction
             .query_row(
                 "SELECT id FROM runs WHERE session_id=?1 AND request_id_wire_json=?2 AND lifetime=(SELECT lifetime FROM session_heads WHERE session_id=?1 AND deleted=0)",
@@ -345,6 +427,9 @@ impl RunStore {
             )
             .optional()?
         {
+            let linked: Option<String> = transaction.query_row("SELECT identity_json FROM plan_decisions WHERE run_id=?1",params![id],|r|r.get(0)).optional()?;
+            let stored_identity: Option<agent_core::PlanExecution> = linked.map(|raw| serde_json::from_str(&raw)).transpose().map_err(|e|RuntimeError::Protocol(e.to_string()))?;
+            if stored_identity != admission.plan_execution { return Err(RuntimeError::Protocol("request id 的 plan execution 身份不同".into())); }
             let stored_input: String = transaction.query_row(
                 "SELECT input FROM runs WHERE id=?1",
                 params![id],
@@ -357,13 +442,19 @@ impl RunStore {
             }
             let run = read_run_in(&transaction, &id)?
                 .ok_or_else(|| RuntimeError::Internal("缺少持久记录：existing run".into()))?;
-            transaction.commit()?;
+            if (run.kind == agent_core::RunKind::Compact) != compact.is_some() {
+                return Err(RuntimeError::Protocol("request id 的 run kind 不同".into()));
+            }
+            views::commit(transaction)?;
             return Ok(Admission::Existing(run));
         }
         if input.len() > 65536 {
             return Err(RuntimeError::Protocol(
                 "run 输入超过 64 KiB 准入预算".into(),
             ));
+        }
+        if let Some(compact) = compact {
+            compact_runs::source_check_in(&transaction, compact, snapshot)?;
         }
         let queued: i64 =
             transaction.query_row("SELECT count(*) FROM runs WHERE status='queued'", [], |r| {
@@ -396,6 +487,9 @@ impl RunStore {
         let rowid = transaction.last_insert_rowid();
         let run_id = RunId(format!("run-{rowid}"));
         let turn_id = TurnId(format!("turn-{rowid}"));
+        if let Some((parent, operation)) = hook_parent {
+            transaction.execute("INSERT INTO hook_continuations(parent_run_id,child_run_id,operation_id) VALUES(?1,?2,?3)",params![parent.run_id.0,run_id.0,operation])?;
+        }
         transaction.execute(
             "UPDATE runs SET id=?1 WHERE rowid=?2",
             params![run_id.0, rowid],
@@ -420,16 +514,30 @@ impl RunStore {
                 params![run_id.0, payload],
             )?;
         }
-        insert_event(
-            &transaction,
-            &run_id,
-            "user_message",
-            &serde_json::json!({"content": input}),
-        )?;
-        transaction.execute("INSERT INTO queued_messages(session_id, run_id, message, status) VALUES (?1, ?2, ?3, 'queued')", params![session_id.0, run_id.0, input])?;
+        if let Some(identity) = &admission.plan_execution {
+            plans::admit_execution(
+                &transaction,
+                session_id,
+                &_metadata.lifetime,
+                identity,
+                &plan_input,
+                &run_id,
+            )?;
+        }
+        if let Some(compact) = compact {
+            compact_runs::start_in(&transaction, compact, &run_id, snapshot)?;
+        } else {
+            insert_event(
+                &transaction,
+                &run_id,
+                "user_message",
+                &serde_json::json!({"content": input}),
+            )?;
+            transaction.execute("INSERT INTO queued_messages(session_id, run_id, message, status) VALUES (?1, ?2, ?3, 'queued')", params![session_id.0, run_id.0, input])?;
+        }
         let run = read_run_in(&transaction, &run_id.0)?
             .ok_or_else(|| RuntimeError::Internal("缺少持久记录：inserted run".into()))?;
-        transaction.commit()?;
+        views::commit(transaction)?;
         Ok(Admission::New(run))
     }
 
@@ -446,12 +554,12 @@ impl RunStore {
             )
             .optional()?;
         if candidate.as_deref() != Some(&run_id.0) {
-            transaction.commit()?;
+            views::commit(transaction)?;
             return Ok(false);
         }
         let busy: i64 = transaction.query_row("SELECT count(*) FROM runs WHERE session_id=(SELECT session_id FROM runs WHERE id=?1) AND status IN ('running','waiting_interaction')", params![run_id.0], |row| row.get(0))?;
         if busy != 0 {
-            transaction.commit()?;
+            views::commit(transaction)?;
             return Ok(false);
         }
         let changed = transaction.execute(
@@ -500,7 +608,7 @@ impl RunStore {
                 params![run_id.0, now_ms()],
             )?;
         }
-        transaction.commit()?;
+        views::commit(transaction)?;
         Ok(changed == 1)
     }
 
@@ -549,7 +657,7 @@ impl RunStore {
     pub fn recoverable_queued(&self) -> Result<Vec<RunRecord>, RuntimeError> {
         let connection = self.lock_connection()?;
         let mut statement = connection
-            .prepare("SELECT id FROM runs WHERE status='queued' ORDER BY created_at_ms, rowid")?;
+            .prepare("SELECT id FROM runs WHERE status='queued' AND id NOT IN (SELECT run_id FROM plan_decisions WHERE run_id IS NOT NULL AND decision='execute') ORDER BY created_at_ms, rowid")?;
         let ids = statement
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -599,7 +707,7 @@ impl RunStore {
                 .ok_or_else(|| RuntimeError::Internal("缺少持久记录：cancelled run".into()))?;
             delegation::mark_terminal_in(&transaction, run_id, &cancelled)?;
         }
-        transaction.commit()?;
+        views::commit(transaction)?;
         Ok(changed == 1)
     }
 
@@ -643,13 +751,21 @@ impl RunStore {
         if status != "running" {
             return Err(RuntimeError::Protocol("run 不在执行状态".into()));
         }
-        let budget: Option<i64> = transaction
+        let mut budget: Option<i64> = transaction
             .query_row(
                 "SELECT max_tool_calls FROM delegations WHERE child_run_id=?1",
                 params![run_id.0],
                 |row| row.get(0),
             )
             .optional()?;
+        let continuation: i64 = transaction.query_row(
+            "SELECT count(*) FROM hook_continuations WHERE child_run_id=?1",
+            params![run_id.0],
+            |r| r.get(0),
+        )?;
+        if continuation == 1 {
+            budget = Some(budget.map_or(8, |limit| limit.min(8)));
+        }
         if let Some(budget) = budget {
             let used: i64 = transaction.query_row(
                 "SELECT count(*) FROM tool_executions WHERE run_id=?1",
@@ -684,7 +800,7 @@ impl RunStore {
             "tool_batch_prepared",
             &serde_json::json!({"round": round, "calls": calls.iter().map(|(call, _, _, _)| &call.id).collect::<Vec<_>>()}),
         )?;
-        transaction.commit()?;
+        views::commit(transaction)?;
         Ok(())
     }
 
@@ -775,7 +891,7 @@ impl RunStore {
             "tool_batch_completed",
             &serde_json::json!({"round": round}),
         )?;
-        transaction.commit()?;
+        views::commit(transaction)?;
         Ok(())
     }
 
@@ -827,7 +943,7 @@ impl RunStore {
             "UPDATE turns SET status='running' WHERE run_id=?1 AND status='queued'",
             params![run_id.0],
         )?;
-        transaction.commit()?;
+        views::commit(transaction)?;
         Ok(())
     }
 
@@ -839,7 +955,6 @@ impl RunStore {
     ) -> Result<EventSeq, RuntimeError> {
         let mut connection = self.lock_connection()?;
         let transaction = connection.transaction()?;
-        let seq = insert_event(&transaction, run_id, event, data)?;
         if event == "approval_required"
             && let Some(approval) = data.get("approval")
         {
@@ -853,7 +968,8 @@ impl RunStore {
                 params![run_id.0],
             )?;
         }
-        transaction.commit()?;
+        let seq = insert_event(&transaction, run_id, event, data)?;
+        views::commit(transaction)?;
         Ok(seq)
     }
 
@@ -942,7 +1058,7 @@ impl RunStore {
         )?;
         let result = read_interaction_in(&transaction, &id.0)?
             .ok_or_else(|| RuntimeError::Internal("缺少持久记录：claimed interaction".into()))?;
-        transaction.commit()?;
+        views::commit(transaction)?;
         Ok(result)
     }
 
@@ -977,6 +1093,11 @@ impl RunStore {
         let transaction = connection.transaction()?;
         let current = read_run_in(&transaction, &run_id.0)?
             .ok_or_else(|| RuntimeError::Protocol("run 不存在".into()))?;
+        if current.kind == agent_core::RunKind::Compact {
+            return Err(RuntimeError::Protocol(
+                "compact 必须通过 intent/receipt 同事务结算".into(),
+            ));
+        }
         if current.status.terminal() {
             if current.status == status
                 && current.content.as_deref() == content
@@ -1062,7 +1183,7 @@ impl RunStore {
         let result = read_run_in(&transaction, &run_id.0)?
             .ok_or_else(|| RuntimeError::Internal("缺少持久记录：run still exists".into()))?;
         delegation::mark_terminal_in(&transaction, run_id, &result)?;
-        transaction.commit()?;
+        views::commit(transaction)?;
         Ok(result)
     }
 
@@ -1090,6 +1211,11 @@ impl RunStore {
         let transaction = connection.transaction()?;
         let run = read_run_in(&transaction, &run_id.0)?
             .ok_or_else(|| RuntimeError::Protocol("run 不存在".into()))?;
+        if run.kind == agent_core::RunKind::Compact {
+            return Err(RuntimeError::Protocol(
+                "compact unknown 不能用聊天内容修复或伪造 projection".into(),
+            ));
+        }
         if run.session_id != *session_id
             || run.status != RunStatus::UnknownAfterRestart
             || run.last_seq != expected_last_seq
@@ -1146,7 +1272,7 @@ impl RunStore {
         let result = read_run_in(&transaction, &run_id.0)?
             .ok_or_else(|| RuntimeError::Internal("缺少持久记录：reconciled run".into()))?;
         delegation::mark_terminal_in(&transaction, run_id, &result)?;
-        transaction.commit()?;
+        views::commit(transaction)?;
         Ok(result)
     }
 
@@ -1191,7 +1317,7 @@ impl RunStore {
                 "profile_id": attempt.provider_profile_id, "model": attempt.model,
             }),
         )?;
-        tx.commit()?;
+        views::commit(tx)?;
         Ok(())
     }
 
@@ -1236,7 +1362,7 @@ impl RunStore {
                 "usage": attempt.usage,
             }),
         )?;
-        tx.commit()?;
+        views::commit(tx)?;
         Ok(())
     }
 
@@ -1322,12 +1448,23 @@ impl RunStore {
             })?;
         rows.map(|row| {
             let (seq, event, data) = row?;
+            let mut data: Value = serde_json::from_str(&data)
+                .map_err(|error| RuntimeError::Protocol(error.to_string()))?;
+            views::strip_transport_metadata(&mut data);
+            if let Some(stamp) = views::stamp_in(&connection, run_id, EventSeq(seq))? {
+                data.as_object_mut()
+                    .ok_or_else(|| RuntimeError::Protocol("事件 data 非 object".into()))?
+                    .insert(
+                        "_my_agent_view".into(),
+                        serde_json::to_value(stamp)
+                            .map_err(|error| RuntimeError::Protocol(error.to_string()))?,
+                    );
+            }
             Ok(StoredEvent {
                 run_id: run_id.clone(),
                 seq: EventSeq(seq),
                 event,
-                data: serde_json::from_str(&data)
-                    .map_err(|error| RuntimeError::Protocol(error.to_string()))?,
+                data,
             })
         })
         .collect()
@@ -1337,6 +1474,7 @@ impl RunStore {
         let mut connection = self.lock_connection()?;
         let transaction = connection.transaction()?;
         transaction.execute("UPDATE resources SET state='orphaned',terminal_reason='restart: process identity cannot be proven' WHERE state IN ('starting','running','stopping')", [])?;
+        hooks::recover_in(&transaction)?;
         transaction.execute("UPDATE compact_operations SET state='rejected',reason='restart: candidate not committed' WHERE state='pending'", [])?;
 
         let ids = {
@@ -1350,6 +1488,16 @@ impl RunStore {
             let run_id = RunId(id.clone());
             turns::close_open_batches(&transaction, &run_id)?;
             turns::commit_output_in(&transaction, &run_id, RunStatus::UnknownAfterRestart, None)?;
+            if read_run_in(&transaction, id)?
+                .is_some_and(|run| run.kind == agent_core::RunKind::Compact)
+            {
+                insert_event(
+                    &transaction,
+                    &run_id,
+                    "compact_terminal",
+                    &serde_json::json!({"outcome":agent_core::CompactRunOutcome::Unknown,"projection_generation":null}),
+                )?;
+            }
             insert_event(
                 &transaction,
                 &run_id,
@@ -1378,7 +1526,7 @@ impl RunStore {
             (SELECT id FROM runs WHERE status='unknown_after_restart')",
             [],
         )?;
-        transaction.commit()?;
+        views::commit(transaction)?;
         Ok(ids.len())
     }
 }
@@ -1400,6 +1548,7 @@ fn insert_event(
         "UPDATE runs SET last_seq=?2, updated_at_ms=?3 WHERE id=?1",
         params![run_id.0, seq, now_ms()],
     )?;
+    views::publish_in(connection, run_id, EventSeq(seq), event, data)?;
     Ok(EventSeq(seq))
 }
 fn read_run_in(connection: &Connection, id: &str) -> Result<Option<RunRecord>, RuntimeError> {
@@ -1418,6 +1567,16 @@ fn read_run_in(connection: &Connection, id: &str) -> Result<Option<RunRecord>, R
         .parse()
         .map_err(|_| RuntimeError::Protocol("无效 run id".into()))?;
     Ok(Some(RunRecord {
+        kind: if connection.query_row(
+            "SELECT count(*) FROM compact_run_links WHERE run_id=?1",
+            params![id],
+            |row| row.get::<_, i64>(0),
+        )? == 1
+        {
+            agent_core::RunKind::Compact
+        } else {
+            agent_core::RunKind::Chat
+        },
         run_id: RunId(id.into()),
         turn_id: TurnId(format!("turn-{rowid}")),
         session_id: SessionId(session_id),
@@ -2149,7 +2308,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 14);
+        assert_eq!(version, 20);
         connection
             .execute("INSERT INTO schema_migrations VALUES (99, 99)", [])
             .unwrap();
@@ -2483,4 +2642,5 @@ mod tests {
     }
 }
 
+mod plans;
 mod readback;

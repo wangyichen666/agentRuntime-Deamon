@@ -6,7 +6,7 @@ use rusqlite::{OptionalExtension, params};
 impl RunStore {
     pub fn next_memory_ingest_due(&self) -> Result<Option<i64>, RuntimeError> {
         let db = self.lock_connection()?;
-        Ok(db.query_row("SELECT MIN(COALESCE(b.retry_at_ms,?1)) FROM turn_commits t JOIN runs r ON r.id=t.run_id JOIN session_heads h ON h.lifetime=r.lifetime AND h.deleted=0 LEFT JOIN memory_ingest_retries b ON b.run_id=t.run_id WHERE t.status='completed' AND NOT EXISTS(SELECT 1 FROM memory_ingests i WHERE i.run_id=t.run_id) AND NOT EXISTS(SELECT 1 FROM run_snapshots s WHERE s.run_id=t.run_id AND json_extract(s.snapshot_json,'$.context_read_only')=1) AND COALESCE(b.attempts,0)<3",params![super::now_ms()],|r|r.get(0))?)
+        Ok(db.query_row("SELECT MIN(COALESCE(b.retry_at_ms,0)) FROM turn_commits t JOIN runs r ON r.id=t.run_id JOIN session_heads h ON h.lifetime=r.lifetime AND h.deleted=0 LEFT JOIN memory_ingest_retries b ON b.run_id=t.run_id WHERE t.status='completed' AND NOT EXISTS(SELECT 1 FROM compact_run_links c WHERE c.run_id=t.run_id) AND NOT EXISTS(SELECT 1 FROM memory_ingests i WHERE i.run_id=t.run_id) AND NOT EXISTS(SELECT 1 FROM run_snapshots s WHERE s.run_id=t.run_id AND json_extract(s.snapshot_json,'$.context_read_only')=1) AND COALESCE(b.attempts,0)<3",[],|r|r.get(0))?)
     }
     pub fn memory_assessments(
         &self,
@@ -118,7 +118,7 @@ impl RunStore {
                 ],
             )?;
         }
-        tx.commit()?;
+        super::views::commit(tx)?;
         Ok(())
     }
 
@@ -172,7 +172,7 @@ impl RunStore {
                 command
             ],
         )?;
-        tx.commit()?;
+        super::views::commit(tx)?;
         Ok(())
     }
 
@@ -210,7 +210,7 @@ impl RunStore {
             )?;
             feedback.insert(label.into(), count.into());
         }
-        let pending:i64=db.query_row("SELECT count(*) FROM turn_commits t JOIN runs r ON r.id=t.run_id WHERE r.lifetime=?1 AND t.status='completed' AND NOT EXISTS(SELECT 1 FROM memory_ingests i WHERE i.run_id=t.run_id) AND NOT EXISTS(SELECT 1 FROM run_snapshots s WHERE s.run_id=t.run_id AND json_extract(s.snapshot_json,'$.context_read_only')=1)",params![lifetime.0],|r|r.get(0))?;
+        let pending:i64=db.query_row("SELECT count(*) FROM turn_commits t JOIN runs r ON r.id=t.run_id WHERE r.lifetime=?1 AND t.status='completed' AND NOT EXISTS(SELECT 1 FROM compact_run_links c WHERE c.run_id=t.run_id) AND NOT EXISTS(SELECT 1 FROM memory_ingests i WHERE i.run_id=t.run_id) AND NOT EXISTS(SELECT 1 FROM run_snapshots s WHERE s.run_id=t.run_id AND json_extract(s.snapshot_json,'$.context_read_only')=1)",params![lifetime.0],|r|r.get(0))?;
         let exhausted:i64=db.query_row("SELECT count(*) FROM memory_ingest_retries b JOIN runs r ON r.id=b.run_id WHERE r.lifetime=?1 AND b.attempts>=3 AND NOT EXISTS(SELECT 1 FROM memory_ingests i WHERE i.run_id=b.run_id)",params![lifetime.0],|r|r.get(0))?;
         Ok(
             serde_json::json!({"lifetime":lifetime,"exposure_count":exposure_count,"assessed_memory_count":assessment_count,"feedback":feedback,"pending_ingests":pending,"retry_exhausted":exhausted,"exposures":rows,"has_more":exposure_count>100,"sample_limit":100,"signal_note":"曝光是请求材料准备记录，不证明模型采用；运行成功不等于记忆有用。评价仅用于本会话 lifetime，未改变事实或作用域。"}),
@@ -220,7 +220,7 @@ impl RunStore {
     pub fn recover_memory_ingests(&self, limit: usize) -> Result<usize, RuntimeError> {
         let runs = {
             let db = self.lock_connection()?;
-            let mut q=db.prepare("SELECT t.run_id FROM turn_commits t JOIN runs r ON r.id=t.run_id JOIN session_heads h ON h.lifetime=r.lifetime AND h.deleted=0 WHERE t.status='completed' AND NOT EXISTS(SELECT 1 FROM memory_ingests i WHERE i.run_id=t.run_id) AND NOT EXISTS(SELECT 1 FROM run_snapshots s WHERE s.run_id=t.run_id AND json_extract(s.snapshot_json,'$.context_read_only')=1) AND NOT EXISTS(SELECT 1 FROM memory_ingest_retries b WHERE b.run_id=t.run_id AND (b.attempts>=3 OR b.retry_at_ms>?1)) ORDER BY t.rowid LIMIT ?2")?;
+            let mut q=db.prepare("SELECT t.run_id FROM turn_commits t JOIN runs r ON r.id=t.run_id JOIN session_heads h ON h.lifetime=r.lifetime AND h.deleted=0 WHERE t.status='completed' AND NOT EXISTS(SELECT 1 FROM compact_run_links c WHERE c.run_id=t.run_id) AND NOT EXISTS(SELECT 1 FROM memory_ingests i WHERE i.run_id=t.run_id) AND NOT EXISTS(SELECT 1 FROM run_snapshots s WHERE s.run_id=t.run_id AND json_extract(s.snapshot_json,'$.context_read_only')=1) AND NOT EXISTS(SELECT 1 FROM memory_ingest_retries b WHERE b.run_id=t.run_id AND (b.attempts>=3 OR b.retry_at_ms>?1)) ORDER BY t.rowid LIMIT ?2")?;
             q.query_map(params![super::now_ms(), limit.min(32) as i64], |r| {
                 r.get::<_, String>(0)
             })?
@@ -496,6 +496,7 @@ mod tests {
         let owner = start(&store, "a", 2);
         let item = memory(&store, &owner, "readonly");
         let snapshot = RunSnapshot {
+            entry_channel: agent_core::HookChannel::DaemonRpc,
             route: None,
             tools: vec![],
             cwd: "".into(),
@@ -585,7 +586,7 @@ mod tests {
             store.flywheel_report(&owner.session_lifetime_id).unwrap()["exposure_count"],
             0
         );
-        assert_eq!(store.health_report().unwrap()["schema_version"], 14);
+        assert_eq!(store.health_report().unwrap()["schema_version"], 20);
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -645,5 +646,19 @@ mod tests {
                 .unwrap(),
             3
         );
+    }
+
+    #[test]
+    fn unattempted_ingest_is_immediately_due_without_a_wall_clock_race() {
+        let store = RunStore::open(std::path::Path::new(":memory:")).unwrap();
+        let owner = start(&store, "due", 1);
+        finish(&store, &owner);
+        assert_eq!(
+            store.next_memory_ingest_due().unwrap(),
+            Some(0),
+            "未尝试任务应有稳定的立即到期标记，不能返回查询后的当前时间"
+        );
+        assert_eq!(store.recover_memory_ingests(32).unwrap(), 1);
+        assert_eq!(store.next_memory_ingest_due().unwrap(), None);
     }
 }

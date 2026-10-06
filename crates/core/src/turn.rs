@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunSnapshot {
+    #[serde(default)]
+    pub entry_channel: crate::HookChannel,
     pub route: Option<RouteSnapshot>,
     pub tools: Vec<ToolSpec>,
     pub cwd: String,
@@ -51,6 +53,7 @@ pub struct RoundState {
 
 #[derive(Clone, Debug)]
 pub struct RunAdmission {
+    pub plan_execution: Option<crate::PlanExecution>,
     pub session_key: crate::SessionKey,
     pub expected_lifetime: Option<crate::SessionLifetimeId>,
     pub request_id: crate::RequestId,

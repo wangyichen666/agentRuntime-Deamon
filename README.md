@@ -6,7 +6,7 @@
   <img alt="Rust 1.88+" src="https://img.shields.io/badge/Rust-1.88%2B-0e716c?style=flat-square&logo=rust&logoColor=white">
   <img alt="Platform macOS and Linux" src="https://img.shields.io/badge/Platform-macOS%20%7C%20Linux-355e91?style=flat-square">
   <img alt="Providers OpenAI Anthropic Ollama" src="https://img.shields.io/badge/Provider-OpenAI%20%7C%20Anthropic%20%7C%20Ollama-ae6c19?style=flat-square">
-  <img alt="ACP v1" src="https://img.shields.io/badge/ACP-v1-6d5bd0?style=flat-square">
+  <img alt="ACP v1 与 opt-in v2" src="https://img.shields.io/badge/ACP-v1%20%2B%20v2-6d5bd0?style=flat-square">
   <img alt="MCP stdio" src="https://img.shields.io/badge/MCP-stdio-60717c?style=flat-square">
 </p>
 
@@ -30,17 +30,17 @@
 
 很多 Agent 原型能“调用一次工具”，却很难稳定处理真实编码任务：长任务会失控、连接断开会丢状态、多个窗口会串会话、危险命令缺少统一边界，用户也看不出 Agent 究竟还在运行还是已经卡住。
 
-`my-agent` 用 Rust workspace 和工作区 daemon 管理这些能力；当前已提取 `core` 与 `daemon-protocol`，其余业务模块仍在根 package 中：
+`my-agent` 用 Rust workspace 和工作区 daemon 管理这些能力；当前包含根启动 binary 与 13 个职责独立的库 crate，runtime、daemon、sandbox 与各入口均已物理拆分：
 
-- **统一控制面**：每个工作区只有 daemon 管理 run、队列、交互和终态，所有入口共享同一协议。消息与执行上下文目前仍分布在 JSONL 和内存历史中，统一持久主链正在迁移。
-- **四类交互入口**：全屏 TUI、CLI、本地 HTTP/WebSocket、标准 ACP v1 stdio。
+- **统一控制面**：每个工作区只有 daemon 管理 run、队列、交互和终态，所有入口共享同一协议。SQLite 是持久事实源，JSONL 仅用于受控旧数据导入与审计。
+- **四类交互入口**：全屏 TUI、CLI、本地 HTTP/WebSocket、标准 ACP v1 stdio，以及显式启用的 ACP v2。
 - **可靠的长任务循环**：主任务没有固定轮次硬上限，但有进度检查、重复检测、工具失败熔断和显式取消。
 - **可恢复、可审计**：稳定 session、append-only SQLite transcript、活动事件回放、按 session/request 过滤日志。
 - **个人版的安全克制**：灾难命令硬拒，高风险操作审批，Cron 无人值守时安全拒绝。
 
 > 想先看完整流程图和功能全景？打开 [项目系统说明](./docs/agent-system.html)。
 
-Agent Runtime 已有统一 daemon client、SQLite canonical transcript/lifetime、原子 TurnCommit、持久 compact projection 和作用域 MemoryEngine。2026-10-05 补齐连接能力协商、单事务只读恢复快照与公共 lifetime CAS，数据库前进迁移至 v14，升级前校验备份；原始 transcript 保留，压缩只替换模型输入投影。完整 Wave 0–7 验收尚未完成：版本化计划执行、边界 hooks、手动 compact 独立 owner、tool_search 等未实现。实际范围及 302 项 Rust 验收见 [本轮实施记录](./docs/changes/runtime-readback-fences.md)，状态合同见 [ADR 0002](./docs/adr/0002-readback-and-lifecycle-fences.md)，较早阶段见 [历史实施记录](./docs/changes/runtime-architecture.md)。
+Agent Runtime 已有统一 daemon client、SQLite canonical transcript/lifetime、原子 TurnCommit、持久 compact projection 和作用域 MemoryEngine。连接能力协商、单事务恢复快照和 lifetime CAS 保持；升级前校验备份，原始 transcript 保留。版本化计划支持稳定定义摘要、精确 execute/discard、重启待明确继续与同源 Markdown；16 类 hooks、持久审计和有界 Stop continuation 需显式启用。当前 SQLite v20 接通独立手动 compact run、持久 Started、后台摘要、精确取消和 unknown 重启读回；旧 unary 等待同一 native receipt。generation-scoped tool_search 已实现按需发现、完整 schema 回填与原安全链嵌套调用；共享 revision reducer 已接通所有入口，旧读回/退休 lifetime 不覆盖新视图，缺口先读事务基线再补 durable cursor；完整 Provider 请求只读重建已复用实际发送的纯 assembler，默认摘要、显式本地脱敏诊断；opt-in ACP v2 已接通真实 SDK 协商、标准投影和有界 stdio；2026-10-07 已完成八波实现与门禁，根源码仅保留启动组合；物理边界见 [crate 文档](./docs/runtime-crates.md)。协议见 [计划 API](./docs/plan-control-api.md)、[Hook API](./docs/hooks-api.md) 、[Compact API](./docs/compact-control-api.md) 、[工具发现 API](./docs/tool-discovery-api.md) 、[请求上下文 API](./docs/provider-context-api.md) 和 [ACP v2 API](./docs/acp-v2-api.md)，本次 379 项 Rust 验收见 [最终报告](./docs/changes/governed-runtime-final-report.md)，逐波 RED/GREEN 与门禁见 [实施记录](./docs/changes/governed-runtime-controls.md)。较早恢复合同见 [ADR 0002](./docs/adr/0002-readback-and-lifecycle-fences.md) 与 [恢复实施记录](./docs/changes/runtime-readback-fences.md)，历史阶段见 [架构实施记录](./docs/changes/runtime-architecture.md)。
 
 ## 终端体验
 
@@ -63,10 +63,10 @@ TUI 默认继承当前终端主题，也可启用内置 `dark` / `light` 语义�
 | 能力 | 当前实现 |
 |---|---|
 | **多 Provider** | OpenAI Chat Completions、Anthropic Messages、Ollama；协议差异封装在适配器内，统一输出严格 tool-call 生命周期事件；达到 token 上限的工具批次整批拒绝并安全重试。 |
-| **12 个内置工具** | 文件与命令工具、记忆、`plan`，以及 `spawn_subagent`、`wait_subagents`、`list_subagents`、`cancel_subagent` 和兼容名 `sub_agent`。 |
+| **内置与按需工具** | 文件与命令工具、记忆、`plan`、generation-scoped `tool_search`，以及 `spawn_subagent`、`wait_subagents`、`list_subagents`、`cancel_subagent` 和兼容名 `sub_agent`。 |
 | **计划与子 Agent** | 计划持久化；子 Agent 由 daemon 异步准入为独立 session/run，委派关系、终态与结果领取写入 SQLite。当前子 Agent 只继承 `read_file`；深度最多 2、每个 root 最多 8 次委派且最多 4 个活动 child。`sub_agent` 兼容名在同一持久链路上等待结果。 |
 | **图片与 PDF** | PNG/JPEG/WebP 可作为视觉内容块；PDF 在本地抽取最多 50 页文字；不支持时给出明确降级。 |
-| **三条记忆链路** | 独立 session JSONL、60%/85% 两级上下文摘要、带 TTL 的关键词/中文 bigram 长期记忆。 |
+| **三条记忆链路** | SQLite canonical transcript、60%/85% 两级模型输入投影摘要、带 TTL 的关键词/中文 bigram 长期记忆；JSONL 仅用于受控旧数据导入与审计。 |
 | **Skill** | `.my-agent/skills/*.md` 使用 YAML frontmatter 与 semver，按当前请求稳定排序并按需加载正文。 |
 | **Cron / Heartbeat** | interval/五段 cron、独立 session、有限指数退避、无人值守安全拒绝；heartbeat 不调用模型。 |
 | **MCP** | 本地 stdio 与远程 HTTPS Streamable HTTP；工具发现、冻结 catalog、默认审批、DNS 审查、预算与未知结果回执。 |
@@ -84,7 +84,7 @@ flowchart TB
         TUI[全屏 TUI]
         CLI[CLI / REPL]
         API[Web 控制台 + HTTP/SSE/WS]
-        ACP[ACP v1 stdio]
+        ACP[ACP v1 / opt-in v2 stdio]
     end
 
     TUI --> Client[DaemonClient\nNDJSON JSON-RPC]
@@ -178,6 +178,7 @@ my-agent
 | `my-agent chat "检查项目"` | 发起一次性请求。 |
 | `my-agent serve --bind 127.0.0.1:8787` | 提供多工作区 Web Agent 工作台、Session 查看、OpenAI 兼容 HTTP/SSE 与 `/ws`。 |
 | `my-agent editor` | 启动标准 ACP v1 stdio server。 |
+| `my-agent editor --acp-v2` | 启动协商式 ACP v2；控制请求仍进入同一 daemon。 |
 | `my-agent status` | 查看当前工作区 daemon 与日志路径。 |
 | `my-agent sessions` | 通过 daemon 列出稳定 session、摘要和运行状态；`--offline` 只读旧 JSONL 维护清单。 |
 | `my-agent logs --lines 100` | 查看最近 daemon 日志。 |
@@ -193,6 +194,9 @@ my-agent
 /permissions [request|risk|full]
 /models [编号|ID]
 /run <run_id>
+/plan read [session_id]
+/plan execute <lifetime> <plan_id> <revision> <digest> <operation_id>
+/plan discard <session_id> <lifetime> <plan_id> <revision> <digest> <operation_id>
 ```
 
 `/models` 不带参数时列出已保存配置；例如 `/models 2` 或 `/models deepseek` 会切换活动模型。Web 设置支持保存多个 OpenAI 兼容、Anthropic Messages 和 Ollama 配置。运行中的 run 保持其准入时的路由快照。
@@ -298,7 +302,7 @@ Cron：
 | 工作区外写入/编辑 | 请求人工审批，默认拒绝。 |
 | `.git` 与工作区 `.my-agent` 内写入、硬链接写入 | 所有权限模式均拒绝。 |
 | 内置文件工具 | Unix 上使用授权后的目录/文件句柄、no-follow、身份与内容复核；写入同目录临时文件并原子替换。 |
-| `exec` | 明确使用 `/bin/sh -c` 与工作区 cwd，只传入 PATH/HOME/TMPDIR/LANG/LC_ALL/TERM/CARGO_HOME/RUSTUP_HOME，并显式设置 PWD；可请求 `sandbox=native`，请求 `docker` 会报未实现。 |
+| `exec` | 明确使用 `/bin/sh -c` 与工作区 cwd，只传入 PATH/HOME/TMPDIR/LANG/LC_ALL/TERM/CARGO_HOME/RUSTUP_HOME，并显式设置 PWD；支持 Native 与 Docker foreground；Docker 使用预装镜像，不可用时强隔离请求拒绝，后台 Docker 请求仍 fail closed。 |
 | `rm -rf /`、`mkfs`、块设备覆盖、fork 炸弹等 | 硬拒绝。 |
 | `kill`、`sudo`、`git reset --hard`、`cargo publish` 等 | 请求人工审批。 |
 | Cron 中任何需审批动作 | 无人值守安全拒绝。 |
@@ -341,29 +345,21 @@ Native backend 是软边界；Shell 命令及同用户进程仍能直接访问�
 <summary><strong>展开模块说明</strong></summary>
 
 ```text
-src/main.rs                Clap 子命令与启动分发
-crates/core/               共享领域类型、ID、Provider 持久 facts
-crates/daemon-protocol/    版本化 RPC / DTO 与旧 wire 兼容
-crates/daemon-client/      Unix / 测试传输 DaemonClient、重连与 cursor readback
-crates/storage/            SQLite 控制 facts、委派与能力 ports
-src/bootstrap.rs           daemon 启动与配置组合根
-src/maintenance.rs         显式离线会话只读兼容入口
-src/daemon/                状态、协议、审批、运行时、生命周期、server
-src/entry/                 TUI（含独立 keymap）、CLI、Web/HTTP/WS、ACP 与恢复适配
-src/provider.rs            Provider 公共契约与 execution identity
-src/provider/              OpenAI、Anthropic、Ollama 适配器
-src/tool_calls.rs          canonical tool-call assembler
-src/loop_engine.rs         ReAct、取消、并行波次、熔断与结果回填
-src/context.rs             上下文排序、Skill、估算与两级压缩
-src/session.rs             稳定 session、append-only SQLite transcript 与结构化 trace
-src/memory.rs              TTL 长期记忆与关键词/bigram 召回
-src/plan.rs                原子持久化计划
-src/daemon/delegation_tool.rs  模型工具到持久委派控制面的映射
-src/skills.rs              版本化 Skill 索引与按需加载
-src/cron.rs                Cron、重试与 heartbeat
-src/mcp.rs                 MCP stdio 客户端与工具桥接
-src/safety.rs              路径与命令安全决策点
-src/tools/                 内置工具注册、校验与执行
+src/main.rs                多线程 runtime 前配置加载与进程组合
+src/bootstrap.rs           CommandHost/GatewayHost 的实际 host 实现
+crates/core/               领域类型、身份、计划摘要、共享纯 reducer
+crates/daemon-protocol/    版本化严格 DTO、slash 与 ACP 协商 schema
+crates/daemon-client/      有界视图与 durable cursor 恢复；不编译 server
+crates/storage/           SQLite 唯一事实与事务/迁移/receipt
+crates/context/           纯 Provider assembler、预算与诊断
+crates/memory/            纯检索、保护与评测
+crates/sandbox/           进程/Docker 执行与资源清理
+crates/runtime/           ReAct、Provider、工具/安全、hooks、cron/MCP/skill
+crates/daemon/            单 writer/准入/审批/compact/委派与 socket 服务
+crates/entry-support/     共享恢复/RPC 与 Web 启动辅助
+crates/cli/               Clap、CLI/TUI、keymap 与终端展示
+crates/acp/               标准 v1/opt-in v2、有界 stdio 与控制投影
+crates/gateway/           HTTP/WebSocket/Web 适配与静态资源
 web/                       零构建依赖的本地 Web 控制台
 ```
 
@@ -373,9 +369,10 @@ web/                       零构建依赖的本地 Web 控制台
 
 ```bash
 cargo fmt --all -- --check
-cargo test --all-targets
-cargo clippy --all-targets --all-features -- -D warnings
-cargo build --release
+cargo test --locked --workspace --all-targets --all-features
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo +1.88.0 check --locked --workspace --all-targets --all-features
+cargo build --locked --release
 node --test web/app.test.cjs
 node --check web/app.js
 git diff --check
@@ -405,7 +402,7 @@ cargo deny check
 
 `my-agent --workspace /path/to/project doctor` 通过统一 daemon RPC 报告 schema、integrity、排队/未知 run、orphaned resources、compact、维护失败和锁等待指标。`/context <session_id>`、`/memory <session_id>`、`/resources <session_id>` 在 CLI、TUI、ACP 中读取相同 durable facts；WebSocket 提供同一 RPC。
 
-`sessions.compact` 要求 `session_id/owner_run_id/operation_id/expected_revision`；重复 operation 读回已提交 receipt。`memory.store` 支持 session/project/global，后两者需要用户确认；global 只保存 semantic 事实。`context_read_only` 禁止 compact 安装、记忆写入/遗忘和自动摄入。资源重启后无法验证身份时标为 orphaned；人工 `resources.reconcile` 需要 exact owner、terminal_state 和 evidence，只记录核对，不按旧 PID kill。
+`compact.start` 要求 session/lifetime/operation/source revision/projection generation，返回独立 native Started；`agent.subscribe`/`run.read`/`run.events` 恢复同一 receipt，取消用 session + exact native run id。CLI/TUI/Web 的 `/compact <session> <lifetime> <revision> <generation> <operation_id>` 接同一 command；HTTP 提供 `POST /api/compact/start`。旧 `sessions.compact` 参数保持 `session_id/owner_run_id/operation_id/expected_revision`，仅验证来源并等待同一 native 操作；重复 operation 读回 receipt，拒绝/失败不会伪装成功，历史 receipt 不补执行身份。`memory.store` 支持 session/project/global，后两者需要用户确认；global 只保存 semantic 事实。`context_read_only` 禁止 compact 安装、记忆写入/遗忘和自动摄入，compact turn 不进入聊天记忆。资源重启后无法验证身份时标为 orphaned；人工 `resources.reconcile` 需要 exact owner、terminal_state 和 evidence，只记录核对，不按旧 PID kill。
 
 模型凭据仅持久保存 `env:NAME` 或系统 Keychain 引用。macOS 使用 Keychain；其他平台目前使用环境引用，系统凭据适配器不可用时拒绝新明文持久写入。迁移失败保留原配置读取能力；诊断、日志和 ProviderProfile Debug 不返回密钥正文。
 

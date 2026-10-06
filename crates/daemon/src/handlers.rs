@@ -1,0 +1,4726 @@
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::Context;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::time::Instant;
+use tokio::io::AsyncReadExt;
+use tokio::sync::{Mutex, mpsc};
+use tracing::{Instrument, info, info_span};
+
+use super::approval::PendingApprovalInfo;
+use super::{ActiveKey, ActiveRequest, ActiveRequestUpdate, DaemonState, SessionRuntime};
+use agent_daemon_protocol::slash::{SlashAction, SlashParse, SlashRegistry, SlashResponse};
+use agent_daemon_protocol::{
+    EventKind, JsonRpcRequest, JsonRpcResponse, MAX_FRAME_BYTES, RequestId, ServerFrame,
+};
+use agent_runtime::config::ProfileSummary;
+use agent_runtime::cron::ScheduleSpec;
+use agent_runtime::loop_engine::{AgentEvent, CancellationToken};
+use agent_runtime::provider::ProviderProfile;
+use agent_runtime::safety::{SafetyMode, SafetyPolicy};
+use agent_runtime::session::{SessionStatus, SessionTraceRecord};
+use agent_runtime::tools::ReadFileTool;
+use agent_storage::{
+    Admission, AdmissionMode, DelegationRecord, DelegationRequest, EventSeq, InteractionId, RunId,
+    RunStatus, RuntimeError, SessionId, StoredEvent,
+};
+
+const INVALID_PARAMS: i64 = -32602;
+const METHOD_NOT_FOUND: i64 = -32601;
+const INTERNAL_ERROR: i64 = -32603;
+const REQUEST_CANCELLED: i64 = -32800;
+const REQUEST_CONFLICT: i64 = -32001;
+const WEB_PAGE_MAX_BYTES: usize = MAX_FRAME_BYTES - 256 * 1024;
+const WEB_PAGE_MAX_ITEM_BYTES: usize = 256 * 1024;
+const WEB_PAGE_MAX_LIMIT: usize = 200;
+
+struct AbortTimer(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortTimer {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+use agent_daemon_protocol::params::*;
+type ModelSaveParams = agent_daemon_protocol::params::ModelSaveParams<ProviderProfile>;
+
+impl DaemonState {
+    pub(crate) async fn handle_request(
+        self: Arc<Self>,
+        request: JsonRpcRequest,
+        frames: super::frames::FrameSender,
+    ) {
+        let request = match agent_daemon_protocol::normalize_request(request.clone()) {
+            Ok(request) => request,
+            Err(error) => {
+                send_result(
+                    &frames,
+                    request.id,
+                    Err((INVALID_PARAMS, error.to_string())),
+                );
+                return;
+            }
+        };
+        match request.method.as_str() {
+            "context.readback" => {
+                let result = parse_params::<ContextReadParams>(&request.params)
+                    .map_err(|error| (INVALID_PARAMS, error))
+                    .and_then(|params| self.context_readback(params));
+                send_result(&frames, request.id, result);
+            }
+            "hooks.readback" => {
+                let result = parse_params::<HookReadParams>(&request.params)
+                    .map_err(|e| (INVALID_PARAMS, e))
+                    .and_then(|p| {
+                        self.run_store
+                            .hook_readback(
+                                &SessionId(p.session_id),
+                                &p.expected_lifetime,
+                                p.after_cursor,
+                                p.limit,
+                            )
+                            .map(|readback| json!(readback))
+                            .map_err(|e| (REQUEST_CONFLICT, e.to_string()))
+                    });
+                send_result(&frames, request.id, result);
+            }
+            "sessions.plan.readback" => {
+                let result = parse_params::<PlanReadParams>(&request.params)
+                    .map_err(|e| (INVALID_PARAMS, e))
+                    .and_then(|p| {
+                        self.run_store
+                            .plan_readback(&SessionId(p.session_id))
+                            .map_err(|e| (REQUEST_CONFLICT, e.to_string()))
+                    })
+                    .and_then(|v| {
+                        serde_json::to_value(v).map_err(|e| (INTERNAL_ERROR, e.to_string()))
+                    });
+                send_result(&frames, request.id, result);
+            }
+            "sessions.plan.discard" => {
+                let result = match parse_params::<PlanDiscardParams>(&request.params) {
+                    Ok(params) => self.discard_plan_command(params).await,
+                    Err(e) => Err((INVALID_PARAMS, e)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "memory.store" | "memory.recall" | "memory.list" | "memory.forget" | "memory.scope"
+            | "memory.feedback" | "memory.flywheel" | "memory.evidence" => {
+                let result = self.memory_command(&request.method, &request.params).await;
+                send_result(&frames, request.id, result);
+            }
+            "resources.reconcile" => {
+                let result = match parse_params::<ResourceReconcileParams>(&request.params) {
+                    Ok(params) => {
+                        let owner = self.run_store.run_owner(&params.owner_run_id);
+                        match owner {
+                            Ok(owner) if owner.session_key.0 == params.session_id => self
+                                .run_store
+                                .reconcile_resource(
+                                    &owner,
+                                    params.resource_id,
+                                    &params.terminal_state,
+                                    &params.evidence,
+                                )
+                                .map(|r| json!({"resource":r,"kill_sent":false}))
+                                .map_err(|e| (REQUEST_CONFLICT, e.to_string())),
+                            _ => Err((REQUEST_CONFLICT, "resource reconcile owner 不匹配".into())),
+                        }
+                    }
+                    Err(e) => Err((INVALID_PARAMS, e)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "resources.list" | "resources.read" | "resources.logs" | "resources.wait"
+            | "resources.stop" => {
+                let result = match parse_params::<ResourceParams>(&request.params) {
+                    Ok(params) => self.resource_command(&request.method, params).await,
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "artifacts.read" => {
+                use base64::Engine;
+                let result = match parse_params::<ArtifactReadParams>(&request.params) {
+                    Ok(params) => {
+                        let owner = self.run_store.run_owner(&params.run_id);
+                        match owner {
+                            Ok(owner) if owner.session_key.0==params.session_id=>self.run_store.read_run_artifact(&owner,&params.artifact_ref,params.offset,params.limit).map(|bytes|json!({"data_base64":base64::engine::general_purpose::STANDARD.encode(&bytes),"offset":params.offset,"cursor":params.offset+bytes.len() as u64,"has_more":bytes.len()==params.limit.clamp(1,16384)})).map_err(|e|(REQUEST_CONFLICT,e.to_string())),
+                            _=>Err((REQUEST_CONFLICT,"artifact owner 不匹配".into())),
+                        }
+                    }
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "runtime.doctor" => {
+                let result=self.maintenance_store.health_report().map_err(|e|(INTERNAL_ERROR,e.to_string())).map(|storage| {
+                    let profiles=self.config_store.load().map(|c|c.profiles.iter().map(ProfileSummary::from_profile).collect::<Vec<_>>()).unwrap_or_default();
+                    json!({"storage":storage,"profiles":profiles,"native_boundary":"soft","mcp_pending_limit":64,"mcp_response_bytes":262144,"remote_mcp":"HTTPS, DNS pinning, redirects disabled"})
+                });
+                send_result(&frames, request.id, result);
+            }
+            "session.compact" => {
+                let result = match parse_params::<SessionCompactParams>(&request.params) {
+                    Ok(params) => self.session_compact(params).await,
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "compact.start" => {
+                let result = match parse_params::<CompactStartParams>(&request.params) {
+                    Ok(params) => {
+                        self.start_compact_command(
+                            agent_core::CompactRunRequest {
+                                session_key: SessionId(params.session_id),
+                                session_lifetime_id: params.expected_lifetime,
+                                operation_id: params.operation_id,
+                                expected_revision: params.expected_revision,
+                                expected_projection_generation: params
+                                    .expected_projection_generation,
+                                compatibility_owner_run_id: None,
+                            },
+                            params.entry_channel,
+                            false,
+                        )
+                        .await
+                    }
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "chat.send" => self.handle_chat_send(request, frames).await,
+            "session.load" => {
+                let result = match parse_params::<SessionSelectorParams>(&request.params) {
+                    Ok(params) => {
+                        self.session_load_mode(params.session_id.as_deref(), params.history_mode)
+                            .await
+                    }
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "session.load_page" => {
+                let result = match parse_params::<SessionPageParams>(&request.params) {
+                    Ok(params) => self.session_load_page(params).await,
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "session.list" => {
+                let result = match parse_params::<SessionListParams>(&request.params) {
+                    Ok(params) => self.session_list(params).await,
+                    Err(e) => Err((INVALID_PARAMS, e)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "session.new" => {
+                let result = match parse_params::<SessionCreateParams>(&request.params) {
+                    Ok(params) => self.session_create(params).await,
+                    Err(e) => Err((INVALID_PARAMS, e)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "session.close" => {
+                let result = match parse_params::<SessionEndParams>(&request.params) {
+                    Ok(params) => self.session_close(params).await,
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "session.clear" | "session.delete" => {
+                let result = match parse_params::<SessionEndParams>(&request.params) {
+                    Ok(params) => {
+                        self.session_end(params, request.method == "session.delete")
+                            .await
+                    }
+                    Err(e) => Err((INVALID_PARAMS, e)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "session.fork" => {
+                let result = match parse_params::<SessionForkParams>(&request.params) {
+                    Ok(params) => self.session_fork(params).await,
+                    Err(e) => Err((INVALID_PARAMS, e)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "session.resume" => {
+                let result = match parse_params::<SessionResumeParams>(&request.params) {
+                    Ok(params) => self.session_resume(&params.session_id).await,
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "session.trace" => {
+                let result = match parse_params::<SessionResumeParams>(&request.params) {
+                    Ok(params) => self.session_trace(&params.session_id).await,
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "session.trace_page" => {
+                let result = match parse_params::<SessionPageParams>(&request.params) {
+                    Ok(params) => self.session_trace_page(params).await,
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "permissions.get" => {
+                send_result(&frames, request.id, self.permissions_get());
+            }
+            "permissions.set" => {
+                let result = match parse_params::<PermissionModeParams>(&request.params) {
+                    Ok(params) => self.permissions_set(&params.mode),
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "models.list" => send_result(&frames, request.id, self.models_list()),
+            "models.use" => {
+                let result = match parse_params::<ModelUseParams>(&request.params) {
+                    Ok(params) => self.models_use(&params.profile_id).await,
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "models.save" => {
+                let result = match parse_params::<ModelSaveParams>(&request.params) {
+                    Ok(params) => self.models_save(params).await,
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "approval.respond" | "interaction.respond" | "interaction.reject" => {
+                let rejected = request.method == "interaction.reject";
+                let result = match parse_params::<ApprovalRespondParams>(&request.params) {
+                    Ok(params) => self.resolve_interaction(params, rejected).await,
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "interaction.read" => {
+                let result = parse_params::<InteractionReadParams>(&request.params)
+                    .map_err(|error| (INVALID_PARAMS, error))
+                    .and_then(|params| {
+                        self.run_store
+                            .read_interaction(&params.interaction_id)
+                            .map(|interaction| json!({"interaction": interaction}))
+                            .map_err(|error| (INTERNAL_ERROR, error.to_string()))
+                    });
+                send_result(&frames, request.id, result);
+            }
+            "interaction.list" => {
+                let result = parse_params::<SessionResumeParams>(&request.params)
+                    .map_err(|error| (INVALID_PARAMS, error))
+                    .and_then(|params| {
+                        self.run_store
+                            .list_interactions(&params.session_id)
+                            .map(|interactions| json!({"interactions": interactions}))
+                            .map_err(|error| (INTERNAL_ERROR, error.to_string()))
+                    });
+                send_result(&frames, request.id, result);
+            }
+            "agent.cancel" => {
+                let result = match parse_params::<CancelParams>(&request.params) {
+                    Ok(params) => self.cancel(params).await,
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "spawn_subagent" => {
+                let result = match parse_params::<SpawnSubagentParams>(&request.params) {
+                    Ok(params) => self.spawn_subagent(params).await,
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "list_subagents" => {
+                let result = parse_params::<SubagentListParams>(&request.params)
+                    .map_err(|error| (INVALID_PARAMS, error))
+                    .and_then(|params| {
+                        self.run_store
+                            .list_delegations(&params.root_run_id)
+                            .map(|children| json!({"children": children}))
+                            .map_err(|error| (INTERNAL_ERROR, error.to_string()))
+                    });
+                send_result(&frames, request.id, result);
+            }
+            "read_subagent" => {
+                let result = parse_params::<SubagentScopeParams>(&request.params)
+                    .map_err(|error| (INVALID_PARAMS, error))
+                    .and_then(|params| {
+                        self.scoped_delegation(&params)
+                            .map(|child| json!({"child": child}))
+                    });
+                send_result(&frames, request.id, result);
+            }
+            "wait_subagents" => {
+                let result = match parse_params::<WaitSubagentsParams>(&request.params) {
+                    Ok(params) => self.wait_subagents(params).await,
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "cancel_subagent" => {
+                let result = match parse_params::<SubagentScopeParams>(&request.params) {
+                    Ok(params) => {
+                        let child = self.scoped_delegation(&params);
+                        match child {
+                            Ok(child) => {
+                                self.cancel(CancelParams {
+                                    exact_owner: None,
+                                    request_id: None,
+                                    run_id: Some(child.child_run_id),
+                                    session_id: Some(child.child_session_id.0),
+                                })
+                                .await
+                            }
+                            Err(error) => Err(error),
+                        }
+                    }
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "subagent.result.reserve" | "subagent.result.release" | "subagent.result.commit" => {
+                let result = parse_params::<SubagentResultParams>(&request.params)
+                    .map_err(|error| (INVALID_PARAMS, error))
+                    .and_then(|params| {
+                        self.scoped_delegation(&SubagentScopeParams {
+                            parent_run_id: params.parent_run_id,
+                            child_run_id: params.child_run_id.clone(),
+                        })?;
+                        let child = match request.method.as_str() {
+                            "subagent.result.reserve" => self.run_store.reserve_delegation_result(
+                                &params.child_run_id,
+                                &params.owner,
+                                params.revision,
+                            ),
+                            "subagent.result.release" => self.run_store.release_delegation_result(
+                                &params.child_run_id,
+                                &params.owner,
+                                params.revision,
+                            ),
+                            _ => self.run_store.deliver_delegation_result(
+                                &params.child_run_id,
+                                &params.owner,
+                                params.revision,
+                            ),
+                        }
+                        .map_err(|error| (REQUEST_CONFLICT, error.to_string()))?;
+                        Ok(json!({"child": child}))
+                    });
+                send_result(&frames, request.id, result);
+            }
+            "queue.list" => {
+                let result = parse_params::<SessionResumeParams>(&request.params)
+                    .map_err(|error| (INVALID_PARAMS, error))
+                    .and_then(|params| {
+                        self.run_store
+                            .queued_messages(&params.session_id)
+                            .map(|items| json!({"items": items}))
+                            .map_err(|error| (INTERNAL_ERROR, error.to_string()))
+                    });
+                send_result(&frames, request.id, result);
+            }
+            "queue.read" => {
+                let result = parse_params::<QueueItemParams>(&request.params)
+                    .map_err(|error| (INVALID_PARAMS, error))
+                    .and_then(|params| {
+                        self.run_store
+                            .queued_message(&params.session_id, &params.run_id)
+                            .map(|item| json!({"item": item}))
+                            .map_err(|error| (INTERNAL_ERROR, error.to_string()))
+                    });
+                send_result(&frames, request.id, result);
+            }
+            "queue.remove" => {
+                let result = match parse_params::<QueueItemParams>(&request.params) {
+                    Ok(params) => {
+                        self.cancel(CancelParams {
+                            exact_owner: None,
+                            request_id: None,
+                            run_id: Some(params.run_id),
+                            session_id: Some(params.session_id),
+                        })
+                        .await
+                    }
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "agent.subscribe" => self.handle_subscribe(request, frames).await,
+            "views.reduce" => {
+                let result = parse_params::<agent_daemon_protocol::params::ViewReduceParams>(
+                    &request.params,
+                )
+                .map_err(|error| (INVALID_PARAMS, error))
+                .and_then(|params| {
+                    params
+                        .into_domain()
+                        .map_err(|error| (INVALID_PARAMS, error.to_string()))
+                })
+                .map(|(state, input)| json!(agent_core::reduce_view(state, input)));
+                send_result(&frames, request.id, result);
+            }
+            "run.read" => {
+                let result = parse_params::<RunReadParams>(&request.params)
+                    .map_err(|error| (INVALID_PARAMS, error))
+                    .and_then(|params| {
+                        self.run_store
+                            .run_view_readback(&params.run_id)
+                            .map_err(|error| (INTERNAL_ERROR, error.to_string()))
+                            .and_then(|run| {
+                                let (run, view_stamp) =
+                                    run.ok_or((INVALID_PARAMS, "run 不存在".into()))?;
+                                let snapshot = self
+                                    .run_store
+                                    .run_snapshot(&run.run_id)
+                                    .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+                                let mut fact = if run.kind == agent_core::RunKind::Compact {
+                                    let (record, compact) = self
+                                        .run_store
+                                        .compact_snapshot(&run.run_id)
+                                        .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+                                    let mut fact = json!(record);
+                                    fact["compact"] = json!(compact);
+                                    fact
+                                } else {
+                                    json!(run)
+                                };
+                                if let Some(stamp) = view_stamp {
+                                    fact["_my_agent_view"] = json!(stamp);
+                                }
+                                fact["snapshot"] = json!(snapshot);
+                                fact["continuation_parent_run_id"] = json!(
+                                    self.run_store
+                                        .hook_continuation_parent(&run.run_id)
+                                        .map_err(|e| (INTERNAL_ERROR, e.to_string()))?
+                                );
+                                fact["continuation_run_id"] = json!(
+                                    self.run_store
+                                        .hook_continuation_child(&run.run_id)
+                                        .map_err(|e| (INTERNAL_ERROR, e.to_string()))?
+                                );
+                                Ok(fact)
+                            })
+                    });
+                send_result(&frames, request.id, result);
+            }
+            "run.discovery" => {
+                let result = parse_params::<RunReadParams>(&request.params)
+                    .map_err(|error| (INVALID_PARAMS, error))
+                    .and_then(|params| {
+                        self.run_store
+                            .discoveries(&params.run_id)
+                            .map(|receipts| json!({"receipts":receipts}))
+                            .map_err(|error| (INTERNAL_ERROR, error.to_string()))
+                    });
+                send_result(&frames, request.id, result);
+            }
+            "run.tools" => {
+                let result = parse_params::<RunReadParams>(&request.params)
+                    .map_err(|error| (INVALID_PARAMS, error))
+                    .and_then(|params| {
+                        self.run_store
+                            .tool_receipts(&params.run_id)
+                            .map(|receipts| json!({"receipts": receipts}))
+                            .map_err(|error| (INTERNAL_ERROR, error.to_string()))
+                    });
+                send_result(&frames, request.id, result);
+            }
+            "run.provider_attempts" => {
+                let result = parse_params::<RunReadParams>(&request.params)
+                    .map_err(|error| (INVALID_PARAMS, error))
+                    .and_then(|params| {
+                        let attempts = self
+                            .run_store
+                            .provider_attempts(&params.run_id)
+                            .map_err(|error| (INTERNAL_ERROR, error.to_string()))?;
+                        let usage = self
+                            .run_store
+                            .provider_usage(&params.run_id)
+                            .map_err(|error| (INTERNAL_ERROR, error.to_string()))?;
+                        let route = self
+                            .run_store
+                            .route_snapshot(&params.run_id)
+                            .map_err(|error| (INTERNAL_ERROR, error.to_string()))?;
+                        let final_candidate_index =
+                            attempts.last().map(|attempt| attempt.candidate_index);
+                        Ok(json!({"route": route, "attempts": attempts, "usage": usage,
+                            "final_candidate_index": final_candidate_index}))
+                    });
+                send_result(&frames, request.id, result);
+            }
+            "run.audit" => {
+                let result = match parse_params::<RunReadParams>(&request.params) {
+                    Ok(params) => self.audit_run(&params.run_id).await,
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "run.reconcile" => {
+                let result = match parse_params::<RunReconcileParams>(&request.params) {
+                    Ok(params) => {
+                        let active = self
+                            .run_coordinator
+                            .active
+                            .lock()
+                            .await
+                            .values()
+                            .any(|item| item.run_id == params.run_id);
+                        if active {
+                            Err((REQUEST_CONFLICT, "run 仍有活动执行体".into()))
+                        } else {
+                            self.maintenance_store
+                                .reconcile_unknown(
+                                    &params.run_id,
+                                    &params.session_id,
+                                    params.expected_last_seq,
+                                    params.status,
+                                    params.content.as_deref(),
+                                    &params.evidence,
+                                )
+                                .map(|run| json!({"run": run}))
+                                .map_err(|error| (REQUEST_CONFLICT, error.to_string()))
+                        }
+                    }
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "run.events" => {
+                let result = parse_params::<RunEventsParams>(&request.params)
+                    .map_err(|error| (INVALID_PARAMS, error))
+                    .and_then(|params| {
+                        self.run_store
+                            .events_after(
+                                &params.run_id,
+                                params.after_seq.unwrap_or(EventSeq(0)),
+                                params.limit.unwrap_or(200),
+                            )
+                            .map(|events| json!({"events": events}))
+                            .map_err(|error| (INTERNAL_ERROR, error.to_string()))
+                    });
+                send_result(&frames, request.id, result);
+            }
+            "slash.execute" => {
+                let result = match parse_params::<SlashExecuteParams>(&request.params) {
+                    Ok(params) => {
+                        self.execute_slash(
+                            &params.line,
+                            params.session_id.as_deref(),
+                            params.entry_channel,
+                        )
+                        .await
+                    }
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "daemon.stop" => {
+                send_result(
+                    &frames,
+                    request.id,
+                    Ok(
+                        json!({"stopping": true, "active_turns_finish_gracefully": false,
+                        "active_turns_cancelled": true}),
+                    ),
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                self.shutdown.cancel();
+            }
+            _ => {
+                let _ = frames.send(ServerFrame::Response(JsonRpcResponse::failure(
+                    request.id,
+                    METHOD_NOT_FOUND,
+                    format!("未知 RPC 方法: {}", request.method),
+                )));
+            }
+        }
+    }
+
+    pub(crate) async fn spawn_subagent_for_tool(
+        self: &Arc<Self>,
+        parent_run_id: RunId,
+        spawn_key: String,
+        task: String,
+        context_source_ids: Vec<String>,
+        tools: Option<Vec<String>>,
+    ) -> Result<Value, (i64, String)> {
+        let parent = self
+            .run_store
+            .read_run(&parent_run_id)
+            .map_err(|error| (INTERNAL_ERROR, error.to_string()))?
+            .ok_or((INVALID_PARAMS, "父 run 不存在".into()))?;
+        let response = self
+            .spawn_subagent(SpawnSubagentParams {
+                parent_session_id: parent.session_id,
+                parent_run_id,
+                spawn_key,
+                task,
+                context_source_ids,
+                tools,
+                max_rounds: None,
+                max_tokens: None,
+                max_tool_calls: None,
+                timeout_ms: None,
+            })
+            .await?;
+        Ok(response["child"].clone())
+    }
+
+    pub(crate) async fn wait_subagents_for_tool(
+        &self,
+        parent_run_id: RunId,
+        child_run_ids: Vec<RunId>,
+        timeout_ms: u64,
+        after_seq: Option<EventSeq>,
+    ) -> Result<Value, (i64, String)> {
+        self.wait_subagents(WaitSubagentsParams {
+            parent_run_id,
+            child_run_ids,
+            timeout_ms: Some(timeout_ms),
+            after_seq,
+        })
+        .await
+    }
+
+    pub(crate) async fn cancel_subagent_for_tool(
+        &self,
+        parent_run_id: RunId,
+        child_run_id: RunId,
+    ) -> Result<Value, (i64, String)> {
+        let child = self.scoped_delegation(&SubagentScopeParams {
+            parent_run_id,
+            child_run_id,
+        })?;
+        self.cancel(CancelParams {
+            exact_owner: None,
+            request_id: None,
+            run_id: Some(child.child_run_id),
+            session_id: Some(child.child_session_id.0),
+        })
+        .await
+    }
+
+    async fn spawn_subagent(
+        self: &Arc<Self>,
+        params: SpawnSubagentParams,
+    ) -> Result<Value, (i64, String)> {
+        let parent = self
+            .run_store
+            .read_run(&params.parent_run_id)
+            .map_err(|error| (INTERNAL_ERROR, error.to_string()))?
+            .ok_or((INVALID_PARAMS, "父 run 不存在".into()))?;
+        if parent.session_id != params.parent_session_id {
+            return Err((REQUEST_CONFLICT, "父 run 不属于指定 session".into()));
+        }
+        let parent_delegation = self
+            .run_store
+            .delegation(&params.parent_run_id)
+            .map_err(|error| (INTERNAL_ERROR, error.to_string()))?;
+        let requested_tools = params.tools.unwrap_or_else(|| vec!["read_file".into()]);
+        // This first durable slice only grants the read-only capability. A child of a
+        // child must also inherit it from its own immutable capability snapshot.
+        if requested_tools.is_empty()
+            || requested_tools.iter().any(|name| name != "read_file")
+            || parent_delegation.as_ref().is_some_and(|record| {
+                requested_tools
+                    .iter()
+                    .any(|name| !record.tools.contains(name))
+            })
+        {
+            return Err((REQUEST_CONFLICT, "子 Agent 只能继承 read_file 能力".into()));
+        }
+        let max_rounds = params.max_rounds.unwrap_or(8);
+        let max_tokens = params.max_tokens.unwrap_or(16_000);
+        let max_tool_calls = params.max_tool_calls.unwrap_or(16);
+        let timeout_ms = params.timeout_ms.unwrap_or(120_000);
+        if !(1..=15).contains(&max_rounds)
+            || !(512..=32_000).contains(&max_tokens)
+            || !(1..=32).contains(&max_tool_calls)
+            || !(1_000..=600_000).contains(&timeout_ms)
+            || parent_delegation.as_ref().is_some_and(|record| {
+                max_rounds > record.max_rounds
+                    || max_tokens > record.max_tokens
+                    || max_tool_calls > record.max_tool_calls
+            })
+        {
+            return Err((INVALID_PARAMS, "子 Agent 预算无效或超过父预算".into()));
+        }
+        let parent_runtime = self
+            .session_runtime(Some(&params.parent_session_id.0))
+            .await?;
+        if max_tokens as usize > parent_runtime.engine.token_budget() {
+            return Err((INVALID_PARAMS, "子 Agent token 预算超过父会话".into()));
+        }
+        parent_runtime
+            .engine
+            .for_delegation(&requested_tools, max_rounds as usize, max_tokens as usize)
+            .map_err(|error| (REQUEST_CONFLICT, error.to_string()))?;
+        let (child_session_id, _) = self
+            .session
+            .create_isolated_session()
+            .map_err(|error| (INTERNAL_ERROR, format!("{error:#}")))?;
+        let cwd = parent_delegation
+            .as_ref()
+            .map(|record| record.cwd.clone())
+            .or_else(|| {
+                self.safety
+                    .as_ref()
+                    .map(|policy| policy.workspace().to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| {
+                self.session
+                    .path_for_session(&parent.session_id.0)
+                    .parent()
+                    .unwrap_or(Path::new("."))
+                    .to_string_lossy()
+                    .into_owned()
+            });
+        // 初期只开放只读能力；即使父会话权限更宽，child 仍冻结为最窄模式。
+        let permission_mode = SafetyMode::RequestApproval.key().to_owned();
+        let deadline_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .min(i64::MAX as u128) as i64
+            + timeout_ms;
+        let deadline_ms = parent_delegation
+            .as_ref()
+            .map_or(deadline_ms, |record| deadline_ms.min(record.deadline_ms));
+        let guard = self.session_supervisor.control_lock.lock().await;
+        let duplicate = self
+            .run_store
+            .delegation_by_spawn_key(&params.parent_run_id, &params.spawn_key)
+            .map_err(|error| (INTERNAL_ERROR, error.to_string()))?
+            .is_some();
+        if !duplicate {
+            let key = ActiveKey {
+                session_id: parent.session_id.0.clone(),
+                request_id: parent.request_id.clone(),
+            };
+            let active = self.run_coordinator.active.lock().await;
+            if active.get(&key).is_none_or(|request| {
+                request.run_id != parent.run_id || request.cancellation.is_cancelled()
+            }) {
+                return Err((REQUEST_CONFLICT, "父 run 已停止接纳子 Agent".into()));
+            }
+        }
+        let child = self
+            .run_store
+            .admit_delegation(DelegationRequest {
+                parent_session_id: params.parent_session_id,
+                parent_run_id: params.parent_run_id,
+                child_session_id: SessionId(child_session_id),
+                spawn_key: params.spawn_key,
+                task: params.task.clone(),
+                context_source_ids: params.context_source_ids,
+                tools: requested_tools,
+                permission_mode,
+                cwd,
+                max_rounds,
+                max_tokens,
+                max_tool_calls,
+                deadline_ms,
+            })
+            .map_err(|error| (REQUEST_CONFLICT, error.to_string()))?;
+        drop(guard);
+        self.notify_delegation_parent(&child, EventKind::DelegationSpawned)
+            .await;
+        if child.status == RunStatus::Queued {
+            let request = JsonRpcRequest::new(
+                RequestId::String(format!("delegation:{}", child.child_session_id.0)),
+                "chat.send",
+                json!({"session_id": child.child_session_id, "message": params.task,"entry_channel":"subagent"}),
+            );
+            let (frames, _receiver) = super::frames::frame_channel();
+            let state = self.clone();
+            let accepted = self
+                .spawn_owned(async move {
+                    state.handle_chat_send(request, frames).await;
+                })
+                .await;
+            if !accepted {
+                tracing::warn!(child_run_id = %child.child_run_id.0,
+                    "daemon 关闭中；委派保留 queued，重启后恢复");
+            }
+        }
+        Ok(json!({"child_session_id": child.child_session_id,
+            "child_run_id": child.child_run_id, "status": child.status, "child": child}))
+    }
+
+    fn scoped_delegation(
+        &self,
+        params: &SubagentScopeParams,
+    ) -> Result<DelegationRecord, (i64, String)> {
+        let child = self
+            .run_store
+            .delegation(&params.child_run_id)
+            .map_err(|error| (INTERNAL_ERROR, error.to_string()))?
+            .ok_or((INVALID_PARAMS, "子 Agent 不存在".into()))?;
+        if child.parent_run_id != params.parent_run_id && child.root_run_id != params.parent_run_id
+        {
+            return Err((REQUEST_CONFLICT, "child 不属于指定委派作用域".into()));
+        }
+        Ok(child)
+    }
+
+    async fn wait_subagents(&self, params: WaitSubagentsParams) -> Result<Value, (i64, String)> {
+        if params.child_run_ids.is_empty()
+            || params.child_run_ids.len() > 8
+            || params.timeout_ms.unwrap_or(30_000) > 60_000
+        {
+            return Err((INVALID_PARAMS, "等待对象或超时范围无效".into()));
+        }
+        let timeout = std::time::Duration::from_millis(params.timeout_ms.unwrap_or(30_000));
+        let started = Instant::now();
+        loop {
+            let mut children = Vec::with_capacity(params.child_run_ids.len());
+            let mut checkpoints = Vec::new();
+            for child_run_id in &params.child_run_ids {
+                let child = self.scoped_delegation(&SubagentScopeParams {
+                    parent_run_id: params.parent_run_id.clone(),
+                    child_run_id: child_run_id.clone(),
+                })?;
+                if let Some(after_seq) = params.after_seq {
+                    let run = self
+                        .run_store
+                        .read_run(child_run_id)
+                        .map_err(|error| (INTERNAL_ERROR, error.to_string()))?
+                        .ok_or((INVALID_PARAMS, "child run 不存在".into()))?;
+                    if run.last_seq.0 > after_seq.0 {
+                        checkpoints
+                            .push(json!({"child_run_id": child_run_id, "last_seq": run.last_seq}));
+                    }
+                }
+                children.push(child);
+            }
+            if !checkpoints.is_empty()
+                || children.iter().any(|child| child.status.terminal())
+                || started.elapsed() >= timeout
+            {
+                return Ok(json!({"timed_out": checkpoints.is_empty()
+                        && !children.iter().any(|child| child.status.terminal()),
+                    "children": children, "checkpoints": checkpoints}));
+            }
+            tokio::time::sleep(
+                std::time::Duration::from_millis(50).min(timeout.saturating_sub(started.elapsed())),
+            )
+            .await;
+        }
+    }
+
+    async fn notify_delegation_parent(&self, child: &DelegationRecord, kind: EventKind) {
+        let Ok(Some(parent)) = self.run_store.read_run(&child.parent_run_id) else {
+            return;
+        };
+        let key = ActiveKey {
+            session_id: parent.session_id.0,
+            request_id: parent.request_id.clone(),
+        };
+        let name = match serde_json::to_value(&kind)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+        {
+            Some(name) => name,
+            None => return,
+        };
+        let event = match self.run_store.latest_view_event(
+            &child.parent_run_id,
+            &name,
+            Some(&child.child_run_id),
+        ) {
+            Ok(Some(event)) => event,
+            _ => return,
+        };
+        let Some(update) = stored_event_update(event) else {
+            return;
+        };
+        let mut active = self.run_coordinator.active.lock().await;
+        if let Some(active) = active.get_mut(&key) {
+            active.publish_external(parent.request_id, update);
+        }
+    }
+
+    fn frozen_child_read_tool(
+        &self,
+        child: &DelegationRecord,
+    ) -> Result<ReadFileTool, (i64, String)> {
+        let mode = SafetyMode::parse(&child.permission_mode)
+            .ok_or((INTERNAL_ERROR, "委派权限快照无效".into()))?;
+        let policy = Arc::new(
+            SafetyPolicy::new(&child.cwd, Arc::new(self.approvals.clone()))
+                .map_err(|error| (INTERNAL_ERROR, format!("子 Agent cwd 无法恢复: {error:#}")))?,
+        );
+        policy.set_mode(mode);
+        Ok(ReadFileTool::new(policy))
+    }
+
+    fn handle_chat_send(
+        self: Arc<Self>,
+        request: JsonRpcRequest,
+        frames: super::frames::FrameSender,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        Box::pin(self.handle_chat_send_inner(request, frames))
+    }
+
+    async fn handle_chat_send_inner(
+        self: Arc<Self>,
+        request: JsonRpcRequest,
+        frames: super::frames::FrameSender,
+    ) {
+        if self.shutdown.is_cancelled() {
+            send_result(
+                &frames,
+                request.id,
+                Err((REQUEST_CONFLICT, "daemon 正在关闭，停止新准入".into())),
+            );
+            return;
+        }
+        let params = match parse_params::<ChatSendParams>(&request.params) {
+            Ok(params) if !params.message.trim().is_empty() => params,
+            Ok(_) => {
+                send_result(
+                    &frames,
+                    request.id,
+                    Err((INVALID_PARAMS, "message 不能为空".to_owned())),
+                );
+                return;
+            }
+            Err(error) => {
+                send_result(&frames, request.id, Err((INVALID_PARAMS, error)));
+                return;
+            }
+        };
+
+        let admission_barrier = self.session_supervisor.control_lock.lock().await;
+        if params.plan_execution.is_some() {
+            let valid = match (
+                params.session_id.as_ref(),
+                params.expected_lifetime.as_ref(),
+            ) {
+                (Some(key), Some(lifetime)) => self
+                    .run_store
+                    .session_metadata(&SessionId(key.clone()))
+                    .is_ok_and(|meta| meta.is_some_and(|m| !m.deleted && m.lifetime == *lifetime)),
+                _ => false,
+            };
+            if !valid {
+                send_result(
+                    &frames,
+                    request.id,
+                    Err((
+                        REQUEST_CONFLICT,
+                        "plan execution 必须绑定存在的 session/lifetime".into(),
+                    )),
+                );
+                return;
+            }
+        }
+        let session = match self.session_runtime(params.session_id.as_deref()).await {
+            Ok(session) => session,
+            Err(error) => {
+                send_result(&frames, request.id, Err(error));
+                return;
+            }
+        };
+        let session_id = session.id.clone();
+        let delegation = match self.run_store.delegation_for_session(&session_id) {
+            Ok(record) => record,
+            Err(error) => {
+                send_result(
+                    &frames,
+                    request.id,
+                    Err((INTERNAL_ERROR, error.to_string())),
+                );
+                return;
+            }
+        };
+        let _deadline_timer = if let Some(child) = &delegation {
+            let expected = RequestId::String(format!("delegation:{session_id}"));
+            if request.id != expected {
+                send_result(
+                    &frames,
+                    request.id,
+                    Err((
+                        REQUEST_CONFLICT,
+                        "委派 session 只能由已准入的 child run 驱动".into(),
+                    )),
+                );
+                return;
+            }
+            let remaining = child.deadline_ms.saturating_sub(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+                    .min(i64::MAX as u128) as i64,
+            );
+            let state = self.clone();
+            let child_run_id = child.child_run_id.clone();
+            let child_session_id = child.child_session_id.0.clone();
+            Some(AbortTimer(tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(remaining.max(0) as u64)).await;
+                let _ = state
+                    .cancel(CancelParams {
+                        exact_owner: None,
+                        request_id: None,
+                        run_id: Some(child_run_id),
+                        session_id: Some(child_session_id),
+                    })
+                    .await;
+            })))
+        } else {
+            None
+        };
+        let mode = match params.admission_mode.as_deref().unwrap_or("queue") {
+            "queue" => AdmissionMode::Queue,
+            "reject_if_busy" => AdmissionMode::RejectIfBusy,
+            _ => {
+                send_result(
+                    &frames,
+                    request.id,
+                    Err((INVALID_PARAMS, "不支持的 admission_mode".into())),
+                );
+                return;
+            }
+        };
+        let frozen_route = self
+            .provider_manager
+            .as_ref()
+            .map(|manager| manager.freeze(session.engine.token_budget()));
+        let frozen_engine = match session.engine.freeze_tools() {
+            Ok(engine) => engine,
+            Err(e) => {
+                send_result(&frames, request.id, Err((INTERNAL_ERROR, e.to_string())));
+                return;
+            }
+        };
+        let requested = params.sandbox.as_deref().unwrap_or("native");
+        let (effective, notice) = match requested {
+            "native" => ("native", None),
+            "docker" | "auto" => {
+                if agent_runtime::tools::NativeSandbox::docker_available().await {
+                    ("docker", None)
+                } else if requested == "auto" {
+                    (
+                        "native",
+                        Some("Docker 不可用，auto 明确降级为 Native 软边界".to_owned()),
+                    )
+                } else {
+                    send_result(
+                        &frames,
+                        request.id,
+                        Err((
+                            INVALID_PARAMS,
+                            "Docker backend 或预装镜像不可用，强隔离请求被拒绝".into(),
+                        )),
+                    );
+                    return;
+                }
+            }
+            _ => {
+                send_result(
+                    &frames,
+                    request.id,
+                    Err((INVALID_PARAMS, "sandbox 必须为 native/docker/auto".into())),
+                );
+                return;
+            }
+        };
+        let snapshot = agent_core::RunSnapshot {
+            entry_channel: params.entry_channel,
+            route: frozen_route.as_ref().map(|r| r.snapshot.clone()),
+            tools: frozen_engine.tool_specs(),
+            cwd: self.safety.as_ref().map_or_else(
+                || ".".into(),
+                |s| s.workspace().to_string_lossy().into_owned(),
+            ),
+            permission_mode: self
+                .safety
+                .as_ref()
+                .map_or("risk", |s| s.mode().key())
+                .into(),
+            sandbox_requested: requested.into(),
+            sandbox_effective: effective.into(),
+            sandbox_notice: notice,
+            docker_image: (effective == "docker").then(|| {
+                std::env::var("MY_AGENT_DOCKER_IMAGE").unwrap_or_else(|_| "alpine:3.21".into())
+            }),
+            delegation_context: None,
+            context_read_only: params.context_read_only,
+            context_token_budget: frozen_engine.token_budget(),
+            context_policy_fingerprint: Some(frozen_engine.context_policy_fingerprint()),
+            tool_catalog_digest: format!(
+                "{:x}",
+                sha2::Sha256::digest(
+                    serde_json::to_vec(&frozen_engine.tool_specs()).unwrap_or_default()
+                )
+            ),
+            memory_entry_budget: 8,
+            memory_token_budget: 1024,
+            max_tool_calls: delegation.as_ref().map(|d| d.max_tool_calls as u64),
+            config_generation: frozen_route
+                .as_ref()
+                .map_or(0, |r| r.snapshot.config_generation),
+        };
+        let admitted = match self.run_store.admit_run(
+            &agent_core::RunAdmission {
+                plan_execution: params.plan_execution.clone(),
+                session_key: SessionId(session_id.clone()),
+                expected_lifetime: Some(
+                    params
+                        .expected_lifetime
+                        .clone()
+                        .unwrap_or_else(|| session.lifetime.clone()),
+                ),
+                request_id: request.id.clone(),
+                input: params.message.clone(),
+                mode,
+            },
+            &snapshot,
+        ) {
+            Ok(admitted) => admitted,
+            Err(error) => {
+                let code = if matches!(error, RuntimeError::Protocol(_)) {
+                    REQUEST_CONFLICT
+                } else {
+                    INTERNAL_ERROR
+                };
+                send_result(&frames, request.id, Err((code, error.to_string())));
+                return;
+            }
+        };
+        let run_record = match admitted {
+            Admission::New(run) => {
+                self.run_coordinator
+                    .frozen_engines
+                    .lock()
+                    .await
+                    .insert(run.run_id.clone(), frozen_engine);
+                if let Some(route) = frozen_route {
+                    self.run_coordinator
+                        .frozen_routes
+                        .lock()
+                        .await
+                        .insert(run.run_id.clone(), route);
+                }
+                run
+            }
+            Admission::Existing(run) => {
+                if run.status == RunStatus::Completed {
+                    send_result(
+                        &frames,
+                        request.id,
+                        Ok(
+                            json!({"content": run.content, "run_id": run.run_id, "turn_id": run.turn_id,"continuation_run_id":self.run_store.hook_continuation_child(&run.run_id).ok().flatten()}),
+                        ),
+                    );
+                    return;
+                } else if run.status != RunStatus::Queued {
+                    send_result(
+                        &frames,
+                        request.id,
+                        Ok(json!({"run_id": run.run_id, "turn_id": run.turn_id,
+                            "status": run.status, "duplicate": true,
+                            "error_code": run.error_code, "error_message": run.error_message})),
+                    );
+                    return;
+                } else {
+                    run
+                }
+            }
+        };
+        let started_at = Instant::now();
+        info!(
+            session_id = %session_id,
+            request_id = ?request.id,
+            "chat 请求开始"
+        );
+        let active_key = ActiveKey {
+            session_id: session_id.clone(),
+            request_id: request.id.clone(),
+        };
+        let cancellation = CancellationToken::new();
+        let mut active = self.run_coordinator.active.lock().await;
+        if active.contains_key(&active_key)
+            || active.values().any(|a| a.run_id == run_record.run_id)
+        {
+            drop(active);
+            send_result(
+                &frames,
+                request.id,
+                Ok(
+                    json!({"run_id": run_record.run_id, "turn_id": run_record.turn_id, "status": "queued_or_running", "duplicate": true}),
+                ),
+            );
+            return;
+        }
+        active.insert(
+            active_key.clone(),
+            ActiveRequest::new(cancellation.clone(), run_record.run_id.clone())
+                .with_origin(frames.clone()),
+        );
+        drop(active);
+        drop(admission_barrier);
+        self.run_coordinator.queue_notify.notify_waiters();
+        loop {
+            let notified = self.run_coordinator.queue_notify.notified();
+            if cancellation.is_cancelled() {
+                self.run_coordinator.active.lock().await.remove(&active_key);
+                self.run_coordinator
+                    .frozen_routes
+                    .lock()
+                    .await
+                    .remove(&run_record.run_id);
+                self.run_coordinator
+                    .frozen_engines
+                    .lock()
+                    .await
+                    .remove(&run_record.run_id);
+                send_result(
+                    &frames,
+                    request.id,
+                    Err((REQUEST_CANCELLED, "请求已取消".into())),
+                );
+                return;
+            }
+            match self.run_store.try_start_queued(&run_record.run_id) {
+                Ok(true) => break,
+                Ok(false) => {}
+                Err(error) => {
+                    self.run_coordinator.active.lock().await.remove(&active_key);
+                    send_result(
+                        &frames,
+                        request.id,
+                        Err((INTERNAL_ERROR, error.to_string())),
+                    );
+                    return;
+                }
+            }
+            tokio::select! {
+                _ = notified => {},
+                _ = cancellation.cancelled() => {},
+                _ = self.shutdown.cancelled() => {
+                    self.run_coordinator.active.lock().await.remove(&active_key);
+                    return;
+                }
+            }
+        }
+
+        let route = if let Some(route) = self
+            .run_coordinator
+            .frozen_routes
+            .lock()
+            .await
+            .remove(&run_record.run_id)
+        {
+            Some(route)
+        } else {
+            match self.run_store.route_snapshot(&run_record.run_id) {
+                Ok(Some(snapshot)) => {
+                    let restore = self
+                        .provider_manager
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("ProviderManager 不可用"))
+                        .and_then(|manager| {
+                            let mut profiles = self.config_store.load()?.profiles;
+                            profiles.push(manager.profile());
+                            manager.restore(snapshot, &profiles)
+                        });
+                    match restore {
+                        Ok(route) => Some(route),
+                        Err(error) => {
+                            let _ = self.run_store.finish(
+                                &run_record.run_id,
+                                RunStatus::Failed,
+                                None,
+                                Some((-32002, "冻结 Provider 配置无法恢复")),
+                            );
+                            self.run_coordinator.active.lock().await.remove(&active_key);
+                            send_result(
+                                &frames,
+                                request.id,
+                                Err((
+                                    INTERNAL_ERROR,
+                                    format!("冻结 Provider 配置无法恢复: {error}"),
+                                )),
+                            );
+                            return;
+                        }
+                    }
+                }
+                Ok(None) => None,
+                Err(error) => {
+                    self.run_coordinator.active.lock().await.remove(&active_key);
+                    send_result(
+                        &frames,
+                        request.id,
+                        Err((INTERNAL_ERROR, error.to_string())),
+                    );
+                    return;
+                }
+            }
+        };
+        let engine = self
+            .run_coordinator
+            .frozen_engines
+            .lock()
+            .await
+            .remove(&run_record.run_id)
+            .unwrap_or_else(|| (*session.engine).clone());
+        let engine = match engine.freeze_tools() {
+            Ok(engine) => engine,
+            Err(error) => {
+                let _ = self.run_store.finish(
+                    &run_record.run_id,
+                    RunStatus::Failed,
+                    None,
+                    Some((INTERNAL_ERROR, &error.to_string())),
+                );
+                send_result(
+                    &frames,
+                    request.id,
+                    Err((INTERNAL_ERROR, error.to_string())),
+                );
+                self.run_coordinator.active.lock().await.remove(&active_key);
+                self.run_coordinator.queue_notify.notify_waiters();
+                return;
+            }
+        };
+        let mut run_engine = route
+            .map(|route| engine.with_route(route))
+            .unwrap_or(engine);
+        let run_snapshot = match self.run_store.run_snapshot(&run_record.run_id) {
+            Ok(value) => value,
+            Err(e) => {
+                send_result(&frames, request.id, Err((INTERNAL_ERROR, e.to_string())));
+                self.run_coordinator.active.lock().await.remove(&active_key);
+                return;
+            }
+        };
+        if let Some(snapshot) = &run_snapshot
+            && snapshot.tools != run_engine.tool_specs()
+        {
+            let _ = self.run_store.finish(
+                &run_record.run_id,
+                RunStatus::Failed,
+                None,
+                Some((INTERNAL_ERROR, "冻结 tool catalog 无法恢复")),
+            );
+            send_result(
+                &frames,
+                request.id,
+                Err((INTERNAL_ERROR, "冻结 tool catalog 无法恢复".into())),
+            );
+            self.run_coordinator.active.lock().await.remove(&active_key);
+            self.run_coordinator.queue_notify.notify_waiters();
+            return;
+        }
+        if let Some(fingerprint) = run_snapshot
+            .as_ref()
+            .and_then(|s| s.context_policy_fingerprint.as_deref())
+        {
+            match run_engine.with_frozen_context(fingerprint) {
+                Ok(engine) => run_engine = engine,
+                Err(error) => {
+                    let _ = self.run_store.finish(
+                        &run_record.run_id,
+                        RunStatus::Failed,
+                        None,
+                        Some((INTERNAL_ERROR, "冻结 context policy 无法恢复")),
+                    );
+                    self.run_coordinator.active.lock().await.remove(&active_key);
+                    self.run_coordinator.queue_notify.notify_waiters();
+                    send_result(
+                        &frames,
+                        request.id,
+                        Err((INTERNAL_ERROR, error.to_string())),
+                    );
+                    return;
+                }
+            }
+        }
+        let frozen_mode = run_snapshot
+            .as_ref()
+            .and_then(|s| SafetyMode::parse(&s.permission_mode))
+            .or_else(|| {
+                delegation
+                    .as_ref()
+                    .and_then(|child| SafetyMode::parse(&child.permission_mode))
+            })
+            .unwrap_or(SafetyMode::RiskApproval);
+        let continuation = match self.run_store.hook_continuation_parent(&run_record.run_id) {
+            Ok(parent) => parent.is_some(),
+            Err(error) => {
+                let _ = self.run_store.finish(
+                    &run_record.run_id,
+                    RunStatus::Failed,
+                    None,
+                    Some((INTERNAL_ERROR, "continuation 身份无法恢复")),
+                );
+                self.run_coordinator.active.lock().await.remove(&active_key);
+                self.run_coordinator.queue_notify.notify_waiters();
+                send_result(
+                    &frames,
+                    request.id,
+                    Err((INTERNAL_ERROR, error.to_string())),
+                );
+                return;
+            }
+        };
+        let _continuation_timer = continuation.then(|| {
+            let cancellation = cancellation.clone();
+            AbortTimer(tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                cancellation.cancel();
+            }))
+        });
+        if continuation {
+            run_engine = run_engine.for_hook_continuation();
+        }
+        if let Some(child) = &delegation {
+            run_engine = match run_engine.for_delegation(
+                &child.tools,
+                child.max_rounds as usize,
+                child.max_tokens as usize,
+            ) {
+                Ok(engine) => engine,
+                Err(error) => {
+                    let _ = self.run_store.finish(
+                        &run_record.run_id,
+                        RunStatus::Failed,
+                        None,
+                        Some((INTERNAL_ERROR, "子 Agent 能力无法恢复")),
+                    );
+                    self.run_coordinator.active.lock().await.remove(&active_key);
+                    send_result(
+                        &frames,
+                        request.id,
+                        Err((INTERNAL_ERROR, error.to_string())),
+                    );
+                    return;
+                }
+            };
+        }
+        let (agent_events, mut event_receiver) = mpsc::unbounded_channel();
+        let (approval_events, mut approval_receiver) = super::frames::frame_channel();
+        let trace_request_id = request_id_label(&request.id);
+        let turn_span = info_span!(
+            "agent_turn",
+            session_id = %session_id,
+            request_id = ?request.id,
+        );
+        let run = agent_runtime::safety::with_frozen_mode(
+            frozen_mode,
+            agent_runtime::loop_engine::with_tool_audit(
+                self.run_store.clone(),
+                run_record.run_id.clone(),
+                self.approvals.with_session_context(
+                    session_id.clone(),
+                    run_record.request_id.clone(),
+                    approval_events,
+                    async {
+                        let _writer = session.writer.lock().await;
+                        let owner = self.run_store.run_owner(&run_record.run_id)?;
+                        self.run_store.start_plan_execution(&owner)?;
+                        let mut history = self
+                            .run_store
+                            .session_snapshot(&SessionId(session.id.clone()))?
+                            .messages;
+                        agent_runtime::hooks::with_scope(
+                            agent_runtime::hooks::HookScope {
+                                dispatcher: self.hooks.clone(),
+                                store: self.run_store.clone(),
+                                owner,
+                            },
+                            async {
+                                if delegation.is_some() {
+                                    agent_runtime::hooks::current(
+                                        agent_core::HookEvent::SubagentStart,
+                                        "start",
+                                        json!({"published":true}),
+                                        &cancellation,
+                                    )
+                                    .await?;
+                                }
+                                run_engine
+                                    .run_turn_with_events_for_request(
+                                        &mut history,
+                                        params.message,
+                                        Some(agent_events),
+                                        cancellation.clone(),
+                                        Some(trace_request_id),
+                                    )
+                                    .await
+                            },
+                        )
+                        .await
+                    },
+                ),
+            ),
+        )
+        .instrument(turn_span);
+        tokio::pin!(run);
+
+        let result = loop {
+            tokio::select! {
+                result = &mut run => break result,
+                event = event_receiver.recv() => {
+                    if let Some(event) = event {
+                        self.publish_update(
+                            &frames,
+                            &active_key,
+                            agent_event_update(event),
+                        ).await;
+                    }
+                }
+                approval = approval_receiver.recv() => {
+                    if let Some(ServerFrame::Event(event)) = approval {
+                        self.publish_update(
+                            &frames,
+                            &active_key,
+                            ActiveRequestUpdate::Event {
+                                kind: event.event,
+                                data: event.data,
+                                run_id: None,
+                                seq: None,
+                            },
+                        ).await;
+                    }
+                }
+            }
+        };
+        while let Ok(event) = event_receiver.try_recv() {
+            self.publish_update(&frames, &active_key, agent_event_update(event))
+                .await;
+        }
+        while let Ok(ServerFrame::Event(event)) = approval_receiver.try_recv() {
+            self.publish_update(
+                &frames,
+                &active_key,
+                ActiveRequestUpdate::Event {
+                    kind: event.event,
+                    data: event.data,
+                    run_id: None,
+                    seq: None,
+                },
+            )
+            .await;
+        }
+
+        let storage_error = self
+            .run_coordinator
+            .active
+            .lock()
+            .await
+            .get(&active_key)
+            .and_then(|active| active.storage_error.clone());
+        let response = match (storage_error, result) {
+            (Some(error), _) => Err((INTERNAL_ERROR, format!("持久化事件失败: {error}"))),
+            (None, Ok(_)) if cancellation.is_cancelled() => {
+                Err((REQUEST_CANCELLED, "请求已取消".to_owned()))
+            }
+            (None, Ok(content)) => Ok(
+                json!({"content": content, "run_id": run_record.run_id, "turn_id": run_record.turn_id,"sandbox_requested":run_snapshot.as_ref().map(|s|&s.sandbox_requested),"sandbox_effective":run_snapshot.as_ref().map(|s|&s.sandbox_effective),"sandbox_notice":run_snapshot.as_ref().and_then(|s|s.sandbox_notice.as_ref())}),
+            ),
+            (None, Err(ref error))
+                if cancellation.is_cancelled()
+                    || matches!(
+                        error.downcast_ref::<RuntimeError>(),
+                        Some(RuntimeError::Cancelled)
+                    ) =>
+            {
+                Err((REQUEST_CANCELLED, "请求已取消".to_owned()))
+            }
+            (None, Err(error)) => Err((INTERNAL_ERROR, format!("{error:#}"))),
+        };
+        let terminal_status = match &response {
+            Ok(_) => RunStatus::Completed,
+            Err((REQUEST_CANCELLED, _)) => RunStatus::Cancelled,
+            Err(_) => RunStatus::Failed,
+        };
+        let content = response
+            .as_ref()
+            .ok()
+            .and_then(|value| value["content"].as_str());
+        let error = response
+            .as_ref()
+            .err()
+            .map(|(code, message)| (*code, message.as_str()));
+        let owner = match self.run_store.run_owner(&run_record.run_id) {
+            Ok(owner) => owner,
+            Err(e) => {
+                send_result(&frames, request.id, Err((INTERNAL_ERROR, e.to_string())));
+                return;
+            }
+        };
+        let committed = match self.run_store.commit_turn(&agent_core::TurnCommit {
+            owner: owner.clone(),
+            status: terminal_status,
+            content: content.map(str::to_owned),
+            error: error.map(|(code, msg)| (code, msg.to_owned())),
+        }) {
+            Ok(committed) => committed,
+            Err(storage_error) => {
+                tracing::error!(run_id = %run_record.run_id.0, error = %storage_error, "提交 run 终态失败");
+                send_result(
+                    &frames,
+                    request.id,
+                    Err((INTERNAL_ERROR, format!("持久化终态失败: {storage_error}"))),
+                );
+                self.run_coordinator.active.lock().await.remove(&active_key);
+                return;
+            }
+        };
+        if delegation.is_some()
+            && let Ok(Some(child)) = self.run_store.delegation(&run_record.run_id)
+        {
+            self.notify_delegation_parent(&child, EventKind::DelegationTerminal)
+                .await;
+        }
+        let mut response = if committed.status == RunStatus::UnknownAfterRestart {
+            Err((-32002, "工具执行结果未知，禁止自动重放".to_owned()))
+        } else {
+            response
+        };
+        let hook_result=agent_runtime::hooks::with_scope(agent_runtime::hooks::HookScope {dispatcher:self.hooks.clone(),store:self.run_store.clone(),owner:owner.clone()},async {
+            if let Some(content)=committed.content.as_deref() {
+                agent_runtime::hooks::current(agent_core::HookEvent::AssistantReply,"reply",json!({"content_bytes":content.len(),"content_sha256":format!("{:x}",Sha256::digest(content.as_bytes()))}),&cancellation).await?;
+            }
+            agent_runtime::hooks::current(agent_core::HookEvent::AfterTurn,"terminal",json!({"status":committed.status}),&cancellation).await?;
+            if delegation.is_some() {agent_runtime::hooks::current(agent_core::HookEvent::SubagentEnd,"terminal",json!({"status":committed.status}),&cancellation).await?;}
+            agent_runtime::hooks::current(agent_core::HookEvent::Notification,"terminal",json!({"kind":"run_terminal","status":committed.status}),&cancellation).await?;
+            if committed.status==RunStatus::Completed {
+                agent_runtime::hooks::current(agent_core::HookEvent::Stop,"stop",json!({"status":committed.status,"continuation_allowed":!continuation && delegation.is_none()}),&cancellation).await
+            } else {Ok(agent_core::HookEffect::Observe {})}
+        }).await;
+        if let Ok(agent_core::HookEffect::Continue { prompt }) = hook_result {
+            let operation = format!("hook:Stop:{}:stop", owner.run_id.0);
+            let launch = match run_snapshot.as_ref() {
+                Some(snapshot) => self
+                    .run_store
+                    .admit_hook_continuation(&owner, &operation, &prompt, snapshot),
+                None => Err(RuntimeError::Protocol("continuation 缺冻结快照".into())),
+            };
+            match launch {
+                Ok(Admission::New(child)) | Ok(Admission::Existing(child)) => {
+                    if let Ok(value) = &mut response {
+                        value["continuation_run_id"] = json!(child.run_id);
+                    }
+                    let state = self.clone();
+                    let request = JsonRpcRequest::new(
+                        child.request_id,
+                        "chat.send",
+                        json!({"session_id":child.session_id,"expected_lifetime":owner.session_lifetime_id,"message":prompt}),
+                    );
+                    let (frames, _receiver) = super::frames::frame_channel();
+                    self.spawn_owned(async move {
+                        Box::pin(state.handle_chat_send(request, frames)).await;
+                    })
+                    .await;
+                }
+                Err(error) => {
+                    tracing::warn!(%error,"Stop continuation 准入拒绝；原 terminal 保留")
+                }
+            }
+        } else if let Err(error) = hook_result {
+            tracing::warn!(%error,"terminal hook 失败；原 terminal 保留");
+        }
+        if let Some(content) = committed.content.as_deref() {
+            self.publish_committed_completion(&frames, &active_key, content)
+                .await;
+        }
+        match &response {
+            Ok(_) => info!(
+                session_id = %session_id,
+                request_id = ?active_key.request_id,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                outcome = "completed",
+                "chat 请求结束"
+            ),
+            Err((code, error)) => info!(
+                session_id = %session_id,
+                request_id = ?active_key.request_id,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                outcome = "failed",
+                error_code = *code,
+                error,
+                "chat 请求结束"
+            ),
+        }
+        self.publish_update(
+            &frames,
+            &active_key,
+            self.terminal_update(&run_record.run_id, response),
+        )
+        .await;
+        self.run_coordinator.active.lock().await.remove(&active_key);
+        self.run_coordinator.queue_notify.notify_waiters();
+        // 完成后维护是单独成功位；失败不能修改已发布 terminal。单次最多摄入一个 turn。
+        if committed.status == RunStatus::Completed {
+            if let Ok(owner) = self.run_store.run_owner(&committed.run_id) {
+                let readonly = self
+                    .run_store
+                    .run_snapshot(&owner.run_id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|s| s.context_read_only);
+                let outcome = if readonly {
+                    "skipped_read_only"
+                } else {
+                    match self.run_store.ingest_committed_turn(&owner) {
+                        Ok(()) => "completed",
+                        Err(error) => {
+                            tracing::warn!(run_id=%committed.run_id.0,error=%error,"完成后 memory 维护未写入");
+                            "failed"
+                        }
+                    }
+                };
+                if let Err(error) =
+                    self.maintenance_store
+                        .record_maintenance(&owner, "memory_ingest", outcome)
+                {
+                    tracing::warn!(error=%error,"维护诊断已被 lifetime fence 拒绝");
+                }
+            }
+        }
+    }
+
+    async fn resource_command(
+        &self,
+        method: &str,
+        params: ResourceParams,
+    ) -> Result<Value, (i64, String)> {
+        let session = self.query_session_metadata(&params.session_id)?;
+        let fail = |e: RuntimeError| (REQUEST_CONFLICT, e.to_string());
+        if method == "resources.list" {
+            let entries = self
+                .run_store
+                .list_resources(
+                    &session.lifetime,
+                    agent_core::ResourceId(params.after_cursor),
+                    params.limit,
+                )
+                .map_err(fail)?;
+            return Ok(json!({"cursor":entries.last().map(|r|r.id),"resources":entries}));
+        }
+        let id = params
+            .resource_id
+            .ok_or_else(|| (INVALID_PARAMS, "缺少 resource_id".into()))?;
+        let record = self.run_store.read_resource(id).map_err(fail)?;
+        if record.owner.session_key.0 != params.session_id
+            || record.owner.session_lifetime_id != session.lifetime
+        {
+            return Err((REQUEST_CONFLICT, "resource stale owner".into()));
+        }
+        match method {
+            "resources.read"=>Ok(json!({"resource":record})),
+            "resources.logs"=>Ok(json!({"logs":self.run_store.resource_logs(id,params.after_cursor,params.limit).map_err(fail)?,"cursor":record.log_cursor})),
+            "resources.wait"=>self.wait_resource(id,std::time::Duration::from_millis(params.timeout_ms.min(60000))).await.map(|r|json!({"resource":r,"timed_out":matches!(r.state.as_str(),"starting"|"running"|"stopping")})).map_err(|e|(INTERNAL_ERROR,e.to_string())),
+            "resources.stop"=>{
+                if params.owner_run_id.as_ref()!=Some(&record.owner.run_id){return Err((REQUEST_CONFLICT,"stop 要求 exact owner_run_id".into()));}
+                self.stop_resource(&record.owner,id).await.map(|r|json!({"resource":r})).map_err(|e|(INTERNAL_ERROR,e.to_string()))
+            }
+            _=>Err((METHOD_NOT_FOUND,"未知 resources 方法".into())),
+        }
+    }
+
+    async fn memory_command(&self, method: &str, value: &Value) -> Result<Value, (i64, String)> {
+        let session_id = value
+            .get("session_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| (INVALID_PARAMS, "缺少 session_id".into()))?;
+        let session = self.query_session_metadata(session_id)?;
+        let project = self.safety.as_ref().map_or_else(
+            || "".into(),
+            |s| s.workspace().to_string_lossy().into_owned(),
+        );
+        let visibility = agent_core::MemoryVisibility {
+            lifetime: session.lifetime.clone(),
+            project: project.clone(),
+            allow_confirmed_global: true,
+        };
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |time| time.as_secs());
+        let fail = |e: RuntimeError| (REQUEST_CONFLICT, e.to_string());
+        match method {
+            "memory.evidence" => {
+                let params: MemoryEvidenceParams =
+                    parse_params(value).map_err(|e| (INVALID_PARAMS, e))?;
+                Ok(
+                    json!({"evidence":self.run_store.memory_evidence(&visibility,&params.memory_id,params.after_source,params.limit).map_err(fail)?}),
+                )
+            }
+            "memory.flywheel" => self
+                .run_store
+                .flywheel_report(&visibility.lifetime)
+                .map_err(fail),
+            "memory.feedback" => {
+                let params: MemoryFeedbackParams =
+                    parse_params(value).map_err(|e| (INVALID_PARAMS, e))?;
+                let owner = self
+                    .run_store
+                    .run_owner(&params.owner_run_id)
+                    .map_err(fail)?;
+                if owner.session_key.0 != session_id
+                    || owner.session_lifetime_id != visibility.lifetime
+                {
+                    return Err((REQUEST_CONFLICT, "feedback owner session 不匹配".into()));
+                }
+                self.run_store
+                    .memory_feedback(
+                        &owner,
+                        &params.operation_id,
+                        &params.memory_id,
+                        params.feedback,
+                    )
+                    .map_err(fail)?;
+                Ok(
+                    json!({"accepted":true,"policy":agent_memory::RECALL_POLICY,"scope":"session_lifetime"}),
+                )
+            }
+            "memory.scope" => Ok(
+                json!({"session_id":session_id,"scopes":["session","project","confirmed_global"],"legacy_visible":false}),
+            ),
+            "memory.recall" | "memory.list" => {
+                let params: MemoryReadParams =
+                    parse_params(value).map_err(|e| (INVALID_PARAMS, e))?;
+                let mut entries = if method == "memory.list" {
+                    self.run_store
+                        .memory_page(
+                            &visibility,
+                            params.after_id.as_deref(),
+                            params.limit.clamp(1, 100) + 1,
+                        )
+                        .map_err(fail)?
+                } else {
+                    agent_memory::rank_with_feedback(
+                        self.run_store
+                            .memory_candidates(&visibility)
+                            .map_err(fail)?,
+                        &visibility,
+                        &params.query,
+                        params.limit.clamp(1, 100) + 1,
+                        now,
+                        &self
+                            .run_store
+                            .memory_assessments(&visibility)
+                            .map_err(fail)?,
+                    )
+                };
+                entries.retain(|e| visibility.allows(e, now));
+                let total = entries.len();
+                entries.truncate(params.limit.clamp(1, 100));
+                let mut bytes = 0;
+                let mut end = 0;
+                for entry in &entries {
+                    let size = serde_json::to_vec(entry)
+                        .map_err(|e| (INTERNAL_ERROR, e.to_string()))?
+                        .len();
+                    if bytes + size > 256 * 1024 {
+                        break;
+                    }
+                    bytes += size;
+                    end += 1;
+                }
+                entries.truncate(end);
+                let has_more = total > entries.len();
+                let cursor = entries.last().map(|e| e.id.clone());
+                Ok(
+                    json!({"entries":entries,"cursor":cursor,"has_more":has_more,"session_id":session_id}),
+                )
+            }
+            "memory.store" => {
+                let params: MemoryStoreParams =
+                    parse_params(value).map_err(|e| (INVALID_PARAMS, e))?;
+                let owner = self
+                    .run_store
+                    .run_owner(&params.owner_run_id)
+                    .map_err(fail)?;
+                if owner.session_key.0 != session_id
+                    || owner.session_lifetime_id != session.lifetime
+                {
+                    return Err((REQUEST_CONFLICT, "memory stale owner".into()));
+                }
+                let scope = match params.scope.as_deref().unwrap_or("session") {
+                    "session" => agent_core::MemoryScope::Session(session.lifetime.clone()),
+                    "project" if params.confirmed_by_user => {
+                        agent_core::MemoryScope::Project(project)
+                    }
+                    "global" if params.confirmed_by_user => agent_core::MemoryScope::Global,
+                    _ => return Err((INVALID_PARAMS, "跨会话 scope 要求用户显式确认".into())),
+                };
+                if params.operation_id.is_empty() || params.operation_id.len() > 256 {
+                    return Err((INVALID_PARAMS, "memory operation_id 无效".into()));
+                }
+                let entry = agent_core::MemoryRecord {
+                    id: format!("rpc:{}:{}", owner.run_id.0, params.operation_id),
+                    layer: agent_core::MemoryLayer::Semantic,
+                    scope,
+                    kind: agent_core::MemoryKind::Explicit,
+                    content_digest: format!("{:x}", Sha256::digest(params.content.as_bytes())),
+                    content: params.content,
+                    source: Some(owner.clone()),
+                    source_message_ids: vec![],
+                    event_time: now,
+                    created_at: now,
+                    updated_at: now,
+                    expires_at: params
+                        .ttl_days
+                        .map(|days| now.saturating_add(days.saturating_mul(86400))),
+                    confidence: 100,
+                    confirmed_by_user: params.confirmed_by_user,
+                    revision: 0,
+                };
+                let saved = self.run_store.store_memory(&owner, &entry).map_err(fail)?;
+                Ok(json!({"entry":saved}))
+            }
+            "memory.forget" => {
+                let params: MemoryForgetParams =
+                    parse_params(value).map_err(|e| (INVALID_PARAMS, e))?;
+                let owner = self
+                    .run_store
+                    .run_owner(&params.owner_run_id)
+                    .map_err(fail)?;
+                if owner.session_key.0 != session_id {
+                    return Err((REQUEST_CONFLICT, "memory owner session 不匹配".into()));
+                }
+                Ok(
+                    json!({"forgotten":self.run_store.forget_memory(&owner,&visibility,&params.memory_id,params.revision).map_err(fail)?}),
+                )
+            }
+            _ => Err((METHOD_NOT_FOUND, "未知 memory 方法".into())),
+        }
+    }
+
+    fn query_session_metadata(
+        &self,
+        session_id: &str,
+    ) -> Result<agent_core::SessionMetadata, (i64, String)> {
+        self.run_store
+            .session_metadata(&SessionId(session_id.to_owned()))
+            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?
+            .filter(|m| !m.deleted)
+            .ok_or_else(|| (INVALID_PARAMS, "session 已删除或不存在".into()))
+    }
+
+    fn query_session_trace_store(
+        &self,
+        session_id: &str,
+    ) -> Result<agent_runtime::session::SessionStore, (i64, String)> {
+        let metadata = self.query_session_metadata(session_id)?;
+        self.session
+            .open_known_session(session_id)
+            .and_then(|s| s.with_trace_lifetime(&metadata.lifetime))
+            .map_err(|e| (INVALID_PARAMS, e.to_string()))
+    }
+
+    pub(super) async fn session_runtime(
+        &self,
+        requested_id: Option<&str>,
+    ) -> Result<Arc<SessionRuntime>, (i64, String)> {
+        let session_id = match requested_id {
+            Some(session_id) => session_id.to_owned(),
+            None => self
+                .session_supervisor
+                .legacy_session_id
+                .lock()
+                .await
+                .clone(),
+        };
+        let metadata = self
+            .run_store
+            .session_metadata(&SessionId(session_id.clone()))
+            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+        if metadata.as_ref().is_some_and(|m| m.deleted) {
+            return Err((INVALID_PARAMS, "session 已删除".into()));
+        }
+        if session_id == self.session_supervisor.default_session.id
+            && metadata
+                .as_ref()
+                .is_some_and(|m| m.lifetime == self.session_supervisor.default_session.lifetime)
+        {
+            return Ok(self.session_supervisor.default_session.clone());
+        }
+        if let Some(runtime) = self
+            .session_supervisor
+            .sessions
+            .lock()
+            .await
+            .get(&session_id)
+            .cloned()
+            && metadata
+                .as_ref()
+                .is_some_and(|m| m.lifetime == runtime.lifetime)
+        {
+            return Ok(runtime);
+        }
+        let store = match self.session.open_session(&session_id) {
+            Ok(store) => store,
+            Err(open_error) => {
+                if !self
+                    .run_store
+                    .session_exists(&session_id)
+                    .map_err(|error| (INTERNAL_ERROR, error.to_string()))?
+                {
+                    return Err((INVALID_PARAMS, format!("{open_error:#}")));
+                }
+                self.session
+                    .open_known_session(&session_id)
+                    .map_err(|error| (INVALID_PARAMS, format!("{error:#}")))?
+            }
+        };
+        let store = Arc::new(store);
+        if metadata.as_ref().is_none_or(|m| !m.legacy_imported) {
+            let history = store
+                .load()
+                .await
+                .map_err(|e| (INTERNAL_ERROR, format!("{e:#}")))?;
+            self.run_store
+                .import_legacy(&SessionId(session_id.clone()), &history)
+                .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+        }
+        let snapshot = self
+            .run_store
+            .session_snapshot(&SessionId(session_id.clone()))
+            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+        let store = Arc::new(
+            store
+                .with_trace_lifetime(&snapshot.lifetime)
+                .map_err(|e| (INTERNAL_ERROR, e.to_string()))?,
+        );
+        let mut engine = self
+            .session_supervisor
+            .default_session
+            .engine
+            .for_session(store.clone());
+        if let Some(child) = self
+            .run_store
+            .delegation_for_session(&session_id)
+            .map_err(|error| (INTERNAL_ERROR, error.to_string()))?
+        {
+            engine = engine
+                .for_delegation(
+                    &child.tools,
+                    child.max_rounds as usize,
+                    child.max_tokens as usize,
+                )
+                .map_err(|error| (INTERNAL_ERROR, error.to_string()))?;
+            engine = engine.with_tool(self.frozen_child_read_tool(&child)?);
+        }
+        let runtime = Arc::new(SessionRuntime {
+            id: session_id.clone(),
+            engine: Arc::new(engine),
+            lifetime: snapshot.lifetime,
+            writer: Arc::new(Mutex::new(())),
+            store,
+        });
+        let mut sessions = self.session_supervisor.sessions.lock().await;
+        sessions.insert(session_id, runtime.clone());
+        Ok(runtime)
+    }
+
+    async fn session_new(&self) -> Result<Value, (i64, String)> {
+        self.session_create(SessionCreateParams::default()).await
+    }
+
+    async fn session_create(&self, params: SessionCreateParams) -> Result<Value, (i64, String)> {
+        let _barrier = self.session_supervisor.control_lock.lock().await;
+        let (session_id, _) = match params.session_id {
+            Some(key) => (
+                key.clone(),
+                self.session
+                    .open_known_session(&key)
+                    .map_err(|e| (INVALID_PARAMS, e.to_string()))?,
+            ),
+            None => {
+                if let Some(operation) = params.operation_id.as_deref() {
+                    let key = self.session.session_key_for_operation(operation);
+                    (
+                        key.clone(),
+                        self.session
+                            .open_known_session(&key)
+                            .map_err(|e| (INVALID_PARAMS, e.to_string()))?,
+                    )
+                } else {
+                    self.session
+                        .create_isolated_session()
+                        .map_err(|e| (INTERNAL_ERROR, e.to_string()))?
+                }
+            }
+        };
+        let operation = params
+            .operation_id
+            .unwrap_or_else(|| format!("create:{session_id}"));
+        let created = self
+            .run_store
+            .execute_lifecycle(
+                &agent_core::SessionCommand::Create {
+                    key: SessionId(session_id.clone()),
+                },
+                None,
+                &operation,
+            )
+            .map_err(|e| (REQUEST_CONFLICT, e.to_string()))?;
+        let current = self
+            .run_store
+            .session_metadata(&SessionId(session_id.clone()))
+            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+        if current.is_none_or(|m| m.deleted || m.lifetime != created.lifetime) {
+            return Err((
+                REQUEST_CONFLICT,
+                "create receipt 属于旧 lifetime；请读回当前会话".into(),
+            ));
+        }
+        self.run_store
+            .set_preferred_session(&SessionId(session_id.clone()))
+            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+        *self.session_supervisor.legacy_session_id.lock().await = session_id.clone();
+        let mut snapshot =
+            self.session_readback_value(&session_id, agent_core::HistoryReadMode::Canonical)?;
+        snapshot["created"] = json!(true);
+        self.dispatch_hook_publications()
+            .await
+            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+        Ok(snapshot)
+    }
+
+    async fn session_close(&self, params: SessionEndParams) -> Result<Value, (i64, String)> {
+        let key = SessionId(params.session_id.clone());
+        let life = params
+            .expected_lifetime
+            .as_ref()
+            .ok_or((INVALID_PARAMS, "close 缺少 expected lifetime".into()))?;
+        let fail = |error: agent_storage::RuntimeError| (REQUEST_CONFLICT, error.to_string());
+        let owners = {
+            let _barrier = self.session_supervisor.control_lock.lock().await;
+            let snapshot = self
+                .run_store
+                .session_readback(&key, agent_core::HistoryReadMode::Omitted)
+                .map_err(fail)?;
+            if &snapshot.session_lifetime_id != life {
+                return Err((REQUEST_CONFLICT, "close stale lifetime".into()));
+            }
+            if let Some(receipt) = self
+                .run_store
+                .close_receipt(&key, life, &params.operation_id)
+                .map_err(fail)?
+            {
+                return Ok(json!({"closed":true,"metadata":receipt,"duplicate":true}));
+            }
+            snapshot
+                .run_owners
+                .into_iter()
+                .filter(|owner| {
+                    snapshot
+                        .active_runs
+                        .iter()
+                        .any(|run| run.run_id == owner.run_id)
+                })
+                .collect::<Vec<_>>()
+        };
+        for owner in &owners {
+            self.cancel(CancelParams {
+                exact_owner: Some(owner.clone()),
+                request_id: None,
+                run_id: Some(owner.run_id.clone()),
+                session_id: Some(key.0.clone()),
+            })
+            .await?;
+        }
+        loop {
+            let notified = self.run_coordinator.queue_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let barrier = self.session_supervisor.control_lock.lock().await;
+            let settled = owners.iter().all(|owner| {
+                self.run_store
+                    .read_run(&owner.run_id)
+                    .is_ok_and(|run| run.is_some_and(|run| run.status.terminal()))
+            });
+            let attached = self
+                .run_coordinator
+                .active
+                .lock()
+                .await
+                .values()
+                .any(|active| owners.iter().any(|owner| owner.run_id == active.run_id));
+            if settled && !attached {
+                // 新准入不会被旧 close 取消；repository busy/lifetime CAS 决定是否关闭。
+                let receipt = self
+                    .run_store
+                    .execute_lifecycle(
+                        &agent_core::SessionCommand::Close { key: key.clone() },
+                        Some(life),
+                        &params.operation_id,
+                    )
+                    .map_err(fail)?;
+                if !self
+                    .run_coordinator
+                    .active
+                    .lock()
+                    .await
+                    .keys()
+                    .any(|active| active.session_id == key.0)
+                {
+                    self.session_supervisor.sessions.lock().await.remove(&key.0);
+                }
+                drop(barrier);
+                self.dispatch_hook_publications()
+                    .await
+                    .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+                return Ok(json!({"closed":true,"metadata":receipt,"duplicate":false}));
+            }
+            drop(barrier);
+            notified.await;
+        }
+    }
+
+    async fn session_end(
+        &self,
+        params: SessionEndParams,
+        delete: bool,
+    ) -> Result<Value, (i64, String)> {
+        let _barrier = self.session_supervisor.control_lock.lock().await;
+        let key = SessionId(params.session_id.clone());
+        self.run_store
+            .session_metadata(&key)
+            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?
+            .ok_or((INVALID_PARAMS, "session 不存在".into()))?;
+        if self
+            .run_coordinator
+            .active
+            .lock()
+            .await
+            .keys()
+            .any(|k| k.session_id == params.session_id)
+        {
+            return Err((
+                REQUEST_CONFLICT,
+                "session 正在执行，必须先精确 cancel 并等待结算".into(),
+            ));
+        }
+        self.run_store
+            .execute_lifecycle(
+                &agent_core::SessionCommand::End {
+                    key: key.clone(),
+                    delete,
+                },
+                params.expected_lifetime.as_ref(),
+                &params.operation_id,
+            )
+            .map_err(|e| (REQUEST_CONFLICT, e.to_string()))?;
+        self.session_supervisor
+            .sessions
+            .lock()
+            .await
+            .remove(&params.session_id);
+        self.dispatch_hook_publications()
+            .await
+            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+        Ok(json!({"session_id":params.session_id,"deleted":delete,"cleared":!delete}))
+    }
+
+    async fn session_compact(
+        self: &Arc<Self>,
+        params: SessionCompactParams,
+    ) -> Result<Value, (i64, String)> {
+        let snapshot = self
+            .run_store
+            .session_snapshot(&SessionId(params.session_id.clone()))
+            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+        let owner = self
+            .run_store
+            .run_owner(&params.owner_run_id)
+            .map_err(|e| (INVALID_PARAMS, e.to_string()))?;
+        if owner.session_key.0 != params.session_id
+            || owner.session_lifetime_id != snapshot.lifetime
+        {
+            return Err((REQUEST_CONFLICT, "compact owner 不匹配".into()));
+        }
+        if params.operation_id.is_empty() || params.operation_id.len() > 256 {
+            return Err((INVALID_PARAMS, "compact operation_id 无效".into()));
+        }
+        if let Some(stored) = self
+            .run_store
+            .compact_request(
+                &owner.session_key,
+                &owner.session_lifetime_id,
+                &params.operation_id,
+            )
+            .map_err(|e| (REQUEST_CONFLICT, e.to_string()))?
+        {
+            if stored.expected_revision != params.expected_revision
+                || stored.compatibility_owner_run_id.as_ref() != Some(&params.owner_run_id)
+            {
+                return Err((REQUEST_CONFLICT, "compact operation 来源冲突".into()));
+            }
+            let mut response = self
+                .start_compact_command(stored, agent_core::HookChannel::DaemonRpc, true)
+                .await?;
+            response["replayed"] = json!(true);
+            return Ok(response);
+        }
+        if let Some(generation) = self
+            .run_store
+            .compact_result(&owner, &params.operation_id, Some(params.expected_revision))
+            .map_err(|e| (REQUEST_CONFLICT, e.to_string()))?
+        {
+            return Ok(
+                json!({"session_id":params.session_id,"projection_generation":generation,"transcript_revision":params.expected_revision,"replayed":true}),
+            );
+        }
+        if snapshot.revision != params.expected_revision {
+            return Err((REQUEST_CONFLICT, "compact source revision 已变化".into()));
+        }
+        self.start_compact_command(
+            agent_core::CompactRunRequest {
+                session_key: owner.session_key,
+                session_lifetime_id: owner.session_lifetime_id,
+                operation_id: params.operation_id,
+                expected_revision: params.expected_revision,
+                expected_projection_generation: snapshot.projection_generation,
+                compatibility_owner_run_id: Some(params.owner_run_id),
+            },
+            agent_core::HookChannel::DaemonRpc,
+            true,
+        )
+        .await
+    }
+
+    async fn session_fork(&self, params: SessionForkParams) -> Result<Value, (i64, String)> {
+        let _barrier = self.session_supervisor.control_lock.lock().await;
+        self.session
+            .open_known_session(&params.target_session_id)
+            .map_err(|e| (INVALID_PARAMS, e.to_string()))?;
+        let source = SessionId(params.session_id);
+        let target = SessionId(params.target_session_id);
+        self.run_store
+            .execute_lifecycle(
+                &agent_core::SessionCommand::Fork {
+                    source,
+                    target: target.clone(),
+                    revision: params.expected_revision,
+                },
+                params.expected_lifetime.as_ref(),
+                &params.operation_id,
+            )
+            .map_err(|e| (REQUEST_CONFLICT, e.to_string()))?;
+        self.dispatch_hook_publications()
+            .await
+            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+        Ok(json!({"forked":true,"session_id":target}))
+    }
+
+    async fn session_load_mode(
+        &self,
+        session_id: Option<&str>,
+        mode: agent_core::HistoryReadMode,
+    ) -> Result<Value, (i64, String)> {
+        let key = match session_id {
+            Some(key) => key.to_owned(),
+            None => self
+                .session_supervisor
+                .legacy_session_id
+                .lock()
+                .await
+                .clone(),
+        };
+        self.session_readback_value(&key, mode)
+    }
+
+    async fn session_load_page(&self, params: SessionPageParams) -> Result<Value, (i64, String)> {
+        let mut snapshot = self
+            .run_store
+            .session_readback(
+                &SessionId(params.session_id.clone()),
+                agent_core::HistoryReadMode::Canonical,
+            )
+            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+        let history = std::mem::take(&mut snapshot.messages);
+        let batch_ranges = std::mem::take(&mut snapshot.batch_ranges);
+        let total_messages = history.len();
+        let mut start = params.offset.min(total_messages);
+        let limit = params.limit.clamp(1, WEB_PAGE_MAX_LIMIT);
+        let mut end = start.saturating_add(limit).min(total_messages);
+        for &(batch_start, batch_end) in &batch_ranges {
+            if (batch_start as usize) < start && start < (batch_end as usize) {
+                start = batch_start as usize;
+            }
+            if (batch_start as usize) < end && end < (batch_end as usize) {
+                end = batch_end as usize;
+            }
+        }
+        let page = history
+            .into_iter()
+            .skip(start)
+            .take(end - start)
+            .collect::<Vec<_>>();
+        let paired = page
+            .iter()
+            .any(|m| !m.tool_calls.is_empty() || m.role == agent_runtime::provider::Role::Tool);
+        if paired
+            && serde_json::to_vec(&page)
+                .map_err(|e| (INTERNAL_ERROR, e.to_string()))?
+                .len()
+                > MAX_FRAME_BYTES / 2
+        {
+            return Err((
+                INVALID_PARAMS,
+                "完整 tool batch 超过读取预算；需 artifact readback".into(),
+            ));
+        }
+        let (messages, truncated_page) = if paired {
+            (
+                page.iter()
+                    .map(serde_json::to_value)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| (INTERNAL_ERROR, e.to_string()))?,
+                false,
+            )
+        } else {
+            bounded_json_page(
+                page.into_iter(),
+                end - start,
+                "消息过大，已截断；可缩小加载范围查看其余 Session 内容",
+            )
+        };
+        let has_more = truncated_page || end < total_messages;
+        let message_ids = snapshot
+            .message_ids
+            .iter()
+            .skip(start)
+            .take(messages.len())
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut readback = self.decorate_session_readback(snapshot)?;
+        readback["messages"] = json!(messages);
+        readback["message_ids"] = json!(message_ids);
+        readback["history_mode"] = json!("canonical");
+        readback["omitted"] = json!([
+            "complete_messages",
+            "batch_ranges",
+            "plan_execution_identity"
+        ]);
+        readback["offset"] = json!(start);
+        readback["cursor"] = json!(start + readback["messages"].as_array().map_or(0, Vec::len));
+        readback["limit"] = json!(limit);
+        readback["total_messages"] = json!(total_messages);
+        readback["has_more"] = json!(has_more);
+        Ok(readback)
+    }
+
+    async fn session_snapshot(&self, session_id: &str) -> Result<Value, (i64, String)> {
+        self.session_readback_value(session_id, agent_core::HistoryReadMode::Canonical)
+    }
+
+    fn session_readback_value(
+        &self,
+        session_id: &str,
+        mode: agent_core::HistoryReadMode,
+    ) -> Result<Value, (i64, String)> {
+        let snapshot = self
+            .run_store
+            .session_readback(&SessionId(session_id.to_owned()), mode)
+            .map_err(|e| (INVALID_PARAMS, e.to_string()))?;
+        self.decorate_session_readback(snapshot)
+    }
+
+    fn decorate_session_readback(
+        &self,
+        snapshot: agent_core::SessionReadback,
+    ) -> Result<Value, (i64, String)> {
+        let active_requests = snapshot
+            .active_runs
+            .iter()
+            .map(|run| run.request_id.clone())
+            .collect::<Vec<_>>();
+        let pending_approvals = snapshot
+            .pending_interactions
+            .iter()
+            .filter(|i| i.kind == "approval")
+            .map(|i| {
+                let run = snapshot
+                    .active_runs
+                    .iter()
+                    .find(|run| run.run_id == i.owner_run_id)
+                    .ok_or_else(|| {
+                        (
+                            INTERNAL_ERROR,
+                            "pending interaction 缺少 active owner".into(),
+                        )
+                    })?;
+                Ok(PendingApprovalInfo {
+                    id: i.interaction_id.0.clone(),
+                    request_id: run.request_id.clone(),
+                    prompt: i.prompt.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, (i64, String)>>()?;
+        let status = if !pending_approvals.is_empty() {
+            "waiting"
+        } else if !active_requests.is_empty() {
+            "running"
+        } else {
+            "idle"
+        };
+        let mut value =
+            serde_json::to_value(snapshot).map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+        value["active_requests"] = json!(active_requests);
+        value["pending_approvals"] = json!(pending_approvals);
+        value["status"] = json!(status);
+        value["workspace"] = self
+            .safety
+            .as_ref()
+            .map(|s| json!(s.workspace()))
+            .unwrap_or(Value::Null);
+        value["capability_generation"] = json!(1);
+        Ok(value)
+    }
+
+    async fn session_list(&self, params: SessionListParams) -> Result<Value, (i64, String)> {
+        let limit = params.limit.clamp(1, 1000);
+        let mut metadata = self
+            .run_store
+            .session_metadata_page(params.after_id.as_deref(), limit + 1)
+            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+        let has_more = metadata.len() > limit;
+        metadata.truncate(limit);
+        let cursor = metadata.last().map(|m| m.key.0.clone());
+        Ok(
+            json!({"sessions": self.session_infos_from(metadata).await?,"cursor":cursor,"has_more":has_more}),
+        )
+    }
+
+    async fn session_trace(&self, session_id: &str) -> Result<Value, (i64, String)> {
+        let store = self.query_session_trace_store(session_id)?;
+        let records = store
+            .load_trace()
+            .await
+            .map_err(|error| (INTERNAL_ERROR, format!("{error:#}")))?;
+        Ok(json!({
+            "session_id": session_id,
+            "records": records,
+        }))
+    }
+
+    async fn session_trace_page(&self, params: SessionPageParams) -> Result<Value, (i64, String)> {
+        let store = self.query_session_trace_store(&params.session_id)?;
+        let records = store
+            .load_trace()
+            .await
+            .map_err(|error| (INTERNAL_ERROR, format!("{error:#}")))?;
+        let total_records = records.len();
+        let limit = params.limit.clamp(1, WEB_PAGE_MAX_LIMIT);
+        let (records, has_more) = bounded_json_page(
+            records.into_iter().skip(params.offset),
+            limit,
+            "链路记录过大，已截断；可继续加载其余记录",
+        );
+        Ok(json!({
+            "session_id": params.session_id,
+            "records": records,
+            "offset": params.offset,
+            "limit": limit,
+            "total_records": total_records,
+            "has_more": has_more,
+        }))
+    }
+
+    fn permissions_get(&self) -> Result<Value, (i64, String)> {
+        let Some(safety) = self.safety.as_ref() else {
+            return Err((
+                INTERNAL_ERROR,
+                "当前 daemon 未暴露权限模式控制器".to_owned(),
+            ));
+        };
+        let mode = safety.mode();
+        Ok(json!({
+            "mode": mode.key(),
+            "label": mode.label(),
+            "description": mode.description(),
+            "options": SafetyMode::all().into_iter().map(|option| json!({
+                "mode": option.key(),
+                "label": option.label(),
+                "description": option.description(),
+            })).collect::<Vec<_>>(),
+        }))
+    }
+
+    fn models_list(&self) -> Result<Value, (i64, String)> {
+        let config = self
+            .config_store
+            .load()
+            .map_err(|error| (INTERNAL_ERROR, format!("读取模型配置失败：{error:#}")))?;
+        let active_id = config.active_profile.clone().or_else(|| {
+            self.provider_manager
+                .as_ref()
+                .map(|manager| manager.profile().id)
+        });
+        let mut profiles = config
+            .profiles
+            .iter()
+            .map(ProfileSummary::from_profile)
+            .collect::<Vec<_>>();
+        if profiles.is_empty()
+            && let Some(manager) = &self.provider_manager
+        {
+            profiles.push(ProfileSummary::from_profile(&manager.profile()));
+        }
+        Ok(json!({
+            "active_id": active_id,
+            "profiles": profiles,
+            "config_path": self.config_store.path(),
+            "providers": [
+                {"api_type": "openai-chat", "label": "OpenAI 兼容"},
+                {"api_type": "anthropic-messages", "label": "Anthropic Messages"},
+                {"api_type": "ollama", "label": "Ollama 本地模型"},
+            ],
+        }))
+    }
+
+    async fn models_use(&self, profile_id: &str) -> Result<Value, (i64, String)> {
+        let Some(manager) = &self.provider_manager else {
+            return Err((INTERNAL_ERROR, "当前 daemon 未启用模型配置管理".to_owned()));
+        };
+        let profile = self
+            .config_store
+            .activate(profile_id)
+            .map_err(|error| (INVALID_PARAMS, format!("切换模型失败：{error:#}")))?;
+        manager
+            .switch(profile.clone())
+            .map_err(|error| (INVALID_PARAMS, format!("加载模型失败：{error:#}")))?;
+        let config = self
+            .config_store
+            .load()
+            .map_err(|error| (INTERNAL_ERROR, format!("读取备用模型配置失败：{error:#}")))?;
+        manager
+            .set_fallbacks(
+                config
+                    .fallback_profile_ids
+                    .iter()
+                    .filter_map(|id| {
+                        config
+                            .profiles
+                            .iter()
+                            .find(|profile| &profile.id == id)
+                            .cloned()
+                    })
+                    .collect(),
+            )
+            .map_err(|error| (INVALID_PARAMS, format!("加载备用模型失败：{error:#}")))?;
+        Ok(json!({
+            "changed": true,
+            "active_id": profile.id,
+            "profile": ProfileSummary::from_profile(&profile),
+        }))
+    }
+
+    async fn models_save(&self, params: ModelSaveParams) -> Result<Value, (i64, String)> {
+        let Some(manager) = &self.provider_manager else {
+            return Err((INTERNAL_ERROR, "当前 daemon 未启用模型配置管理".to_owned()));
+        };
+        let config = self
+            .config_store
+            .upsert(params.profile, params.activate)
+            .map_err(|error| (INVALID_PARAMS, format!("保存模型配置失败：{error:#}")))?;
+        let active_id = config.active_profile.clone();
+        let Some(active_id) = active_id else {
+            return Err((INTERNAL_ERROR, "保存后没有活动模型配置".to_owned()));
+        };
+        let profile = config
+            .profiles
+            .iter()
+            .find(|profile| profile.id == active_id)
+            .cloned()
+            .ok_or_else(|| (INTERNAL_ERROR, "活动模型配置不存在".to_owned()))?;
+        manager
+            .switch(profile.clone())
+            .map_err(|error| (INVALID_PARAMS, format!("加载模型失败：{error:#}")))?;
+        manager
+            .set_fallbacks(
+                config
+                    .fallback_profile_ids
+                    .iter()
+                    .filter_map(|id| {
+                        config
+                            .profiles
+                            .iter()
+                            .find(|profile| &profile.id == id)
+                            .cloned()
+                    })
+                    .collect(),
+            )
+            .map_err(|error| (INVALID_PARAMS, format!("加载备用模型失败：{error:#}")))?;
+        Ok(json!({
+            "changed": true,
+            "active_id": profile.id,
+            "profile": ProfileSummary::from_profile(&profile),
+        }))
+    }
+
+    fn permissions_set(&self, value: &str) -> Result<Value, (i64, String)> {
+        let Some(safety) = self.safety.as_ref() else {
+            return Err((
+                INTERNAL_ERROR,
+                "当前 daemon 未暴露权限模式控制器".to_owned(),
+            ));
+        };
+        let Some(mode) = SafetyMode::parse(value) else {
+            return Err((
+                INVALID_PARAMS,
+                "权限模式无效，可选值：request、risk、full".to_owned(),
+            ));
+        };
+        safety.set_mode(mode);
+        Ok(json!({
+            "changed": true,
+            "mode": mode.key(),
+            "label": mode.label(),
+            "description": mode.description(),
+        }))
+    }
+
+    async fn session_infos(
+        &self,
+    ) -> Result<Vec<agent_runtime::session::SessionInfo>, (i64, String)> {
+        let metadata = self
+            .run_store
+            .session_metadata_list()
+            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+        self.session_infos_from(metadata).await
+    }
+    async fn session_infos_from(
+        &self,
+        metadata: Vec<agent_core::SessionMetadata>,
+    ) -> Result<Vec<agent_runtime::session::SessionInfo>, (i64, String)> {
+        let mut sessions = metadata
+            .into_iter()
+            .map(|meta| {
+                Ok(agent_runtime::session::SessionInfo {
+                    id: meta.key.0.clone(),
+                    path: self.session.path_for_session(&meta.key.0),
+                    active: false,
+                    message_count: meta.revision.0 as usize,
+                    modified_at: Some((meta.updated_at_ms / 1000).max(0) as u64),
+                    preview: self
+                        .run_store
+                        .session_preview(&meta.key, &meta.lifetime)
+                        .map_err(|e| (INTERNAL_ERROR, e.to_string()))?,
+                    status: SessionStatus::Idle,
+                    active_requests: 0,
+                    updated_at: Some((meta.updated_at_ms / 1000).max(0) as u64),
+                })
+            })
+            .collect::<Result<Vec<_>, (i64, String)>>()?;
+        let current_id = self
+            .session_supervisor
+            .legacy_session_id
+            .lock()
+            .await
+            .clone();
+        for session in &mut sessions {
+            session.active = session.id == current_id;
+        }
+        for session in &mut sessions {
+            let snapshot = self
+                .run_store
+                .session_readback(
+                    &SessionId(session.id.clone()),
+                    agent_core::HistoryReadMode::Omitted,
+                )
+                .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+            session.active_requests = snapshot.active_runs.len();
+            session.status = if !snapshot.pending_interactions.is_empty() {
+                SessionStatus::Waiting
+            } else if !snapshot.active_runs.is_empty() {
+                SessionStatus::Running
+            } else {
+                SessionStatus::Idle
+            };
+            session.updated_at = session.modified_at;
+        }
+        sessions.sort_by(|left, right| {
+            right
+                .active
+                .cmp(&left.active)
+                .then_with(|| right.modified_at.cmp(&left.modified_at))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(sessions)
+    }
+
+    async fn session_resume(&self, session_id: &str) -> Result<Value, (i64, String)> {
+        let mut snapshot = self.session_snapshot(session_id).await?;
+        snapshot["resumed"] = json!(true);
+        Ok(snapshot)
+    }
+
+    async fn discard_plan_command(
+        &self,
+        params: PlanDiscardParams,
+    ) -> Result<Value, (i64, String)> {
+        let _barrier = self.session_supervisor.control_lock.lock().await;
+        let receipt = self
+            .run_store
+            .discard_plan(
+                &SessionId(params.session_id),
+                &params.expected_lifetime,
+                &params.identity,
+            )
+            .map_err(|e| (REQUEST_CONFLICT, e.to_string()))?;
+        if let Some(run) = &receipt.run_id {
+            for active in self
+                .run_coordinator
+                .active
+                .lock()
+                .await
+                .values()
+                .filter(|active| active.run_id == *run)
+            {
+                active.cancellation.cancel();
+            }
+            self.run_coordinator.queue_notify.notify_waiters();
+        }
+        serde_json::to_value(receipt).map_err(|e| (INTERNAL_ERROR, e.to_string()))
+    }
+
+    async fn execute_slash(
+        self: &Arc<Self>,
+        line: &str,
+        session_id: Option<&str>,
+        channel: agent_core::HookChannel,
+    ) -> Result<Value, (i64, String)> {
+        let registry = SlashRegistry::builtin();
+        let response = match registry.parse(line) {
+            SlashParse::NotCommand => SlashResponse::Text {
+                content: "输入不是 slash 命令".to_owned(),
+            },
+            SlashParse::Error(content) => SlashResponse::Text { content },
+            SlashParse::Command(invocation) => match invocation.action {
+                SlashAction::Compact => {
+                    let [key, lifetime, revision, generation, operation] =
+                        invocation.args.as_slice()
+                    else {
+                        return Err((
+                            INVALID_PARAMS,
+                            "/compact <session> <lifetime> <revision> <generation> <operation_id>"
+                                .into(),
+                        ));
+                    };
+                    let request = agent_core::CompactRunRequest {
+                        session_key: SessionId(key.clone()),
+                        session_lifetime_id: agent_core::SessionLifetimeId(lifetime.clone()),
+                        operation_id: operation.clone(),
+                        expected_revision: agent_core::TranscriptSeq(
+                            revision
+                                .parse()
+                                .map_err(|_| (INVALID_PARAMS, "revision 无效".into()))?,
+                        ),
+                        expected_projection_generation: agent_core::ProjectionGeneration(
+                            generation
+                                .parse()
+                                .map_err(|_| (INVALID_PARAMS, "generation 无效".into()))?,
+                        ),
+                        compatibility_owner_run_id: None,
+                    };
+                    SlashResponse::CompactStarted {
+                        run: self.start_compact_command(request, channel, false).await?,
+                    }
+                }
+                SlashAction::Plan => {
+                    let content = match invocation.args.as_slice() {
+                        [action] if action == "read" => {
+                            let key = session_id.ok_or_else(||(INVALID_PARAMS,"缺少 session".into()))?;
+                            serde_json::to_string(&self.run_store.plan_readback(&SessionId(key.into())).map_err(|e|(REQUEST_CONFLICT,e.to_string()))?).map_err(|e|(INTERNAL_ERROR,e.to_string()))?
+                        },
+                        [action,key] if action == "read" => serde_json::to_string(&self.run_store.plan_readback(&SessionId(key.clone())).map_err(|e|(REQUEST_CONFLICT,e.to_string()))?).map_err(|e|(INTERNAL_ERROR,e.to_string()))?,
+                        [action,key,lifetime,plan_id,revision,digest,operation] if action == "discard" => {
+                            let identity=agent_core::PlanExecution { plan_id:plan_id.clone(), revision:revision.parse().map_err(|_|(INVALID_PARAMS,"revision 无效".into()))?, content_digest:digest.clone(), operation_id:operation.clone() };
+                            serde_json::to_string(&self.discard_plan_command(PlanDiscardParams { session_id:key.clone(),expected_lifetime:agent_core::SessionLifetimeId(lifetime.clone()),identity }).await?).map_err(|e|(INTERNAL_ERROR,e.to_string()))?
+                        },
+                        _ => return Err((INVALID_PARAMS,"用法：/plan read [session]；/plan discard <session> <lifetime> <plan_id> <revision> <digest> <operation_id>；执行请发送完整 /plan execute 命令".into())),
+                    };
+                    SlashResponse::Text { content }
+                }
+                SlashAction::Help => SlashResponse::Text {
+                    content: registry.help(),
+                },
+                SlashAction::Memory | SlashAction::Context | SlashAction::Resources => {
+                    if invocation.args.len() != 1 {
+                        return Err((INVALID_PARAMS, "需要一个 session ID".into()));
+                    }
+                    let key = &invocation.args[0];
+                    let fact = match invocation.action {
+                        SlashAction::Memory => {
+                            self.memory_command(
+                                "memory.list",
+                                &json!({"session_id":key,"limit":100}),
+                            )
+                            .await?
+                        }
+                        SlashAction::Context => {
+                            let snapshot = self
+                                .run_store
+                                .session_snapshot(&SessionId(key.clone()))
+                                .map_err(|e| (INVALID_PARAMS, e.to_string()))?;
+                            let projection = self
+                                .run_store
+                                .context_projection(&snapshot)
+                                .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+                            let full = self.context_readback(ContextReadParams {
+                                session_id: key.clone(),
+                                expected_lifetime: snapshot.lifetime.clone(),
+                                run_id: invocation.args.get(1).map(|id| RunId(id.clone())),
+                                capture_id: None,
+                                local_diagnostics: invocation
+                                    .args
+                                    .get(2)
+                                    .is_some_and(|option| option == "--local"),
+                            });
+                            match full {
+                                Ok(full) => full,
+                                Err(error) if invocation.args.len() <= 1 => {
+                                    json!({"session_id":key,"lifetime":snapshot.lifetime,"transcript_revision":snapshot.revision,"projection_generation":projection.generation,"projected_messages":projection.messages.len(),"full_provider":{"availability":"unavailable","reason":error.1}})
+                                }
+                                Err(error) => return Err(error),
+                            }
+                        }
+                        _ => {
+                            let snapshot = self
+                                .run_store
+                                .session_snapshot(&SessionId(key.clone()))
+                                .map_err(|e| (INVALID_PARAMS, e.to_string()))?;
+                            json!({"session_id":key,"resources":self.run_store.list_resources(&snapshot.lifetime, agent_core::ResourceId(0), 100).map_err(|e|(INTERNAL_ERROR,e.to_string()))?})
+                        }
+                    };
+                    SlashResponse::Text {
+                        content: serde_json::to_string(&fact)
+                            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?,
+                    }
+                }
+                SlashAction::Snapshot => {
+                    if invocation.args.len() != 1 {
+                        return Err((INVALID_PARAMS, "需要一个 session ID".into()));
+                    }
+                    SlashResponse::Text {
+                        content: self
+                            .session_readback_value(
+                                &invocation.args[0],
+                                agent_core::HistoryReadMode::Omitted,
+                            )?
+                            .to_string(),
+                    }
+                }
+                SlashAction::Doctor => SlashResponse::Text {
+                    content: self
+                        .maintenance_store
+                        .health_report()
+                        .map_err(|e| (INTERNAL_ERROR, e.to_string()))?
+                        .to_string(),
+                },
+                SlashAction::Status => {
+                    let snapshot = self
+                        .session_load_mode(session_id, agent_core::HistoryReadMode::Omitted)
+                        .await?;
+                    let model = self
+                        .provider_manager
+                        .as_ref()
+                        .map(|manager| manager.profile().model)
+                        .unwrap_or_else(|| "未配置".to_owned());
+                    SlashResponse::Text {
+                        content: format!(
+                            "会话 {} · 模型 {} · 历史 {} 条 · 活动请求 {} 个 · 待审批 {} 个",
+                            snapshot["session_id"].as_str().unwrap_or("unknown"),
+                            model,
+                            snapshot["transcript_revision"].as_u64().unwrap_or(0),
+                            snapshot["active_requests"].as_array().map_or(0, Vec::len),
+                            snapshot["pending_approvals"].as_array().map_or(0, Vec::len),
+                        ),
+                    }
+                }
+                SlashAction::Run => {
+                    let id = RunId(invocation.args.join(" "));
+                    let run = self
+                        .run_store
+                        .read_run(&id)
+                        .map_err(|error| (INTERNAL_ERROR, error.to_string()))?
+                        .ok_or_else(|| (INVALID_PARAMS, format!("找不到 run: {}", id.0)))?;
+                    if run.kind == agent_core::RunKind::Compact {
+                        let compact = self
+                            .compact_response(&run)
+                            .map_err(|error| (INTERNAL_ERROR, error.to_string()))?;
+                        return serde_json::to_value(SlashResponse::Text {
+                            content: compact.to_string(),
+                        })
+                        .map_err(|e| (INTERNAL_ERROR, e.to_string()));
+                    }
+                    SlashResponse::Text {
+                        content: format!(
+                            "run_id={} · session_id={} · status={} · seq={} · terminal={}",
+                            run.run_id.0,
+                            run.session_id.0,
+                            serde_json::to_value(run.status)
+                                .unwrap_or_default()
+                                .as_str()
+                                .unwrap_or("unknown"),
+                            run.last_seq.0,
+                            run.content
+                                .as_deref()
+                                .or(run.error_message.as_deref())
+                                .unwrap_or("")
+                        ),
+                    }
+                }
+                SlashAction::Subagents => {
+                    if invocation.args.len() != 1 {
+                        return Err((INVALID_PARAMS, "用法：/subagents <root_run_id>".into()));
+                    }
+                    let children = self
+                        .run_store
+                        .list_delegations(&RunId(invocation.args[0].clone()))
+                        .map_err(|error| (INTERNAL_ERROR, error.to_string()))?;
+                    let content = if children.is_empty() {
+                        "暂无子 Agent".to_owned()
+                    } else {
+                        children
+                            .iter()
+                            .map(|child| {
+                                format!(
+                                    "{} · {} · {}",
+                                    child.child_run_id.0,
+                                    child.child_session_id.0,
+                                    serde_json::to_value(child.status)
+                                        .unwrap_or_default()
+                                        .as_str()
+                                        .unwrap_or("unknown")
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    };
+                    SlashResponse::Text { content }
+                }
+                SlashAction::Subagent | SlashAction::SubagentWait | SlashAction::SubagentCancel => {
+                    if invocation.args.len() < 2
+                        || invocation.args.len() > 3
+                        || invocation.args.len() == 3
+                            && invocation.action != SlashAction::SubagentWait
+                    {
+                        return Err((INVALID_PARAMS, "用法：/subagent[-wait|-cancel] <parent_run_id> <child_run_id> [timeout_ms]".into()));
+                    }
+                    let scope = SubagentScopeParams {
+                        parent_run_id: RunId(invocation.args[0].clone()),
+                        child_run_id: RunId(invocation.args[1].clone()),
+                    };
+                    let child = self.scoped_delegation(&scope)?;
+                    match invocation.action {
+                        SlashAction::Subagent => SlashResponse::Text {
+                            content: format!(
+                                "child_run_id={} · session_id={} · status={} · result_state={} · terminal={}",
+                                child.child_run_id.0,
+                                child.child_session_id.0,
+                                serde_json::to_value(child.status)
+                                    .unwrap_or_default()
+                                    .as_str()
+                                    .unwrap_or("unknown"),
+                                child.result_state,
+                                child
+                                    .content
+                                    .as_deref()
+                                    .or(child.error_message.as_deref())
+                                    .unwrap_or("")
+                            ),
+                        },
+                        SlashAction::SubagentWait => {
+                            let timeout_ms = invocation
+                                .args
+                                .get(2)
+                                .map(|value| value.parse::<u64>())
+                                .transpose()
+                                .map_err(|_| (INVALID_PARAMS, "timeout_ms 需要非负整数".into()))?;
+                            let result = self
+                                .wait_subagents(WaitSubagentsParams {
+                                    parent_run_id: scope.parent_run_id,
+                                    child_run_ids: vec![scope.child_run_id],
+                                    timeout_ms,
+                                    after_seq: None,
+                                })
+                                .await?;
+                            SlashResponse::Text {
+                                content: result.to_string(),
+                            }
+                        }
+                        SlashAction::SubagentCancel => {
+                            let result = self
+                                .cancel(CancelParams {
+                                    exact_owner: None,
+                                    request_id: None,
+                                    run_id: Some(child.child_run_id),
+                                    session_id: Some(child.child_session_id.0),
+                                })
+                                .await?;
+                            SlashResponse::Text {
+                                content: result.to_string(),
+                            }
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                SlashAction::Tools => {
+                    if invocation.args.len() != 1 {
+                        return Err((INVALID_PARAMS, "/tools <run_id>".into()));
+                    }
+                    let receipts = self
+                        .run_store
+                        .discoveries(&agent_core::RunId(invocation.args[0].clone()))
+                        .map_err(|error| (INTERNAL_ERROR, error.to_string()))?;
+                    SlashResponse::Text {
+                        content: json!({"receipts":receipts}).to_string(),
+                    }
+                }
+                SlashAction::Hooks => {
+                    if !(2..=4).contains(&invocation.args.len()) {
+                        return Err((
+                            INVALID_PARAMS,
+                            "/hooks <session> <lifetime> [cursor] [limit]".into(),
+                        ));
+                    }
+                    let cursor = invocation
+                        .args
+                        .get(2)
+                        .map(|raw| raw.parse::<u64>())
+                        .transpose()
+                        .map_err(|_| (INVALID_PARAMS, "hook cursor 非法".into()))?
+                        .unwrap_or(0);
+                    let limit = invocation
+                        .args
+                        .get(3)
+                        .map(|raw| raw.parse::<usize>())
+                        .transpose()
+                        .map_err(|_| (INVALID_PARAMS, "hook limit 非法".into()))?
+                        .unwrap_or(32);
+                    let readback = self
+                        .run_store
+                        .hook_readback(
+                            &SessionId(invocation.args[0].clone()),
+                            &agent_core::SessionLifetimeId(invocation.args[1].clone()),
+                            cursor,
+                            limit,
+                        )
+                        .map_err(|e| (REQUEST_CONFLICT, e.to_string()))?;
+                    SlashResponse::Text {
+                        content: json!(readback).to_string(),
+                    }
+                }
+                SlashAction::Sessions => SlashResponse::Sessions {
+                    sessions: self.session_infos().await?,
+                    select: false,
+                },
+                SlashAction::Resume if invocation.args.is_empty() => SlashResponse::Sessions {
+                    sessions: self
+                        .session_infos()
+                        .await?
+                        .into_iter()
+                        .filter(|session| session.message_count > 0)
+                        .collect(),
+                    select: true,
+                },
+                SlashAction::Resume => {
+                    let sessions = self
+                        .session_infos()
+                        .await?
+                        .into_iter()
+                        .filter(|session| session.message_count > 0)
+                        .collect::<Vec<_>>();
+                    let selection = &invocation.args[0];
+                    let session_id = match selection.parse::<usize>() {
+                        Ok(index) if index > 0 => sessions
+                            .get(index - 1)
+                            .map(|session| session.id.clone())
+                            .ok_or_else(|| {
+                                (INVALID_PARAMS, format!("会话编号超出范围：{index}"))
+                            })?,
+                        Ok(_) => return Err((INVALID_PARAMS, "会话编号从 1 开始".to_owned())),
+                        Err(_) => selection.clone(),
+                    };
+                    let snapshot = self.session_resume(&session_id).await?;
+                    let count = snapshot["messages"].as_array().map_or(0, Vec::len);
+                    SlashResponse::SessionChanged {
+                        message: format!("已恢复会话 {session_id}，共 {count} 条消息。"),
+                        snapshot,
+                    }
+                }
+                SlashAction::New => {
+                    let snapshot = self.session_new().await?;
+                    let session_id = snapshot["session_id"].as_str().unwrap_or("unknown");
+                    SlashResponse::SessionChanged {
+                        message: format!("已新建会话：{session_id}"),
+                        snapshot,
+                    }
+                }
+                SlashAction::Cancel => SlashResponse::Text {
+                    content: "当前没有前台请求；运行中按 Ctrl-C 可取消本轮。".to_owned(),
+                },
+                SlashAction::Skill => self.execute_skill_command(&invocation.args).await,
+                SlashAction::Cron => self.execute_cron_command(&invocation.args).await,
+                SlashAction::Mcp => self.execute_mcp_command(&invocation.args).await,
+                SlashAction::Permissions => self.execute_permissions_command(&invocation.args),
+                SlashAction::Models => self.execute_models_command(&invocation.args).await,
+                SlashAction::Ping => SlashResponse::Text {
+                    content: "pong".to_owned(),
+                },
+                SlashAction::Dogfood => self.execute_dogfood(session_id).await?,
+                SlashAction::Web => SlashResponse::Text {
+                    content: "请在 TUI 中使用 /web，或运行 `my-agent serve`。".to_owned(),
+                },
+                SlashAction::Exit => SlashResponse::Exit,
+            },
+        };
+        serde_json::to_value(response)
+            .map_err(|error| (INTERNAL_ERROR, format!("序列化 slash 响应失败：{error}")))
+    }
+
+    async fn execute_dogfood(
+        &self,
+        session_id: Option<&str>,
+    ) -> Result<SlashResponse, (i64, String)> {
+        let runtime = self.session_runtime(session_id).await?;
+        let session_path = runtime.store.path_for_session(&runtime.id);
+        let dogfood_path = export_dogfood_file(&runtime.id, &session_path, &self.daemon_log_path)
+            .await
+            .map_err(|error| (INTERNAL_ERROR, format!("生成 dogfood 日志失败：{error:#}")))?;
+        info!(
+            session_id = %runtime.id,
+            dogfood_path = %dogfood_path.display(),
+            "已导出 dogfood 日志"
+        );
+        Ok(SlashResponse::Text {
+            content: format!("dogfood 已生成：{}", dogfood_path.display()),
+        })
+    }
+
+    fn execute_permissions_command(&self, args: &[String]) -> SlashResponse {
+        let Some(safety) = self.safety.as_ref() else {
+            return SlashResponse::Text {
+                content: "当前 daemon 未暴露权限模式控制器。".to_owned(),
+            };
+        };
+        if args.is_empty() {
+            let mode = safety.mode();
+            return SlashResponse::Text {
+                content: format!(
+                    "当前权限模式：{}（{}）。切换用法：/permissions request|risk|full",
+                    mode.label(),
+                    mode.description()
+                ),
+            };
+        }
+        let Some(mode) = SafetyMode::parse(&args[0]) else {
+            return SlashResponse::Text {
+                content: "权限模式无效，可选值：request（请求批准）、risk（帮我批准）、full（完全访问权限）。"
+                    .to_owned(),
+            };
+        };
+        safety.set_mode(mode);
+        SlashResponse::Text {
+            content: format!("已切换权限模式：{}（{}）", mode.label(), mode.description()),
+        }
+    }
+
+    async fn execute_models_command(&self, args: &[String]) -> SlashResponse {
+        let listed = match self.models_list() {
+            Ok(value) => value,
+            Err((_, message)) => return SlashResponse::Text { content: message },
+        };
+        let active_id = listed
+            .get("active_id")
+            .and_then(Value::as_str)
+            .unwrap_or("未设置");
+        let profiles = listed
+            .get("profiles")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if args.is_empty() {
+            if profiles.is_empty() {
+                return SlashResponse::Text {
+                    content: format!(
+                        "暂无模型配置。请在 Web 设置中添加模型，或设置环境变量后重启 daemon。配置文件：{}",
+                        self.config_store.path().display()
+                    ),
+                };
+            }
+            let lines = profiles
+                .iter()
+                .enumerate()
+                .map(|(index, profile)| {
+                    let id = profile["id"].as_str().unwrap_or("unknown");
+                    let name = profile["name"].as_str().unwrap_or(id);
+                    let provider = profile["api_type"].as_str().unwrap_or("unknown");
+                    let model = profile["model"].as_str().unwrap_or("unknown");
+                    let marker = if id == active_id { "*" } else { " " };
+                    format!(
+                        "{marker} {}. {name} · {provider} · {model} · id={id}",
+                        index + 1
+                    )
+                })
+                .collect::<Vec<_>>();
+            return SlashResponse::Text {
+                content: format!(
+                    "当前模型：{active_id}\n{}\n切换用法：/models <编号或 ID>",
+                    lines.join("\n")
+                ),
+            };
+        }
+        let selection = &args[0];
+        let profile_id = match selection.parse::<usize>() {
+            Ok(index) if index > 0 => profiles
+                .get(index - 1)
+                .and_then(|profile| profile["id"].as_str())
+                .map(str::to_owned),
+            _ => Some(selection.clone()),
+        };
+        let Some(profile_id) = profile_id else {
+            return SlashResponse::Text {
+                content: format!("模型编号超出范围：{selection}"),
+            };
+        };
+        match self.models_use(&profile_id).await {
+            Ok(value) => {
+                let profile = value.get("profile").cloned().unwrap_or(Value::Null);
+                SlashResponse::Text {
+                    content: format!(
+                        "已切换模型：{} · {}",
+                        profile["name"].as_str().unwrap_or(&profile_id),
+                        profile["model"].as_str().unwrap_or("unknown")
+                    ),
+                }
+            }
+            Err((_, message)) => SlashResponse::Text { content: message },
+        }
+    }
+
+    async fn execute_skill_command(&self, args: &[String]) -> SlashResponse {
+        let Some(skills) = self.skills.as_ref() else {
+            return SlashResponse::Text {
+                content: "当前 daemon 未启用 skill 管理器。".to_owned(),
+            };
+        };
+        let result = match args.first().map(String::as_str) {
+            Some("list") if args.len() == 1 => skills.list().await.map(|items| {
+                if items.is_empty() {
+                    "暂无已安装 skill。".to_owned()
+                } else {
+                    items
+                        .iter()
+                        .map(|item| format!("{}@{}：{}", item.name, item.version, item.description))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                }
+            }),
+            Some("install") if args.len() >= 2 => {
+                let force = args.last().is_some_and(|arg| arg == "--force");
+                let end = args.len() - usize::from(force);
+                let path = args[1..end].join(" ");
+                if path.is_empty() {
+                    Err(anyhow::anyhow!("用法：/skill install <路径> [--force]"))
+                } else {
+                    skills
+                        .install(std::path::Path::new(&path), force)
+                        .await
+                        .map(|outcomes| {
+                            outcomes
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        })
+                }
+            }
+            Some("update") if args.len() >= 3 => {
+                let path = args[2..].join(" ");
+                skills
+                    .update(&args[1], std::path::Path::new(&path))
+                    .await
+                    .map(|outcome| outcome.to_string())
+            }
+            Some("remove") if args.len() >= 2 => {
+                let confirmed = args.get(2).is_some_and(|arg| arg == "--confirm");
+                if args.len() > 3 {
+                    Err(anyhow::anyhow!("用法：/skill remove <name> --confirm"))
+                } else {
+                    skills.remove(&args[1], confirmed).await
+                }
+            }
+            _ => Err(anyhow::anyhow!(
+                "用法：/skill list | install <路径> [--force] | update <name> <路径> | remove <name> --confirm"
+            )),
+        };
+        SlashResponse::Text {
+            content: match result {
+                Ok(content) => content,
+                Err(error) => format!("Skill 命令失败：{error:#}"),
+            },
+        }
+    }
+
+    async fn execute_cron_command(&self, args: &[String]) -> SlashResponse {
+        let Some(cron) = self.cron.as_ref() else {
+            return SlashResponse::Text {
+                content: "当前 daemon 未启用 cron 管理器。".to_owned(),
+            };
+        };
+        let result = match args.first().map(String::as_str) {
+            Some("list") if args.len() == 1 => {
+                let jobs = cron.store().list().await;
+                Ok(if jobs.is_empty() {
+                    "暂无 cron 任务。".to_owned()
+                } else {
+                    jobs.iter()
+                        .map(|job| {
+                            let last = job.history.last().map_or_else(
+                                || "尚未运行".to_owned(),
+                                |run| {
+                                    format!(
+                                        "上次={}，尝试={}，结果={}",
+                                        run.finished_at,
+                                        run.attempts,
+                                        if run.success { "成功" } else { "失败" }
+                                    )
+                                },
+                            );
+                            format!(
+                                "{} [{}] {} · {} · next={} · {}",
+                                job.name,
+                                job.id,
+                                if job.enabled { "启用" } else { "停用" },
+                                job.schedule.display(),
+                                job.next_run_at,
+                                last
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+            }
+            Some("add") if args.len() >= 4 => match parse_cron_add(args) {
+                Ok((name, schedule, prompt, retries, backoff)) => cron
+                    .store()
+                    .add(name, schedule, prompt, retries, backoff)
+                    .await
+                    .map(|job| {
+                        format!(
+                            "已添加 {} [{}]，下次运行 {}",
+                            job.name, job.id, job.next_run_at
+                        )
+                    }),
+                Err(error) => Err(error),
+            },
+            Some("enable") if args.len() == 2 => cron
+                .store()
+                .set_enabled(&args[1], true)
+                .await
+                .map(|job| format!("已启用 {}", job.name)),
+            Some("disable") if args.len() == 2 => cron
+                .store()
+                .set_enabled(&args[1], false)
+                .await
+                .map(|job| format!("已停用 {}", job.name)),
+            Some("run-now") if args.len() == 2 => cron.run_now(&args[1]).await.map(|run| {
+                format!(
+                    "立即运行{}（尝试 {} 次）：{}",
+                    if run.success { "成功" } else { "失败" },
+                    run.attempts,
+                    run.result
+                )
+            }),
+            Some("remove") if args.len() == 3 && args[2] == "--confirm" => cron
+                .store()
+                .remove(&args[1])
+                .await
+                .map(|job| format!("已删除 {}", job.name)),
+            Some("remove") if args.len() == 2 => Err(anyhow::anyhow!(
+                "删除需要显式确认：/cron remove {} --confirm",
+                args[1]
+            )),
+            _ => Err(anyhow::anyhow!(
+                "用法：/cron list | add <name> interval=<秒>|cron=<分,时,日,月,周> [--retries=N] [--backoff=N] <prompt> | enable|disable|run-now <ID或名称> | remove <ID或名称> --confirm"
+            )),
+        };
+        SlashResponse::Text {
+            content: match result {
+                Ok(content) => content,
+                Err(error) => format!("Cron 命令失败：{error:#}"),
+            },
+        }
+    }
+
+    async fn execute_mcp_command(&self, args: &[String]) -> SlashResponse {
+        let Some(mcp) = self.mcp.as_ref() else {
+            return SlashResponse::Text {
+                content: "当前 daemon 未启用 MCP 管理器。".to_owned(),
+            };
+        };
+        let content = match args {
+            [command] if command == "reload" => {
+                mcp.reload().await;
+                format_mcp_status(&mcp.status(), true)
+            }
+            [command] if command == "status" => format_mcp_status(&mcp.status(), true),
+            [command] if command == "list" => format_mcp_status(&mcp.status(), false),
+            _ => "MCP 命令失败：用法：/mcp list | status | reload".to_owned(),
+        };
+        SlashResponse::Text { content }
+    }
+
+    async fn handle_subscribe(
+        self: Arc<Self>,
+        request: JsonRpcRequest,
+        frames: super::frames::FrameSender,
+    ) {
+        let params = match parse_params::<SubscribeParams>(&request.params) {
+            Ok(params) => params,
+            Err(error) => {
+                send_result(&frames, request.id, Err((INVALID_PARAMS, error)));
+                return;
+            }
+        };
+        let matches = self
+            .run_coordinator
+            .active
+            .lock()
+            .await
+            .iter()
+            .filter(|(key, _)| {
+                key.request_id == params.request_id
+                    && params
+                        .session_id
+                        .as_deref()
+                        .is_none_or(|id| key.session_id == id)
+            })
+            .map(|(key, active)| (key.clone(), active.run_id.clone(), active.subscribe().1))
+            .collect::<Vec<_>>();
+        if matches.len() > 1 {
+            send_result(
+                &frames,
+                request.id,
+                Err((
+                    REQUEST_CONFLICT,
+                    "request_id 跨 session 不唯一；请指定 session_id".into(),
+                )),
+            );
+            return;
+        }
+        let active_match = matches.into_iter().next();
+        let run = if let Some((_, run_id, _)) = &active_match {
+            self.run_store.read_run(run_id)
+        } else if let Some(session_id) = params.session_id.as_deref() {
+            self.run_store.find_request(session_id, &params.request_id)
+        } else {
+            Ok(None)
+        };
+        let run = match run {
+            Ok(Some(run)) => run,
+            Ok(None) => {
+                send_result(
+                    &frames,
+                    request.id,
+                    Ok(
+                        json!({"subscribed": false, "request_id": params.request_id, "reason": "请求未在执行"}),
+                    ),
+                );
+                return;
+            }
+            Err(error) => {
+                send_result(
+                    &frames,
+                    request.id,
+                    Err((INTERNAL_ERROR, error.to_string())),
+                );
+                return;
+            }
+        };
+        let mut cursor = params.after_seq.unwrap_or(EventSeq(0));
+        let pending_ids = self
+            .approvals
+            .pending()
+            .await
+            .into_iter()
+            .map(|item| item.id)
+            .collect::<HashSet<_>>();
+        let events = match self.run_store.events_after(&run.run_id, cursor, 1000) {
+            Ok(events) => events,
+            Err(error) => {
+                send_result(
+                    &frames,
+                    request.id,
+                    Err((INTERNAL_ERROR, error.to_string())),
+                );
+                return;
+            }
+        };
+        if events.len() == 1000 && events.last().is_some_and(|event| event.seq < run.last_seq) {
+            let next = events.last().map_or(cursor, |event| event.seq);
+            let _ = frames.send(ServerFrame::Response(JsonRpcResponse::failure_data(
+                request.id,
+                REQUEST_CONFLICT,
+                "resync_required",
+                json!({"kind": "resync_required", "snapshot": run,
+                    "last_seq": run.last_seq, "cursor": next, "next_method": "run.events"}),
+            )));
+            return;
+        }
+        for event in events {
+            cursor = event.seq;
+            if let Some(update) = stored_event_update(event)
+                && !is_resolved_approval(&update, &pending_ids)
+                && frames.send(update.to_frame(request.id.clone())).is_err()
+            {
+                return;
+            }
+        }
+        if run.kind == agent_core::RunKind::Compact && run.status.terminal() {
+            let response = self
+                .compact_response(&run)
+                .map_err(|error| (INTERNAL_ERROR, error.to_string()));
+            let _ = frames.send(
+                self.terminal_update(&run.run_id, response)
+                    .to_frame(request.id),
+            );
+            return;
+        }
+        if run.status == RunStatus::Completed {
+            let response =
+                Ok(json!({"content":run.content,"run_id":run.run_id,"turn_id":run.turn_id}));
+            let _ = frames.send(
+                self.terminal_update(&run.run_id, response)
+                    .to_frame(request.id),
+            );
+            return;
+        }
+        if matches!(
+            run.status,
+            RunStatus::Failed | RunStatus::Cancelled | RunStatus::UnknownAfterRestart
+        ) {
+            let response = Err((
+                run.error_code.unwrap_or(INTERNAL_ERROR),
+                run.error_message
+                    .clone()
+                    .unwrap_or_else(|| format!("run 状态: {:?}", run.status)),
+            ));
+            let _ = frames.send(
+                self.terminal_update(&run.run_id, response)
+                    .to_frame(request.id),
+            );
+            return;
+        }
+        let Some((_, _, mut receiver)) = active_match else {
+            send_result(
+                &frames,
+                request.id,
+                Ok(
+                    json!({"subscribed": false, "request_id": params.request_id, "run_id": run.run_id, "reason": "请求没有活动执行体"}),
+                ),
+            );
+            return;
+        };
+        loop {
+            match receiver.recv().await {
+                Ok(update) => {
+                    if let ActiveRequestUpdate::Event { seq: Some(seq), .. } = &update {
+                        if *seq <= cursor {
+                            continue;
+                        }
+                        cursor = *seq;
+                    }
+                    let terminal = matches!(update, ActiveRequestUpdate::Terminal { .. });
+                    if frames.send(update.to_frame(request.id.clone())).is_err() || terminal {
+                        return;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    send_result(
+                        &frames,
+                        request.id,
+                        Ok(
+                            json!({"subscribed": false, "request_id": params.request_id, "reason": "请求已结束"}),
+                        ),
+                    );
+                    return;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    let snapshot = self.run_store.read_run(&run.run_id).ok().flatten();
+                    let last_seq = snapshot.as_ref().map(|item| item.last_seq);
+                    let _ = frames.send(ServerFrame::Response(JsonRpcResponse::failure_data(
+                        request.id,
+                        REQUEST_CONFLICT,
+                        "resync_required",
+                        json!({"kind": "resync_required", "snapshot": snapshot,
+                            "last_seq": last_seq, "cursor": cursor, "next_method": "run.events"}),
+                    )));
+                    return;
+                }
+            }
+        }
+    }
+
+    pub(super) fn terminal_update(
+        &self,
+        run: &RunId,
+        response: Result<Value, (i64, String)>,
+    ) -> ActiveRequestUpdate {
+        match self.run_store.latest_view_event(run, "terminal", None) {
+            Ok(Some(event)) if event.data.get("_my_agent_view").is_none() => {
+                ActiveRequestUpdate::Terminal {
+                    response,
+                    view: None,
+                }
+            }
+            Ok(Some(event)) => match serde_json::from_value::<agent_core::ViewStamp>(
+                event.data["_my_agent_view"].clone(),
+            ) {
+                Ok(stamp) => ActiveRequestUpdate::Terminal {
+                    response,
+                    view: Some(Box::new(stamp)),
+                },
+                Err(error) => ActiveRequestUpdate::Terminal {
+                    response: Err((INTERNAL_ERROR, error.to_string())),
+                    view: None,
+                },
+            },
+            Ok(None) => ActiveRequestUpdate::Terminal {
+                response,
+                view: None,
+            },
+            Err(error) => ActiveRequestUpdate::Terminal {
+                response: Err((INTERNAL_ERROR, error.to_string())),
+                view: None,
+            },
+        }
+    }
+
+    async fn publish_update(
+        &self,
+        frames: &super::frames::FrameSender,
+        active_key: &ActiveKey,
+        mut update: ActiveRequestUpdate,
+    ) {
+        if matches!(
+            update,
+            ActiveRequestUpdate::Event {
+                kind: EventKind::TurnCompleted,
+                ..
+            }
+        ) {
+            return; // The final content and terminal become visible after one SQLite commit.
+        }
+        let run_id = self
+            .run_coordinator
+            .active
+            .lock()
+            .await
+            .get(active_key)
+            .map(|active| active.run_id.clone());
+        if let (
+            Some(run_id),
+            ActiveRequestUpdate::Event {
+                kind,
+                data,
+                run_id: field_id,
+                seq,
+            },
+        ) = (&run_id, &mut update)
+        {
+            let name = serde_json::to_value(&*kind)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_default();
+            if *kind == EventKind::ApprovalRequired
+                && let Some(id) = data["approval"]["id"].as_str()
+            {
+                data["interaction"] = json!({"interaction_id": id, "session_id": active_key.session_id,
+                    "owner_run_id": run_id, "kind": "approval", "status": "pending", "revision": 0,
+                    "payload": data["approval"]});
+            }
+            match self.run_store.append_event(run_id, &name, data) {
+                Ok(next_seq) => {
+                    *field_id = Some(run_id.clone());
+                    *seq = Some(next_seq);
+                    match self.run_store.event_view_stamp(run_id, next_seq) {
+                        Ok(Some(stamp)) => data["_my_agent_view"] = json!(stamp),
+                        Ok(None) => {}
+                        Err(error) => {
+                            if let Some(active) =
+                                self.run_coordinator.active.lock().await.get_mut(active_key)
+                            {
+                                active.storage_error = Some(error.to_string());
+                                active.cancellation.cancel();
+                            }
+                            return;
+                        }
+                    }
+                    if *kind == EventKind::ApprovalRequired
+                        && self
+                            .hooks
+                            .configured(agent_core::HookEvent::ApprovalRequested)
+                        && let Some(id) = data["approval"]["id"].as_str()
+                        && let Ok(owner) = self.run_store.run_owner(run_id)
+                    {
+                        let outcome = agent_runtime::hooks::with_scope(
+                            agent_runtime::hooks::HookScope {
+                                dispatcher: self.hooks.clone(),
+                                store: self.run_store.clone(),
+                                owner,
+                            },
+                            agent_runtime::hooks::current(
+                                agent_core::HookEvent::ApprovalRequested,
+                                id,
+                                json!({"interaction_id":id}),
+                                &self.shutdown,
+                            ),
+                        )
+                        .await;
+                        if let Err(error) = outcome {
+                            tracing::warn!(%error,"审批观察 hook 失败；interaction 保留");
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::error!(run_id = %run_id.0, %error, "持久化事件失败");
+                    if let Some(active) =
+                        self.run_coordinator.active.lock().await.get_mut(active_key)
+                    {
+                        active.storage_error = Some(error.to_string());
+                        active.cancellation.cancel();
+                    }
+                    return;
+                }
+            }
+        }
+        if let Some(active) = self.run_coordinator.active.lock().await.get_mut(active_key) {
+            active.publish(update.clone());
+        }
+        let _ = frames.send(update.to_frame(active_key.request_id.clone()));
+    }
+
+    async fn publish_committed_completion(
+        &self,
+        frames: &super::frames::FrameSender,
+        active_key: &ActiveKey,
+        content: &str,
+    ) {
+        let Some(active) = self
+            .run_coordinator
+            .active
+            .lock()
+            .await
+            .get(active_key)
+            .map(|active| active.run_id.clone())
+        else {
+            return;
+        };
+        let event = match self
+            .run_store
+            .latest_view_event(&active, "assistant_content", None)
+        {
+            Ok(Some(event)) => event,
+            _ => return,
+        };
+        let mut data = event.data;
+        data["content"] = json!(content);
+        let update = ActiveRequestUpdate::Event {
+            kind: EventKind::TurnCompleted,
+            data,
+            run_id: Some(active),
+            seq: Some(event.seq),
+        };
+        if let Some(active) = self.run_coordinator.active.lock().await.get_mut(active_key) {
+            active.publish(update.clone());
+        }
+        let _ = frames.send(update.to_frame(active_key.request_id.clone()));
+    }
+
+    async fn resolve_interaction(
+        &self,
+        params: ApprovalRespondParams,
+        rejected: bool,
+    ) -> Result<Value, (i64, String)> {
+        let approved = if rejected {
+            false
+        } else {
+            params
+                .approved
+                .ok_or((INVALID_PARAMS, "缺少 approved".into()))?
+        };
+        let _guard = self.session_supervisor.control_lock.lock().await;
+        let id = InteractionId(params.approval_id);
+        let current = self
+            .run_store
+            .read_interaction(&id)
+            .map_err(|error| (INTERNAL_ERROR, error.to_string()))?
+            .ok_or((INVALID_PARAMS, "interaction 不存在".into()))?;
+        if params
+            .session_id
+            .as_deref()
+            .is_some_and(|session| session != current.session_id.0)
+            || params
+                .owner_run_id
+                .as_ref()
+                .is_some_and(|run| run != &current.owner_run_id)
+        {
+            return Err((REQUEST_CONFLICT, "interaction owner 不匹配".into()));
+        }
+        if let Some(expected) = params.exact_owner.as_ref() {
+            let owner = self
+                .run_store
+                .run_owner(&current.owner_run_id)
+                .map_err(|error| (REQUEST_CONFLICT, error.to_string()))?;
+            if &owner != expected {
+                return Err((REQUEST_CONFLICT, "interaction exact owner 不匹配".into()));
+            }
+        }
+        let revision = params.revision.unwrap_or(current.revision);
+        let claim = || {
+            self.run_store.claim_interaction(
+                &id,
+                &current.session_id,
+                &current.owner_run_id,
+                revision,
+                approved,
+            )
+        };
+        let record = if current.status == "pending" {
+            match self.approvals.respond_claimed(&id.0, approved, claim).await {
+                Ok(record) => record,
+                Err(error) => {
+                    if let Ok(Some(after)) = self.run_store.read_interaction(&id)
+                        && matches!(after.status.as_str(), "answered" | "rejected")
+                    {
+                        let _ = self.run_store.finish(
+                            &after.owner_run_id,
+                            RunStatus::UnknownAfterRestart,
+                            None,
+                            Some((-32002, "审批执行体已消失")),
+                        );
+                    }
+                    return Err((REQUEST_CONFLICT, format!("{error:#}")));
+                }
+            }
+        } else {
+            claim().map_err(|error| (REQUEST_CONFLICT, error.to_string()))?
+        };
+        let mut value = json!({"accepted":true,"interaction":record});
+        if let Some(stamp) = self
+            .run_store
+            .interaction_view_stamp(&id)
+            .map_err(|error| (INTERNAL_ERROR, error.to_string()))?
+        {
+            value["_my_agent_view"] = json!(stamp);
+        }
+        Ok(value)
+    }
+
+    async fn audit_run(&self, run_id: &RunId) -> Result<Value, (i64, String)> {
+        let run = self
+            .run_store
+            .read_run(run_id)
+            .map_err(|error| (INTERNAL_ERROR, error.to_string()))?
+            .ok_or((INVALID_PARAMS, "run 不存在".into()))?;
+        let store = self
+            .session
+            .open_known_session(&run.session_id.0)
+            .map_err(|error| (INTERNAL_ERROR, format!("JSONL 读取失败: {error:#}")))?;
+        let owner = self
+            .run_store
+            .run_owner(run_id)
+            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+        let store = store
+            .with_trace_lifetime(&owner.session_lifetime_id)
+            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+        let (messages, jsonl_error) = match self.run_store.run_messages(run_id) {
+            Ok(messages) => (messages, None),
+            Err(e) => (Vec::new(), Some(e.to_string())),
+        };
+        let matching_assistant = run.content.as_ref().is_some_and(|content| {
+            messages.iter().any(|message| {
+                message.role == agent_runtime::provider::Role::Assistant
+                    && message.content.as_ref() == Some(content)
+            })
+        });
+        let trace_label = request_id_label(&run.request_id);
+        let (trace_started, trace_completed, trace_error) = match store.load_trace().await {
+            Ok(records) => {
+                let started = records.iter().filter(|record| matches!(record,
+                    SessionTraceRecord::TurnStarted { request_id, .. } if request_id == &trace_label)).count();
+                let completed = records.iter().filter(|record| matches!(record,
+                    SessionTraceRecord::TurnCompleted { request_id, .. } if request_id == &trace_label)).count();
+                (started, completed, None)
+            }
+            Err(error) => (0, 0, Some(format!("{error:#}"))),
+        };
+        let receipts = self
+            .run_store
+            .tool_receipts(run_id)
+            .map_err(|error| (INTERNAL_ERROR, error.to_string()))?;
+        let incomplete = receipts
+            .iter()
+            .filter(|receipt| receipt.status != "terminal")
+            .count();
+        let mut missing_artifacts = Vec::new();
+        let mut corrupt_artifacts = Vec::new();
+        for receipt in &receipts {
+            let Some(path) = receipt.artifact_ref.as_deref() else {
+                continue;
+            };
+            let expected = receipt
+                .receipt
+                .as_ref()
+                .and_then(|value| value["output_sha256"].as_str());
+            match artifact_sha256(path).await {
+                Ok(actual) if expected.is_some_and(|expected| expected != actual) => {
+                    corrupt_artifacts
+                        .push(json!({"round": receipt.round, "call_id": receipt.call_id}))
+                }
+                Ok(_) => {}
+                Err(_) => missing_artifacts
+                    .push(json!({"round": receipt.round, "call_id": receipt.call_id})),
+            }
+        }
+        let diagnostic = if !missing_artifacts.is_empty() || !corrupt_artifacts.is_empty() {
+            "artifact_missing_or_corrupt"
+        } else if run.status == RunStatus::Completed
+            && (!matching_assistant || jsonl_error.is_some())
+        {
+            "transcript_missing_or_diverged"
+        } else if run.status == RunStatus::UnknownAfterRestart {
+            "control_state_unknown"
+        } else {
+            "no_detected_divergence"
+        };
+        Ok(
+            json!({"run_id": run_id, "session_id": run.session_id, "control_status": run.status,
+            "last_seq": run.last_seq, "diagnostic": diagnostic,
+            "snapshot":self.run_store.run_snapshot(run_id).map_err(|e|(INTERNAL_ERROR,e.to_string()))?,
+            "jsonl_matching_assistant": matching_assistant,
+            "incomplete_tool_receipts": incomplete,
+            "jsonl_is_authoritative": false,
+            "jsonl": {"message_count": messages.len(), "matching_assistant_anywhere": matching_assistant,
+                "error": jsonl_error, "authoritative": false},
+            "trace": {"turn_started": trace_started, "turn_completed": trace_completed, "error": trace_error},
+            "tools": {"receipt_count": receipts.len(), "incomplete": incomplete,
+                "missing_artifacts": missing_artifacts, "corrupt_artifacts": corrupt_artifacts},
+            "manual_resolution": if run.status == RunStatus::UnknownAfterRestart { "run.reconcile 需要人工证据和 expected_last_seq" } else { "不适用" }}),
+        )
+    }
+
+    async fn cancel(&self, params: CancelParams) -> Result<Value, (i64, String)> {
+        let result = self.cancel_one(params).await?;
+        let Some(run_id) = result["run_id"].as_str() else {
+            return Ok(result);
+        };
+        let run_id = RunId(run_id.to_owned());
+        let root = self
+            .run_store
+            .delegation(&run_id)
+            .map_err(|error| (INTERNAL_ERROR, error.to_string()))?
+            .map(|record| record.root_run_id)
+            .unwrap_or_else(|| run_id.clone());
+        let descendants = self
+            .run_store
+            .list_delegations(&root)
+            .map_err(|error| (INTERNAL_ERROR, error.to_string()))?;
+        let mut owned = HashSet::from([run_id]);
+        let mut targets = Vec::new();
+        loop {
+            let before = owned.len();
+            for child in &descendants {
+                if owned.contains(&child.parent_run_id) && owned.insert(child.child_run_id.clone())
+                {
+                    targets.push((child.child_run_id.clone(), child.child_session_id.0.clone()));
+                }
+            }
+            if owned.len() == before {
+                break;
+            }
+        }
+        for run in &owned {
+            if let Ok(owner) = self.run_store.run_owner(run) {
+                if let Ok(resources) = self.run_store.list_resources(
+                    &owner.session_lifetime_id,
+                    agent_core::ResourceId(0),
+                    100,
+                ) {
+                    for resource in resources.into_iter().filter(|r| {
+                        &r.owner.run_id == run
+                            && matches!(r.state.as_str(), "starting" | "running" | "stopping")
+                    }) {
+                        let _ = self.stop_resource(&resource.owner, resource.id).await;
+                    }
+                }
+            }
+        }
+        for (child_run_id, child_session_id) in targets {
+            let _ = self
+                .cancel_one(CancelParams {
+                    exact_owner: None,
+                    request_id: None,
+                    run_id: Some(child_run_id),
+                    session_id: Some(child_session_id),
+                })
+                .await;
+        }
+        Ok(result)
+    }
+
+    async fn cancel_one(&self, params: CancelParams) -> Result<Value, (i64, String)> {
+        let _guard = self.session_supervisor.control_lock.lock().await;
+        let mut run = if let Some(run_id) = params.run_id {
+            let session_id = params
+                .session_id
+                .ok_or((INVALID_PARAMS, "exact cancel 需要 session_id".into()))?;
+            let run = self
+                .run_store
+                .read_run(&run_id)
+                .map_err(|error| (INTERNAL_ERROR, error.to_string()))?
+                .ok_or((INVALID_PARAMS, "run 不存在".into()))?;
+            if run.session_id.0 != session_id {
+                return Err((REQUEST_CONFLICT, "run 不属于指定 session".into()));
+            }
+            run
+        } else if let Some(request_id) = params.request_id {
+            let result = if let Some(session_id) = params.session_id {
+                self.run_store.find_request(&session_id, &request_id)
+            } else {
+                self.run_store.find_request_unique(&request_id)
+            };
+            match result.map_err(|error| (REQUEST_CONFLICT, error.to_string()))? {
+                Some(run) => run,
+                None => return Ok(json!({"cancelled": false, "reason": "请求不存在"})),
+            }
+        } else {
+            return Err((INVALID_PARAMS, "需要 run_id 或 request_id".into()));
+        };
+        if let Some(expected) = params.exact_owner.as_ref() {
+            let owner = self
+                .run_store
+                .run_owner(&run.run_id)
+                .map_err(|error| (REQUEST_CONFLICT, error.to_string()))?;
+            if &owner != expected {
+                return Err((REQUEST_CONFLICT, "cancel exact owner 不匹配".into()));
+            }
+        }
+        if run.status == RunStatus::Queued {
+            let removed = self
+                .run_store
+                .remove_queued(&run.run_id)
+                .map_err(|error| (INTERNAL_ERROR, error.to_string()))?;
+            if removed {
+                let key = ActiveKey {
+                    session_id: run.session_id.0.clone(),
+                    request_id: run.request_id.clone(),
+                };
+                if let Some(active) = self.run_coordinator.active.lock().await.get_mut(&key) {
+                    active.publish(self.terminal_update(
+                        &run.run_id,
+                        Err((REQUEST_CANCELLED, "请求已取消".into())),
+                    ));
+                    active.cancellation.cancel();
+                }
+                self.run_coordinator.queue_notify.notify_waiters();
+            }
+            if removed {
+                return Ok(json!({"cancelled": true, "run_id": run.run_id, "status": "queued"}));
+            }
+            run = self
+                .run_store
+                .read_run(&run.run_id)
+                .map_err(|error| (INTERNAL_ERROR, error.to_string()))?
+                .ok_or((INVALID_PARAMS, "run 不存在".into()))?;
+        }
+        if !matches!(
+            run.status,
+            RunStatus::Running | RunStatus::WaitingInteraction
+        ) {
+            return Ok(json!({"cancelled": false, "run_id": run.run_id, "status": run.status}));
+        }
+        let key = ActiveKey {
+            session_id: run.session_id.0.clone(),
+            request_id: run.request_id.clone(),
+        };
+        let token = self
+            .run_coordinator
+            .active
+            .lock()
+            .await
+            .get(&key)
+            .filter(|active| active.run_id == run.run_id)
+            .map(|active| active.cancellation.clone());
+        let Some(token) = token else {
+            return Ok(json!({"cancelled": false, "reason": "执行体已消失", "run_id": run.run_id}));
+        };
+        let owner = self
+            .run_store
+            .run_owner(&run.run_id)
+            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+        self.run_store
+            .request_cancellation(&owner)
+            .map_err(|e| (REQUEST_CONFLICT, e.to_string()))?;
+        token.cancel();
+        self.approvals
+            .cancel_request_in_session(&run.session_id.0, &run.request_id)
+            .await;
+        Ok(json!({"cancelled": true, "run_id": run.run_id, "status": "running"}))
+    }
+}
+
+fn bounded_json_page<T: Serialize>(
+    mut items: impl Iterator<Item = T>,
+    limit: usize,
+    oversized_message: &str,
+) -> (Vec<Value>, bool) {
+    let mut values = Vec::new();
+    let mut used_bytes = 1024;
+    let mut has_more = false;
+    for _ in 0..limit {
+        let Some(item) = items.next() else {
+            return (values, false);
+        };
+        let value = serde_json::to_value(item).unwrap_or_else(|_| {
+            json!({
+                "truncated": true,
+                "content": "该记录无法序列化，已隐藏"
+            })
+        });
+        let value = compact_json_for_web(value, WEB_PAGE_MAX_ITEM_BYTES, oversized_message);
+        let item_bytes = serde_json::to_vec(&value).map_or(0, |bytes| bytes.len());
+        if !values.is_empty() && used_bytes + item_bytes + 1 > WEB_PAGE_MAX_BYTES {
+            has_more = true;
+            break;
+        }
+        values.push(value);
+        used_bytes += item_bytes + 1;
+    }
+    if !has_more && items.next().is_some() {
+        has_more = true;
+    }
+    (values, has_more)
+}
+
+fn compact_json_for_web(value: Value, max_bytes: usize, message: &str) -> Value {
+    let original_bytes = serde_json::to_vec(&value).map_or(max_bytes + 1, |bytes| bytes.len());
+    if original_bytes <= max_bytes {
+        return value;
+    }
+    for max_chars in [65_536, 16_384, 4_096, 1_024, 256] {
+        let mut candidate = value.clone();
+        truncate_json_strings(&mut candidate, max_chars);
+        let candidate_bytes =
+            serde_json::to_vec(&candidate).map_or(max_bytes + 1, |bytes| bytes.len());
+        if candidate_bytes <= max_bytes {
+            return candidate;
+        }
+    }
+    json!({
+        "truncated": true,
+        "content": format!("{message}（原始大小约 {original_bytes} 字节）")
+    })
+}
+
+fn truncate_json_strings(value: &mut Value, max_chars: usize) {
+    match value {
+        Value::String(text) if text.chars().count() > max_chars => {
+            let marker = "… [已截断]";
+            let keep = max_chars.saturating_sub(marker.chars().count());
+            let prefix = text.chars().take(keep).collect::<String>();
+            *text = format!("{prefix}{marker}");
+        }
+        Value::Array(items) => {
+            for item in items {
+                truncate_json_strings(item, max_chars);
+            }
+        }
+        Value::Object(fields) => {
+            for field in fields.values_mut() {
+                truncate_json_strings(field, max_chars);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn parse_cron_add(args: &[String]) -> anyhow::Result<(String, ScheduleSpec, String, u32, u64)> {
+    let name = args[1].clone();
+    let schedule = if let Some(seconds) = args[2].strip_prefix("interval=") {
+        ScheduleSpec::Interval {
+            seconds: seconds.parse().context("interval 必须是正整数秒")?,
+        }
+    } else if let Some(expression) = args[2].strip_prefix("cron=") {
+        ScheduleSpec::Cron {
+            expression: expression.replace(',', " "),
+        }
+    } else {
+        anyhow::bail!("schedule 必须是 interval=<秒> 或 cron=<分,时,日,月,周>");
+    };
+    let mut retries = 0_u32;
+    let mut backoff = 5_u64;
+    let mut prompt = Vec::new();
+    for argument in &args[3..] {
+        if let Some(value) = argument.strip_prefix("--retries=") {
+            retries = value.parse().context("--retries 必须是非负整数")?;
+        } else if let Some(value) = argument.strip_prefix("--backoff=") {
+            backoff = value.parse().context("--backoff 必须是非负整数秒")?;
+        } else {
+            prompt.push(argument.as_str());
+        }
+    }
+    if prompt.is_empty() {
+        anyhow::bail!("cron prompt 不能为空");
+    }
+    Ok((name, schedule, prompt.join(" "), retries, backoff))
+}
+
+fn format_mcp_status(status: &agent_runtime::mcp::McpStatus, include_errors: bool) -> String {
+    let mut lines = Vec::new();
+    if let Some(error) = &status.file_error {
+        lines.push(format!("配置错误：{error}"));
+    }
+    for server in &status.servers {
+        let state = if server.connected {
+            "已连接"
+        } else {
+            "不可用"
+        };
+        let tools = if server.tools.is_empty() {
+            "无工具".to_owned()
+        } else {
+            server.tools.join("、")
+        };
+        let mut line = format!("{}：{} · {}", server.name, state, tools);
+        if include_errors && let Some(error) = &server.error {
+            line.push_str(&format!(" · {error}"));
+        }
+        lines.push(line);
+    }
+    if lines.is_empty() {
+        "未配置 MCP server（期望 .my-agent/mcp.json）。".to_owned()
+    } else {
+        lines.join("\n")
+    }
+}
+
+async fn export_dogfood_file(
+    session_id: &str,
+    session_path: &Path,
+    daemon_log_path: &Path,
+) -> anyhow::Result<PathBuf> {
+    let session_bytes = match tokio::fs::read(session_path).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("读取 session 文件失败: {}", session_path.display()));
+        }
+    };
+    let daemon_bytes = match tokio::fs::read(daemon_log_path).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("读取 daemon 日志失败: {}", daemon_log_path.display()));
+        }
+    };
+    let session_content = String::from_utf8_lossy(&session_bytes);
+    let daemon_content = String::from_utf8_lossy(&daemon_bytes);
+    let session_marker = format!("session_id={session_id}");
+    let quoted_session_marker = format!("session_id=\"{session_id}\"");
+    let chain_logs = daemon_content
+        .lines()
+        // tracing-subscriber may decorate field names and `=` separately, for example
+        // `\x1b[3msession_id\x1b[0m\x1b[2m=\x1b[0msession-...`. Match against a
+        // plain-text copy so dogfood exports work whether ANSI colors are enabled or not.
+        .map(strip_ansi_sequences)
+        .filter(|line| line.contains(&session_marker) || line.contains(&quoted_session_marker))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let message_count = session_content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+    let chain_log_count = chain_logs.lines().count();
+    let generated_at_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("系统时间早于 UNIX_EPOCH")?
+        .as_millis();
+    let session_directory = session_path.parent().unwrap_or_else(|| Path::new("."));
+    tokio::fs::create_dir_all(session_directory)
+        .await
+        .with_context(|| format!("创建 session 目录失败: {}", session_directory.display()))?;
+    let session_stem = session_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("session");
+    let dogfood_path = session_directory.join(format!("dogfood-{session_stem}.log"));
+    let mut output = format!(
+        "# my-agent dogfood export\n\
+schema_version=1\n\
+generated_at_unix_ms={generated_at_ms}\n\
+session_id={session_id}\n\
+session_file={}\n\
+daemon_log_file={}\n\
+conversation_messages={message_count}\n\
+chain_log_lines={chain_log_count}\n\n\
+===== LLM / REACT CONVERSATION (RAW SESSION JSONL) =====\n",
+        session_path.display(),
+        daemon_log_path.display(),
+    );
+    if session_content.is_empty() {
+        output.push_str("(当前 session 尚无持久化消息)\n");
+    } else {
+        output.push_str(&session_content);
+        if !session_content.ends_with('\n') {
+            output.push('\n');
+        }
+    }
+    output.push_str("\n===== DAEMON CHAIN LOG (CURRENT SESSION ONLY) =====\n");
+    if chain_logs.is_empty() {
+        output.push_str("(未找到带当前 session_id 的 daemon 链路日志)\n");
+    } else {
+        output.push_str(&chain_logs);
+        output.push('\n');
+    }
+    tokio::fs::write(&dogfood_path, output)
+        .await
+        .with_context(|| format!("写入 dogfood 文件失败: {}", dogfood_path.display()))?;
+    tokio::fs::canonicalize(&dogfood_path)
+        .await
+        .with_context(|| format!("解析 dogfood 文件路径失败: {}", dogfood_path.display()))
+}
+
+fn strip_ansi_sequences(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut output = String::with_capacity(input.len());
+    let mut cursor = 0;
+    let mut plain_start = 0;
+
+    while cursor < bytes.len() {
+        if bytes[cursor] == 0x1b && bytes.get(cursor + 1) == Some(&b'[') {
+            output.push_str(&input[plain_start..cursor]);
+            cursor += 2;
+            while cursor < bytes.len() {
+                let byte = bytes[cursor];
+                cursor += 1;
+                if (0x40..=0x7e).contains(&byte) {
+                    break;
+                }
+            }
+            plain_start = cursor;
+        } else {
+            cursor += 1;
+        }
+    }
+    output.push_str(&input[plain_start..]);
+    output
+}
+
+fn parse_params<T: for<'de> Deserialize<'de>>(params: &Value) -> Result<T, String> {
+    serde_json::from_value(params.clone()).map_err(|error| format!("参数无效: {error}"))
+}
+
+async fn artifact_sha256(path: &str) -> std::io::Result<String> {
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn request_id_label(request_id: &RequestId) -> String {
+    match request_id {
+        RequestId::Number(value) => value.to_string(),
+        RequestId::String(value) => value.clone(),
+    }
+}
+
+fn send_result(
+    frames: &super::frames::FrameSender,
+    id: RequestId,
+    result: Result<Value, (i64, String)>,
+) {
+    let response = match result {
+        Ok(value) => JsonRpcResponse::success(id, value),
+        Err((code, message)) => JsonRpcResponse::failure(id, code, message),
+    };
+    let _ = frames.send(ServerFrame::Response(response));
+}
+
+fn agent_event_update(event: AgentEvent) -> ActiveRequestUpdate {
+    let (kind, data) = match event {
+        AgentEvent::TurnStarted => (EventKind::TurnStarted, json!({})),
+        AgentEvent::ThinkingDelta(delta) => (EventKind::ThinkingDelta, json!({"delta": delta})),
+        AgentEvent::ThinkingFinished => (EventKind::ThinkingFinished, json!({})),
+        AgentEvent::TextDelta(delta) => (EventKind::TextDelta, json!({"delta": delta})),
+        AgentEvent::ToolStarted {
+            call_id,
+            name,
+            round,
+        } => (
+            EventKind::ToolStarted,
+            json!({"tool_call_id": call_id, "name": name, "round": round}),
+        ),
+        AgentEvent::ToolFinished {
+            call_id,
+            name,
+            output,
+            round,
+            duration_ms,
+            success,
+            error,
+        } => (
+            EventKind::ToolFinished,
+            json!({
+                "tool_call_id": call_id,
+                "name": name,
+                "output": output,
+                "round": round,
+                "duration_ms": duration_ms,
+                "success": success,
+                "error": error,
+            }),
+        ),
+        AgentEvent::TurnCompleted { content } => {
+            (EventKind::TurnCompleted, json!({"content": content}))
+        }
+    };
+    ActiveRequestUpdate::Event {
+        kind,
+        data,
+        run_id: None,
+        seq: None,
+    }
+}
+
+pub(super) fn stored_event_update(mut event: StoredEvent) -> Option<ActiveRequestUpdate> {
+    if event.event == "run_started" && event.data["kind"] != "compact" {
+        return None;
+    }
+    event.data["_my_agent_replay"] = json!(true);
+    let kind = if event.event == "assistant_content" {
+        EventKind::TurnCompleted
+    } else {
+        serde_json::from_value::<EventKind>(Value::String(event.event)).ok()?
+    };
+    Some(ActiveRequestUpdate::Event {
+        kind,
+        data: event.data,
+        run_id: Some(event.run_id),
+        seq: Some(event.seq),
+    })
+}
+
+fn is_resolved_approval(update: &ActiveRequestUpdate, pending_ids: &HashSet<String>) -> bool {
+    let ActiveRequestUpdate::Event {
+        kind: EventKind::ApprovalRequired,
+        data,
+        ..
+    } = update
+    else {
+        return false;
+    };
+    data["approval"]["id"]
+        .as_str()
+        .is_some_and(|id| !pending_ids.contains(id))
+}
+
+#[cfg(test)]
+mod dogfood_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::{WEB_PAGE_MAX_BYTES, bounded_json_page, export_dogfood_file};
+    use agent_daemon_protocol::{JsonRpcResponse, RequestId, encode_frame};
+    use agent_runtime::provider::{Message, Role};
+
+    static NEXT_TEST: AtomicUsize = AtomicUsize::new(0);
+
+    #[tokio::test]
+    async fn exports_full_conversation_and_only_current_session_chain_logs() {
+        let id = NEXT_TEST.fetch_add(1, Ordering::SeqCst);
+        let directory =
+            std::env::temp_dir().join(format!("my-agent-dogfood-{}-{id}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let session_id = "session-42.jsonl";
+        let session_path = directory.join(session_id);
+        let daemon_log_path = directory.join("daemon.log");
+        let conversation = concat!(
+            "{\"role\":\"user\",\"content\":\"检查项目\"}\n",
+            "{\"role\":\"assistant\",\"tool_calls\":[{\"name\":\"exec\",\"arguments\":{\"command\":\"pwd\"}}]}\n",
+            "{\"role\":\"tool\",\"content\":\"/workspace\",\"name\":\"exec\"}\n",
+            "{\"role\":\"assistant\",\"content\":\"完成\"}\n",
+        );
+        std::fs::write(&session_path, conversation).unwrap();
+        std::fs::write(
+            &daemon_log_path,
+            concat!(
+                "\x1b[32m INFO\x1b[0m agent_turn{\x1b[3msession_id\x1b[0m\x1b[2m=\x1b[0msession-42.jsonl request_id=Number(7)}: 开始 ReAct 轮次\n",
+                "INFO agent_turn{session_id=other.jsonl request_id=Number(8)}: 其他会话\n",
+                "INFO session_id=session-42.jsonl request_id=Number(7): chat 请求结束\n",
+            ),
+        )
+        .unwrap();
+
+        let exported = export_dogfood_file(session_id, &session_path, &daemon_log_path)
+            .await
+            .unwrap();
+        let content = std::fs::read_to_string(&exported).unwrap();
+
+        assert_eq!(
+            exported.file_name().and_then(|value| value.to_str()),
+            Some("dogfood-session-42.log")
+        );
+        assert!(content.contains("conversation_messages=4"));
+        assert!(content.contains("chain_log_lines=2"));
+        assert!(content.contains(conversation));
+        assert!(content.contains("request_id=Number(7)"));
+        assert!(!content.contains("其他会话"));
+        assert!(!content.contains('\x1b'));
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn bounds_large_web_pages_and_marks_oversized_content() {
+        let messages = (0..80)
+            .map(|_| Message::text(Role::Tool, "x".repeat(300 * 1024)))
+            .collect::<Vec<_>>();
+        let (items, has_more) = bounded_json_page(messages.into_iter(), 80, "消息过大，已截断");
+        let encoded = serde_json::to_vec(&items).unwrap();
+        assert!(encoded.len() <= WEB_PAGE_MAX_BYTES);
+        let frame = encode_frame(&JsonRpcResponse::success(
+            RequestId::Number(1),
+            serde_json::json!({"messages": items.clone()}),
+        ))
+        .unwrap();
+        assert!(frame.len() <= agent_daemon_protocol::MAX_FRAME_BYTES + 1);
+        assert!(has_more);
+        assert!(items.len() < 80);
+        assert_eq!(items[0]["role"], "tool");
+        assert!(items[0]["content"].as_str().unwrap().contains("已截断"));
+    }
+}
