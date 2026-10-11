@@ -1,0 +1,25 @@
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+error[E0425]: cannot find value `writer_db` in this scope
+   --> tests/run_execution_contract.rs:576:5
+    |
+576 |     writer_db
+    |     ^^^^^^^^^ help: a local variable with a similar name exists: `writer`
+
+error[E0425]: cannot find value `writer_db` in this scope
+   --> tests/run_execution_contract.rs:582:18
+    |
+582 |     let before = writer_db
+    |                  ^^^^^^^^^ help: a local variable with a similar name exists: `writer`
+
+error[E0425]: cannot find value `writer_db` in this scope
+   --> tests/run_execution_contract.rs:597:9
+    |
+597 |         writer_db
+    |         ^^^^^^^^^ help: a local variable with a similar name exists: `writer`
+
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `my-agent` (test "run_execution_contract") due to 3 previous errors
+warning: build failed, waiting for other jobs to finish...

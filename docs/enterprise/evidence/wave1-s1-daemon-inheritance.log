@@ -1,0 +1,58 @@
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.38s
+     Running tests/runtime_contract.rs (target/debug/deps/runtime_contract-3192f35a438df59d)
+
+running 32 tests
+test child_read_permission_stays_frozen_after_parent_mode_changes ... ok
+test acp_v2_stdio_negotiates_strict_connection_before_shared_readback ... ok
+test concurrent_children_finish_and_remain_addressable_by_stable_ids ... ok
+test acp_slow_stdio_detaches_without_settling_native_run ... ok
+test acp_v1_permission_rejects_v2_identity_before_approval_and_v2_can_recover ... ok
+test acp_v2_long_prompt_and_native_compact_allow_exact_control_without_private_terminal ... ok
+test committed_terminal_survives_real_daemon_restart_and_uncertain_run_is_not_replayed ... ok
+test daemon_queue_is_durable_and_exact_cancel_does_not_hit_running_run ... ok
+test acp_v2_pending_interaction_reconnect_does_not_cancel_or_replay_provider ... ok
+test compact_memory_receipts_survive_restart_and_all_three_entries ... FAILED
+test acp_v2_plan_controls_and_v1_reject_metadata_share_canonical_decisions ... ok
+test automatic_compact_hooks_follow_real_intents_and_settlements ... ok
+test governed_session_hooks_follow_publication_once_and_survive_restart ... ok
+test deferred_tools_reject_direct_unfound_fuzzy_and_invalid_nested_schema_without_execution ... ok
+test durable_subagent_spawn_wait_restart_and_scoped_cancel ... ok
+test memory_maintenance_drains_multiple_batches_before_idle_exit ... ok
+test memory_flywheel_learns_from_user_feedback_across_restart_and_purges_on_forget ... ok
+test model_spawn_tool_uses_durable_delegation_and_receipt ... ok
+test revision_reducer_rejects_delayed_readback_and_retired_lifetime_over_socket ... ok
+test governed_tool_approval_error_and_terminal_hooks_use_durable_owners_and_redacted_payloads ... ok
+test running_subagent_becomes_unknown_after_daemon_crash_without_replay ... ok
+test deferred_tool_search_roundtrip_freezes_catalog_and_refills_same_dispatcher ... ok
+test provider_context_readback_rebuilds_captured_request_without_replay_or_writes ... ok
+test enterprise_identity_is_canonical_and_survives_daemon_restart ... ok
+test restarted_pending_plan_can_be_discarded_by_exact_identity_and_release_its_queue ... ok
+test shared_client_resyncs_real_dropped_frame_and_duplicate_without_provider_replay ... ok
+test session_delete_recreate_and_fork_survive_restart_without_old_history_or_dual_write ... ok
+test stop_continuation_crash_preserves_unknown_child_without_replaying_hook_or_provider ... ok
+test stop_continuation_has_a_new_native_run_and_exact_cancel_preserves_parent_terminal ... ok
+test manual_compact_hooks_publish_no_gain_rejection_and_summary_failure_after_settlement ... ok
+test manual_compact_has_immediate_native_started_exact_cancel_and_unknown_restart ... ok
+test versioned_plan_readback_execute_discard_and_restart_share_daemon_facts ... ok
+
+failures:
+
+---- compact_memory_receipts_survive_restart_and_all_three_entries stdout ----
+
+thread 'compact_memory_receipts_survive_restart_and_all_three_entries' panicked at tests/runtime_contract.rs:2859:9:
+assertion `left == right` failed
+  left: Number(21)
+ right: 20
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    compact_memory_receipts_survive_restart_and_all_three_entries
+
+test result: FAILED. 31 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.95s
+
+error: test failed, to rerun pass `--test runtime_contract`

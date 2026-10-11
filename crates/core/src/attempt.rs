@@ -45,6 +45,7 @@ pub enum AttemptStatus {
     Succeeded,
     Failed,
     Cancelled,
+    OutcomeUnknown,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -65,4 +66,51 @@ pub struct ProviderAttempt {
     pub first_event_at_ms: Option<i64>,
     pub finished_at_ms: Option<i64>,
     pub usage: Option<ProviderUsage>,
+}
+
+impl ProviderAttempt {
+    /// 两种存储后端共用原调用身份；终态不得改写开始时已冻结的路由。
+    pub fn same_invocation(&self, other: &Self) -> bool {
+        self.attempt_id == other.attempt_id
+            && self.run_id == other.run_id
+            && self.round == other.round
+            && self.candidate_index == other.candidate_index
+            && self.provider_profile_id == other.provider_profile_id
+            && self.api_type == other.api_type
+            && self.model == other.model
+            && self.started_at_ms == other.started_at_ms
+    }
+    pub fn status_name(&self) -> &'static str {
+        match self.status {
+            AttemptStatus::Started => "started",
+            AttemptStatus::Succeeded => "succeeded",
+            AttemptStatus::Failed => "failed",
+            AttemptStatus::Cancelled => "cancelled",
+            AttemptStatus::OutcomeUnknown => "outcome_unknown",
+        }
+    }
+}
+
+/// 保存正文必须与先查询的原 SQL 身份绑定；仅接受确定的旧 unknown 拼写。
+pub fn decode_provider_attempt_fact(
+    run: &RunId,
+    id: &str,
+    round: u32,
+    candidate: u32,
+    status: &str,
+    raw: &str,
+) -> Result<ProviderAttempt, crate::CoordinationError> {
+    let attempt: ProviderAttempt =
+        serde_json::from_str(raw).map_err(|_| crate::CoordinationError::Corrupt)?;
+    let legacy_unknown =
+        status == "outcomeunknown" && attempt.status == AttemptStatus::OutcomeUnknown;
+    if attempt.run_id != *run
+        || attempt.attempt_id != id
+        || attempt.round != round
+        || attempt.candidate_index != candidate
+        || (status != attempt.status_name() && !legacy_unknown)
+    {
+        return Err(crate::CoordinationError::Corrupt);
+    }
+    Ok(attempt)
 }

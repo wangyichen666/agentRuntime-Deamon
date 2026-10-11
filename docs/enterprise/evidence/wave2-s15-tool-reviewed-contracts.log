@@ -1,0 +1,23 @@
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 27.20s
+     Running tests/run_tool_contract.rs (target/debug/deps/run_tool_contract-57359113ac38f83a)
+
+running 12 tests
+test tool_batch_completion_cannot_manufacture_missing_batch_fact ... ok
+test native_tool_preparation_validates_descriptor_effect_digest_replay_and_duplicate_identity ... ok
+test native_tool_methods_reject_all_scope_and_owner_dimensions_before_any_artifact_or_batch_write ... ok
+test tool_batch_completion_cannot_publish_into_foreign_scope ... ok
+test native_tool_closed_exchange_and_completed_batch_share_original_facts_and_idempotent_marker ... ok
+test native_tool_two_original_connections_prepare_one_batch_and_allow_only_one_started_transition ... ok
+test native_file_tool_completion_preserves_digest_errors_and_original_transaction_rollback_then_replays_once ... ok
+test tool_started_cannot_adopt_later_generation_before_external_dispatch ... ok
+test tool_started_cannot_write_foreign_legacy_run_without_frozen_authorization ... ok
+test native_tool_every_method_rechecks_frozen_revocation_and_expired_proof_without_acquiring_new_epoch ... ok
+test native_tool_saved_batch_and_request_byte_budgets_reject_without_mutation ... ok
+test native_tool_started_waiting_for_real_sqlite_write_lock_keeps_timer_responsive ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.72s
+

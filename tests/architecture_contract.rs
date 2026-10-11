@@ -1,5 +1,5 @@
 //! Wave 0 静态护栏：检查实际生产 AST，测试 fixture 不形成生产依赖。
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use syn::parse::Parser;
@@ -20,6 +20,25 @@ fn test_only(attrs: &[Attribute]) -> bool {
         }
     })
 }
+
+fn item_attrs(item: &Item) -> &[Attribute] {
+    match item {
+        Item::Mod(i) => &i.attrs,
+        Item::Fn(i) => &i.attrs,
+        Item::Struct(i) => &i.attrs,
+        Item::Enum(i) => &i.attrs,
+        Item::Impl(i) => &i.attrs,
+        Item::Use(i) => &i.attrs,
+        Item::Const(i) => &i.attrs,
+        Item::Static(i) => &i.attrs,
+        Item::Trait(i) => &i.attrs,
+        Item::Type(i) => &i.attrs,
+        Item::Macro(i) => &i.attrs,
+        Item::Union(i) => &i.attrs,
+        Item::ForeignMod(i) => &i.attrs,
+        _ => &[],
+    }
+}
 fn entry_files(root: &Path) -> Vec<PathBuf> {
     ["cli", "acp", "gateway", "entry-support"]
         .into_iter()
@@ -37,6 +56,7 @@ struct Production {
     paths: Vec<Vec<String>>,
     fields: Vec<(String, String, BTreeSet<String>)>,
     definitions: BTreeSet<String>,
+    aliases: BTreeMap<String, BTreeSet<String>>,
 }
 
 fn use_paths(tree: &UseTree, prefix: &[String], output: &mut Vec<Vec<String>>) {
@@ -65,6 +85,32 @@ fn use_paths(tree: &UseTree, prefix: &[String], output: &mut Vec<Vec<String>>) {
     }
 }
 
+fn use_aliases(tree: &UseTree, prefix: &[String], output: &mut BTreeMap<String, Vec<String>>) {
+    match tree {
+        UseTree::Path(path) => {
+            let mut next = prefix.to_vec();
+            next.push(path.ident.to_string());
+            use_aliases(&path.tree, &next, output);
+        }
+        UseTree::Group(group) => {
+            for child in &group.items {
+                use_aliases(child, prefix, output);
+            }
+        }
+        UseTree::Name(name) => {
+            let mut path = prefix.to_vec();
+            path.push(name.ident.to_string());
+            output.insert(name.ident.to_string(), path);
+        }
+        UseTree::Rename(rename) => {
+            let mut path = prefix.to_vec();
+            path.push(rename.ident.to_string());
+            output.insert(rename.rename.to_string(), path);
+        }
+        UseTree::Glob(_) => {}
+    }
+}
+
 impl<'ast> Visit<'ast> for Production {
     fn visit_file(&mut self, file: &'ast syn::File) {
         if !test_only(&file.attrs) {
@@ -79,27 +125,20 @@ impl<'ast> Visit<'ast> for Production {
     }
 
     fn visit_item(&mut self, item: &'ast Item) {
-        let attrs: &[Attribute] = match item {
-            Item::Mod(i) => &i.attrs,
-            Item::Fn(i) => &i.attrs,
-            Item::Struct(i) => &i.attrs,
-            Item::Enum(i) => &i.attrs,
-            Item::Impl(i) => &i.attrs,
-            Item::Use(i) => &i.attrs,
-            Item::Const(i) => &i.attrs,
-            Item::Static(i) => &i.attrs,
-            Item::Trait(i) => &i.attrs,
-            Item::Type(i) => &i.attrs,
-            Item::Macro(i) => &i.attrs,
-            _ => &[],
-        };
-        if !test_only(attrs) {
+        if !test_only(item_attrs(item)) {
             visit::visit_item(self, item);
         }
     }
 
     fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
         use_paths(&item.tree, &[], &mut self.paths);
+        let mut aliases = BTreeMap::new();
+        use_aliases(&item.tree, &[], &mut aliases);
+        self.aliases.extend(
+            aliases
+                .into_iter()
+                .map(|(name, path)| (name, path.into_iter().collect())),
+        );
     }
 
     fn visit_path(&mut self, path: &'ast syn::Path) {
@@ -130,7 +169,45 @@ impl<'ast> Visit<'ast> for Production {
 
     fn visit_item_enum(&mut self, item: &'ast syn::ItemEnum) {
         self.definitions.insert(item.ident.to_string());
+        for variant in &item.variants {
+            if test_only(&variant.attrs) {
+                continue;
+            }
+            for (index, field) in variant.fields.iter().enumerate() {
+                let mut types = Production::default();
+                types.visit_type(&field.ty);
+                self.fields.push((
+                    format!("{}::{}", item.ident, variant.ident),
+                    field
+                        .ident
+                        .as_ref()
+                        .map_or(index.to_string(), ToString::to_string),
+                    types.paths.into_iter().flatten().collect(),
+                ));
+            }
+        }
         visit::visit_item_enum(self, item);
+    }
+
+    fn visit_item_type(&mut self, item: &'ast syn::ItemType) {
+        let mut types = Production::default();
+        types.visit_type(&item.ty);
+        self.aliases.insert(
+            item.ident.to_string(),
+            types.paths.into_iter().flatten().collect(),
+        );
+        visit::visit_item_type(self, item);
+    }
+
+    fn visit_item_static(&mut self, item: &'ast syn::ItemStatic) {
+        let mut types = Production::default();
+        types.visit_type(&item.ty);
+        self.fields.push((
+            "static".into(),
+            item.ident.to_string(),
+            types.paths.into_iter().flatten().collect(),
+        ));
+        visit::visit_item_static(self, item);
     }
 }
 
@@ -311,10 +388,12 @@ fn workspace_libraries_have_only_allowed_dependency_edges() {
         (
             "runtime",
             vec![
+                "agent-artifact",
                 "agent-core",
                 "agent-context",
                 "agent-memory",
                 "agent-storage",
+                "agent-storage-ports",
                 "agent-sandbox",
                 "agent-daemon-protocol",
                 "anyhow",
@@ -342,6 +421,10 @@ fn workspace_libraries_have_only_allowed_dependency_edges() {
         (
             "daemon",
             vec![
+                "agent-artifact",
+                "agent-storage-ports",
+                "agent-identity",
+                "agent-policy",
                 "agent-runtime",
                 "agent-sandbox",
                 "agent-storage",
@@ -483,6 +566,24 @@ fn workspace_libraries_have_only_allowed_dependency_edges() {
             vec!["agent-core", "serde", "serde_json", "thiserror"],
         ),
         (
+            "artifact",
+            vec![
+                "agent-core",
+                "agent-storage-ports",
+                "async-trait",
+                "bytes",
+                "futures-util",
+                "object_store",
+                "reqwest",
+                "rustls",
+                "webpki-roots",
+                "serde_json",
+                "sha2",
+                "tokio",
+                "url",
+            ],
+        ),
+        (
             "context",
             vec!["agent-core", "serde_json", "sha2", "thiserror"],
         ),
@@ -493,6 +594,10 @@ fn workspace_libraries_have_only_allowed_dependency_edges() {
         (
             "storage",
             vec![
+                "tokio",
+                "rustix",
+                "agent-storage-ports",
+                "async-trait",
                 "agent-core",
                 "libc",
                 "rusqlite",
@@ -610,15 +715,7 @@ impl<'ast> Visit<'ast> for ForbiddenLibraryOperations {
     }
 
     fn visit_item(&mut self, item: &'ast Item) {
-        // 使用相同的生产分支排除规则；不能因测试 fixture 触发库规则。
-        let attrs: &[Attribute] = match item {
-            Item::Mod(i) => &i.attrs,
-            Item::Fn(i) => &i.attrs,
-            Item::Impl(i) => &i.attrs,
-            Item::Use(i) => &i.attrs,
-            _ => &[],
-        };
-        if !test_only(attrs) {
+        if !test_only(item_attrs(item)) {
             visit::visit_item(self, item);
         }
     }
@@ -639,10 +736,43 @@ impl<'ast> Visit<'ast> for ForbiddenLibraryOperations {
         visit::visit_expr_method_call(self, expr);
     }
     fn visit_macro(&mut self, value: &'ast syn::Macro) {
-        if value.path.is_ident("println") || value.path.is_ident("print") {
-            self.0.push("stdout".into());
+        if let Some(name) = value.path.segments.last() {
+            match name.ident.to_string().as_str() {
+                "println" | "print" => self.0.push("stdout".into()),
+                "todo" => self.0.push("todo".into()),
+                "unimplemented" => self.0.push("unimplemented".into()),
+                _ => {}
+            }
         }
         visit::visit_macro(self, value);
+    }
+
+    fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+        if item.unsafety.is_some() {
+            self.0.push("unsafe impl".into());
+        }
+        visit::visit_item_impl(self, item);
+    }
+
+    fn visit_item_trait(&mut self, item: &'ast syn::ItemTrait) {
+        if item.unsafety.is_some() {
+            self.0.push("unsafe trait".into());
+        }
+        visit::visit_item_trait(self, item);
+    }
+
+    fn visit_item_foreign_mod(&mut self, item: &'ast syn::ItemForeignMod) {
+        if item.unsafety.is_some() {
+            self.0.push("unsafe extern".into());
+        }
+        visit::visit_item_foreign_mod(self, item);
+    }
+
+    fn visit_item_static(&mut self, item: &'ast syn::ItemStatic) {
+        if matches!(item.mutability, syn::StaticMutability::Mut(_)) {
+            self.0.push("static mut".into());
+        }
+        visit::visit_item_static(self, item);
     }
 }
 #[test]
@@ -653,7 +783,13 @@ fn workspace_libraries_cannot_panic_or_print_in_production() {
             continue;
         }
         let mut operations = ForbiddenLibraryOperations::default();
-        operations.visit_file(&syn::parse_file(&std::fs::read_to_string(&file).unwrap()).unwrap());
+        let source = std::fs::read_to_string(&file).unwrap();
+        operations.visit_file(&syn::parse_file(&source).unwrap());
+        assert!(
+            !source.contains("TODO"),
+            "{} 不得留下 TODO 标记",
+            file.display()
+        );
         assert!(
             operations.0.is_empty(),
             "{} 存在库级禁止操作 {:?}",
@@ -732,4 +868,451 @@ fn root_is_composition_only_and_test_support_is_not_a_production_bypass() {
         "#[cfg(any(test, feature=\"test-support\"))] fn fixture() { agent_storage::RunStore::open(); }",
     );
     assert!(!has_edge(&fixture, "storage"));
+}
+
+#[test]
+fn enterprise_quality_red_fixture_detects_qualified_placeholders() {
+    let mut operations = ForbiddenLibraryOperations::default();
+    operations
+        .visit_file(&syn::parse_file(include_str!("fixtures/enterprise/quality.rs.txt")).unwrap());
+    assert_eq!(operations.0, ["stdout", "todo", "unimplemented"]);
+}
+
+/// DTO 快照和调用栈局部值可携带 facts；长期容器不得成为另一份终态 owner。
+fn mutable_business_owners(facts: &Production) -> Vec<String> {
+    facts
+        .fields
+        .iter()
+        .filter_map(|(owner, field, original)| {
+            let mut types = original.clone();
+            loop {
+                let before = types.len();
+                for name in types.clone() {
+                    if let Some(alias) = facts.aliases.get(&name) {
+                        types.extend(alias.iter().cloned());
+                    }
+                }
+                if types.len() == before {
+                    break;
+                }
+            }
+            let mutable = [
+                "Mutex", "RwLock", "RefCell", "Cell", "HashMap", "BTreeMap", "DashMap",
+            ]
+            .iter()
+            .any(|name| types.contains(*name));
+            let fact = [
+                "Message",
+                "RunRecord",
+                "RunStatus",
+                "InteractionRecord",
+                "PlanDocument",
+                "SessionSnapshot",
+            ]
+            .iter()
+            .any(|name| types.contains(*name));
+            (mutable && fact).then(|| format!("{owner}.{field}"))
+        })
+        .collect()
+}
+
+#[test]
+fn enterprise_shadow_owner_red_fixtures_detect_runs_approvals_aliases_enums_and_statics() {
+    let facts = production(include_str!("fixtures/enterprise/shadow-owners.rs.txt"));
+    assert_eq!(
+        mutable_business_owners(&facts),
+        [
+            "Gateway.runs",
+            "Gateway.approvals",
+            "Shadow::Cached.0",
+            "static.SHADOW",
+        ]
+    );
+    let allowed = production(
+        "struct Readback { runs: Vec<RunRecord>, approvals: Vec<InteractionRecord> } struct Handles { tasks: Mutex<HashMap<String, JoinHandle<()>>> } #[cfg(test)] struct Fixture { runs: Mutex<Vec<RunRecord>> }",
+    );
+    assert!(mutable_business_owners(&allowed).is_empty());
+}
+
+#[test]
+fn enterprise_workspace_has_no_second_mutable_business_owner() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for file in implementation_files(root) {
+        let facts = production(&std::fs::read_to_string(&file).unwrap());
+        assert!(
+            mutable_business_owners(&facts).is_empty(),
+            "{} 有影子业务 owner：{:?}",
+            file.display(),
+            mutable_business_owners(&facts)
+        );
+    }
+}
+
+fn dependency_tables<'a>(
+    manifest: &'a toml::Value,
+    tables: &mut Vec<&'a toml::map::Map<String, toml::Value>>,
+) {
+    for kind in ["dependencies", "build-dependencies"] {
+        if let Some(table) = manifest.get(kind).and_then(toml::Value::as_table) {
+            tables.push(table);
+        }
+    }
+    if let Some(targets) = manifest.get("target").and_then(toml::Value::as_table) {
+        for target in targets.values() {
+            dependency_tables(target, tables);
+        }
+    }
+}
+
+fn forbidden_dependencies(
+    name: &str,
+    manifest: &toml::Value,
+    workspace: &toml::Value,
+) -> BTreeSet<String> {
+    let mut tables = Vec::new();
+    dependency_tables(manifest, &mut tables);
+    tables
+        .into_iter()
+        .flat_map(|table| table.iter())
+        .filter_map(|(alias, value)| {
+            let value = if value.get("workspace").and_then(toml::Value::as_bool) == Some(true) {
+                workspace
+                    .get("workspace")
+                    .and_then(|v| v.get("dependencies"))
+                    .and_then(|v| v.get(alias))
+                    .unwrap_or(value)
+            } else {
+                value
+            };
+            let package = value
+                .get("package")
+                .and_then(toml::Value::as_str)
+                .unwrap_or(alias);
+            let adapter = ["cli", "acp", "gateway", "entry-support"].contains(&name);
+            let database =
+                ["rusqlite", "sqlx", "tokio-postgres", "postgres", "diesel"].contains(&package);
+            let concrete = package.starts_with("agent-storage")
+                || ["agent-runtime", "agent-daemon", "agent-sandbox"].contains(&package);
+            let forbidden = (adapter && (database || concrete))
+                || (name == "core" && !["serde", "serde_json", "thiserror"].contains(&package))
+                || (["identity", "policy"].contains(&name) && package != "agent-core")
+                || (["storage", "storage-sqlite"].contains(&name)
+                    && package == "agent-storage-postgres")
+                || (name == "storage-postgres"
+                    && ["agent-storage", "agent-storage-sqlite"].contains(&package))
+                || (name == "runtime"
+                    && [
+                        "agent-daemon",
+                        "agent-cli",
+                        "agent-acp",
+                        "agent-gateway",
+                        "agent-entry-support",
+                    ]
+                    .contains(&package));
+            forbidden.then(|| package.to_owned())
+        })
+        .collect()
+}
+
+#[test]
+fn enterprise_cargo_red_fixtures_detect_renamed_target_build_and_inherited_dependencies() {
+    let fixture: toml::Value = toml::from_str(include_str!(
+        "fixtures/enterprise/forbidden-dependencies.toml"
+    ))
+    .unwrap();
+    assert_eq!(
+        forbidden_dependencies("gateway", &fixture, &fixture),
+        BTreeSet::from([
+            "agent-daemon".into(),
+            "agent-runtime".into(),
+            "agent-storage".into(),
+            "rusqlite".into(),
+        ])
+    );
+    let cross: toml::Value = toml::from_str(
+        "[dependencies]\nbackend = { package = 'agent-storage-postgres', version = '1' }",
+    )
+    .unwrap();
+    assert!(
+        forbidden_dependencies("storage-sqlite", &cross, &cross).contains("agent-storage-postgres")
+    );
+    let reverse: toml::Value = toml::from_str(
+        "[dependencies]\nbackend = { package = 'agent-storage-sqlite', version = '1' }",
+    )
+    .unwrap();
+    assert!(
+        forbidden_dependencies("storage-postgres", &reverse, &reverse)
+            .contains("agent-storage-sqlite")
+    );
+    assert!(forbidden_dependencies("core", &fixture, &fixture).contains("rusqlite"));
+}
+
+#[test]
+fn enterprise_every_workspace_library_is_reviewed_and_checks_all_cargo_dependency_tables() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace: toml::Value =
+        toml::from_str(&std::fs::read_to_string(root.join("Cargo.toml")).unwrap()).unwrap();
+    let reviewed: toml::Value = toml::from_str(
+        &std::fs::read_to_string(root.join("docs/enterprise/crate-boundaries.toml")).unwrap(),
+    )
+    .unwrap();
+    let mut seen = BTreeSet::new();
+    for member in workspace["workspace"]["members"].as_array().unwrap() {
+        let member = member.as_str().unwrap();
+        if member == "." {
+            continue;
+        }
+        let name = member
+            .strip_prefix("crates/")
+            .expect("库必须有可审计的物理路径");
+        assert!(
+            reviewed.get(name).is_some(),
+            "新库 {name} 必须先登记职责与允许依赖"
+        );
+        assert!(
+            reviewed[name]["owner"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()),
+            "{name} 必须声明真实职责 owner"
+        );
+        seen.insert(name.to_owned());
+        let manifest: toml::Value =
+            toml::from_str(&std::fs::read_to_string(root.join(member).join("Cargo.toml")).unwrap())
+                .unwrap();
+        assert!(
+            forbidden_dependencies(name, &manifest, &workspace).is_empty(),
+            "{name} 有禁止依赖"
+        );
+        let allowed = reviewed[name]["internal"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect::<BTreeSet<_>>();
+        let mut tables = Vec::new();
+        dependency_tables(&manifest, &mut tables);
+        for (alias, value) in tables.into_iter().flat_map(|t| t.iter()) {
+            let package = value
+                .get("package")
+                .and_then(toml::Value::as_str)
+                .unwrap_or(alias);
+            if package.starts_with("agent-") {
+                assert!(
+                    allowed.contains(package),
+                    "{name} 新增未审计内部边 {package}"
+                );
+            }
+            let features = value.get("features").and_then(toml::Value::as_array);
+            let fixture_feature = features.is_some_and(|f| {
+                f.iter()
+                    .any(|v| [Some("test-support"), Some("test-transport")].contains(&v.as_str()))
+            });
+            if fixture_feature {
+                assert!(
+                    name == "daemon"
+                        && package == "agent-daemon-client"
+                        && value.get("optional").and_then(toml::Value::as_bool) == Some(true),
+                    "生产依赖不得启用 fixture feature"
+                );
+            }
+        }
+        let defaults = manifest
+            .get("features")
+            .and_then(|f| f.get("default"))
+            .and_then(toml::Value::as_array);
+        assert!(
+            defaults.is_none_or(|f| f.is_empty()),
+            "新增默认 features 必须先审计，禁止 fixture 混入"
+        );
+    }
+    assert_eq!(seen, reviewed.as_table().unwrap().keys().cloned().collect());
+}
+
+#[derive(Default)]
+struct ChannelAudit {
+    function: String,
+    aliases: BTreeMap<String, Vec<String>>,
+    unbounded: Vec<String>,
+    zero_capacity: Vec<String>,
+}
+impl<'ast> Visit<'ast> for ChannelAudit {
+    fn visit_file(&mut self, file: &'ast syn::File) {
+        if !test_only(&file.attrs) {
+            visit::visit_file(self, file);
+        }
+    }
+    fn visit_item(&mut self, item: &'ast Item) {
+        if !test_only(item_attrs(item)) {
+            visit::visit_item(self, item);
+        }
+    }
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        let previous = std::mem::replace(&mut self.function, item.sig.ident.to_string());
+        visit::visit_item_fn(self, item);
+        self.function = previous;
+    }
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        if !test_only(&item.attrs) {
+            let previous = std::mem::replace(&mut self.function, item.sig.ident.to_string());
+            visit::visit_impl_item_fn(self, item);
+            self.function = previous;
+        }
+    }
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        use_aliases(&item.tree, &[], &mut self.aliases);
+    }
+    fn visit_expr_call(&mut self, expr: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = &*expr.func {
+            let mut segments = path
+                .path
+                .segments
+                .iter()
+                .map(|s| s.ident.to_string())
+                .collect::<Vec<_>>();
+            if let Some(alias) = segments.first().and_then(|name| self.aliases.get(name)) {
+                segments.splice(0..1, alias.clone());
+            }
+            let name = segments.last().map(String::as_str);
+            if name == Some("unbounded_channel")
+                || (name == Some("channel")
+                    && expr.args.is_empty()
+                    && segments.iter().any(|s| s == "mpsc"))
+            {
+                self.unbounded.push(self.function.clone());
+            }
+            if matches!(name, Some("channel" | "sync_channel")) && segments.iter().any(|s| s == "mpsc") && expr.args.first().is_some_and(|arg| matches!(arg, syn::Expr::Lit(lit) if matches!(&lit.lit, syn::Lit::Int(n) if n.base10_parse::<usize>().ok() == Some(0)))) {
+                self.zero_capacity.push(self.function.clone());
+            }
+        }
+        visit::visit_expr_call(self, expr);
+    }
+}
+fn channels(source: &str) -> ChannelAudit {
+    let mut audit = ChannelAudit::default();
+    audit.visit_file(&syn::parse_file(source).unwrap());
+    audit
+}
+
+#[test]
+fn enterprise_channel_red_fixtures_detect_alias_std_unbounded_and_zero_capacity() {
+    let audit = channels(include_str!("fixtures/enterprise/channels.rs.txt"));
+    assert_eq!(audit.unbounded, ["bad", "bad", "bad"]);
+    assert_eq!(audit.zero_capacity, ["bad"]);
+    assert!(channels("use tokio::sync::mpsc; fn good() { let _ = mpsc::channel::<u8>(64); } #[cfg(test)] fn fixture() { let _ = mpsc::unbounded_channel::<u8>(); }").unbounded.is_empty());
+    assert_eq!(channels("#[cfg(any(test, target_os=\"linux\"))] fn bad() { tokio::sync::mpsc::unbounded_channel::<u8>(); }").unbounded, ["bad"]);
+}
+
+#[test]
+fn enterprise_channels_only_allow_exact_documented_legacy_sites_and_no_new_unbounded() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let exceptions: toml::Value = toml::from_str(
+        &std::fs::read_to_string(root.join("docs/enterprise/channel-exceptions.toml")).unwrap(),
+    )
+    .unwrap();
+    let expected = exceptions["exception"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            let test = e["test"].as_str().unwrap();
+            let mut test_files = implementation_files(root);
+            test_files.extend(rust_files(&root.join("tests")));
+            assert!(
+                test_files.iter().any(|p| std::fs::read_to_string(p)
+                    .unwrap()
+                    .contains(&format!("fn {test}("))),
+                "例外必须有真实测试 {test}"
+            );
+            let reason = e["reason"].as_str().unwrap();
+            assert!(!reason.is_empty());
+            let document = root.join(e["document"].as_str().unwrap());
+            assert!(document.is_file());
+            let key = format!(
+                "{}::{}",
+                e["file"].as_str().unwrap(),
+                e["function"].as_str().unwrap()
+            );
+            (key, e["count"].as_integer().unwrap() as usize)
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        expected.len(),
+        exceptions["exception"].as_array().unwrap().len(),
+        "不能用重复登记掩盖 channel 例外"
+    );
+    let mut actual = BTreeMap::new();
+    for file in implementation_files(root) {
+        let source = std::fs::read_to_string(&file).unwrap();
+        let audit = channels(&source);
+        assert!(
+            audit.zero_capacity.is_empty(),
+            "{} 不允许零容量 mpsc",
+            file.display()
+        );
+        for function in audit.unbounded {
+            let key = format!("{}::{function}", file.strip_prefix(root).unwrap().display());
+            *actual.entry(key).or_insert(0usize) += 1;
+        }
+    }
+    assert_eq!(
+        actual, expected,
+        "新无界通道、例外重复或已删除未收口都必须失败"
+    );
+}
+
+#[test]
+fn enterprise_traceability_covers_all_waves_without_claiming_missing_implementations() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let matrix: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join("docs/enterprise/traceability.json")).unwrap(),
+    )
+    .unwrap();
+    let rows = matrix.as_array().unwrap();
+    let mut ids = BTreeSet::new();
+    let mut counts = [0usize; 11];
+    for row in rows {
+        let wave = row["wave"].as_u64().unwrap() as usize;
+        assert!(wave < counts.len());
+        counts[wave] += 1;
+        assert!(ids.insert(row["id"].as_str().unwrap()));
+        for field in [
+            "requirement",
+            "owner",
+            "schema",
+            "projection",
+            "test",
+            "document",
+            "status",
+            "verification",
+        ] {
+            assert!(
+                row[field].as_str().is_some_and(|s| !s.is_empty()),
+                "{} 缺少 {field}",
+                row["id"]
+            );
+        }
+        assert!(matches!(
+            row["status"].as_str(),
+            Some("implemented" | "proposed")
+        ));
+    }
+    assert_eq!(counts, [4, 6, 7, 7, 7, 7, 7, 6, 7, 7, 6]);
+    for path in [
+        "ARCHITECTURE.md",
+        "docs/enterprise/baseline.md",
+        "docs/enterprise/schema-v20.md",
+        "docs/enterprise/channel-budget.md",
+    ] {
+        assert!(root.join(path).is_file());
+    }
+    for path in [
+        "0004-enterprise-identity-and-policy.md",
+        "0005-dual-storage-and-postgres.md",
+        "0006-remote-workers-and-resource-ownership.md",
+        "0007-pack-plugin-and-connector-trust.md",
+        "0008-enterprise-audit-telemetry-and-retention.md",
+        "0009-kubernetes-ha-upgrade-and-disaster-recovery.md",
+    ] {
+        assert!(root.join("docs/adr").join(path).is_file());
+    }
 }

@@ -1,0 +1,29 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.73s
+     Running tests/run_fact_contract.rs (target/debug/deps/run_fact_contract-4c047fc82807f7a0)
+
+running 2 tests
+test provider_history_does_not_trust_inner_json_owner_fields ... FAILED
+test run_fact_readback_never_reveals_foreign_content ... FAILED
+
+failures:
+
+---- provider_history_does_not_trust_inner_json_owner_fields stdout ----
+
+thread 'provider_history_does_not_trust_inner_json_owner_fields' panicked at tests/run_fact_contract.rs:149:5:
+SQL身份和JSON不一致不能被读回当作canonical：Ok([ProviderAttempt { attempt_id: "facts-attempt", run_id: RunId("run-1"), round: 77, candidate_index: 0, provider_profile_id: "facts-profile", api_type: Ollama, model: "frozen-model", status: Succeeded, error_kind: None, diagnostic: None, retry_after_ms: None, stream_committed: false, started_at_ms: 1, first_event_at_ms: None, finished_at_ms: Some(2), usage: Some(ProviderUsage { input_tokens: Some(7), output_tokens: Some(3), cache_read_tokens: None, cache_creation_tokens: None }) }])
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- run_fact_readback_never_reveals_foreign_content stdout ----
+
+thread 'run_fact_readback_never_reveals_foreign_content' panicked at tests/run_fact_contract.rs:122:5:
+不能返回越域 run 私密输出：Ok(RunRecord { kind: Chat, run_id: RunId("run-1"), turn_id: TurnId("turn-1"), session_id: SessionKey("run-facts"), request_id: Number(1), status: Completed, last_seq: EventSeq(7), content: Some("私密输出"), error_code: None, error_message: None })
+
+
+failures:
+    provider_history_does_not_trust_inner_json_owner_fields
+    run_fact_readback_never_reveals_foreign_content
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+error: test failed, to rerun pass `--test run_fact_contract`

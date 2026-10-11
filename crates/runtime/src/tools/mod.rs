@@ -4,6 +4,8 @@ mod read;
 mod search;
 pub(crate) use agent_sandbox::terminate_process_group;
 mod write;
+mod webhook;
+pub use webhook::WorkflowWebhookTool;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -43,6 +45,8 @@ impl ToolAdmissionError {
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
+    /// 外部工具必须声明其不可变配置来源；内置工具由受信binary装配。
+    fn extension_origin(&self)->Option<(String,String)> {None}
     fn description(&self) -> &str;
     fn parameters(&self) -> Value;
     fn is_read_only(&self) -> bool {
@@ -102,20 +106,28 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
-    pub fn descriptor(
+    pub async fn descriptor(
         &self,
         call: &crate::provider::ToolCall,
     ) -> Result<agent_core::ToolDescriptor> {
-        match self.target(&call.name, &call.arguments)? {
+        match self.target(&call.name, &call.arguments).await? {
             Some((tool, args)) => tool.descriptor(&args),
             None => Ok(agent_core::ToolDescriptor::read()),
         }
     }
-    pub fn scheduled_waves(&self, calls: &[crate::provider::ToolCall]) -> Result<Vec<Vec<usize>>> {
-        let descriptors = calls
-            .iter()
-            .map(|call| self.descriptor(call))
-            .collect::<Result<Vec<_>>>()?;
+    pub async fn scheduled_waves(
+        &self,
+        calls: &[crate::provider::ToolCall],
+    ) -> Result<Vec<Vec<usize>>> {
+        let mut descriptors = Vec::with_capacity(calls.len());
+        for call in calls {
+            descriptors.push(self.descriptor(call).await?);
+        }
+        Ok(Self::schedule_descriptors(&descriptors))
+    }
+    pub(crate) fn schedule_descriptors(
+        descriptors: &[agent_core::ToolDescriptor],
+    ) -> Vec<Vec<usize>> {
         let mut waves = Vec::new();
         let mut current: Vec<usize> = Vec::new();
         for (index, descriptor) in descriptors.iter().enumerate() {
@@ -134,7 +146,7 @@ impl ToolRegistry {
         if !current.is_empty() {
             waves.push(current);
         }
-        Ok(waves)
+        waves
     }
 
     pub fn new() -> Self {
@@ -161,6 +173,13 @@ impl ToolRegistry {
         self.dynamic_sources.push(source);
     }
 
+    pub fn registry_subset(&self,g:&agent_core::InstalledGeneration)->Result<Self> {
+        let c=&g.effective.config;
+        for name in &c.tool_allowlist {let tool=self.resolve(name).ok_or_else(||anyhow::anyhow!("发行代工具不可用"))?;
+            if let Some((coordinate,digest))=tool.extension_origin() {anyhow::ensure!(c.sandbox.network && c.mcp_refs.iter().any(|r|r.coordinate==coordinate && r.digest==digest && r.trust>=agent_core::PluginTrust::OrganizationReviewed),"外部工具不属于冻结发行代或被网络策略拒绝");}
+        }
+        self.subset(c.tool_allowlist.iter().map(String::as_str))
+    }
     pub fn subset<'a>(&self, names: impl IntoIterator<Item = &'a str>) -> Result<Self> {
         let mut subset = Self::new();
         for name in names {
@@ -255,7 +274,7 @@ impl ToolRegistry {
 
     #[allow(dead_code)]
     pub async fn execute(&self, name: &str, args: Value) -> Result<ToolOutput> {
-        self.admit(name, &args)?;
+        self.admit(name, &args).await?;
         let tool = self
             .resolve(name)
             .ok_or_else(|| ToolAdmissionError::UnknownTool(name.to_owned()))?;
@@ -268,8 +287,8 @@ impl ToolRegistry {
         args: Value,
         cancellation: &dyn ToolCancellation,
     ) -> Result<ToolOutput> {
-        self.admit(name, &args)?;
-        match self.target(name, &args)? {
+        self.admit(name, &args).await?;
+        match self.target(name, &args).await? {
             Some((tool, arguments)) => {
                 tool.execute_rich_with_cancellation(arguments, cancellation)
                     .await
@@ -297,10 +316,10 @@ impl ToolRegistry {
                 .all(|call| call.arguments.to_string().len() <= 65536),
             "tool 参数超过 64 KiB 预算"
         );
-        self.admit_all(calls)?;
-        self.scheduled_waves(calls)?;
+        self.admit_all(calls).await?;
+        self.scheduled_waves(calls).await?;
         for call in calls {
-            if let Some((tool, args)) = self.target(&call.name, &call.arguments)? {
+            if let Some((tool, args)) = self.target(&call.name, &call.arguments).await? {
                 crate::safety::with_action_identity(
                     crate::safety::action_identity(round, call),
                     tool.preflight(&args),
@@ -311,20 +330,24 @@ impl ToolRegistry {
         Ok(())
     }
 
-    pub fn admit_all(&self, calls: &[crate::provider::ToolCall]) -> Result<(), ToolAdmissionError> {
+    pub async fn admit_all(
+        &self,
+        calls: &[crate::provider::ToolCall],
+    ) -> Result<(), ToolAdmissionError> {
         for call in calls {
-            self.admit(&call.name, &call.arguments)?;
+            self.admit(&call.name, &call.arguments).await?;
         }
         Ok(())
     }
 
-    fn admit(&self, name: &str, args: &Value) -> Result<(), ToolAdmissionError> {
+    async fn admit(&self, name: &str, args: &Value) -> Result<(), ToolAdmissionError> {
         let invalid = |message: String| ToolAdmissionError::InvalidArguments {
             tool: name.into(),
             message,
         };
         let target = self
             .target(name, args)
+            .await
             .map_err(|e| invalid(e.to_string()))?;
         let schema = if let Some((tool, _)) = &target {
             self.specs()
@@ -339,7 +362,7 @@ impl ToolRegistry {
         validate_value(&schema, arguments, "$args").map_err(invalid)
     }
 
-    fn target(&self, name: &str, args: &Value) -> Result<Option<(Arc<dyn Tool>, Value)>> {
+    async fn target(&self, name: &str, args: &Value) -> Result<Option<(Arc<dyn Tool>, Value)>> {
         let target_name = name;
         let mut arguments = args.clone();
         if let Some(search) = &self.search {
@@ -347,10 +370,12 @@ impl ToolRegistry {
                 match serde_json::from_value::<agent_core::ToolSearchRequest>(args.clone())? {
                     agent_core::ToolSearchRequest::Search(_) => return Ok(None),
                     agent_core::ToolSearchRequest::Invoke(invoke) => {
-                        let (repository, owner) = crate::loop_engine::current_session_repository()
-                            .ok_or_else(|| anyhow::anyhow!("嵌套工具缺 canonical owner"))?;
                         anyhow::ensure!(
-                            repository.discovered_tool(&owner, &search.generation, &invoke.name)?,
+                            crate::loop_engine::current_discovery_permission(
+                                &search.generation,
+                                &invoke.name
+                            )
+                            .await?,
                             "工具尚未在当前 run/generation 发现"
                         );
                         let tool = self
@@ -413,8 +438,8 @@ mod tests {
             Ok(args.to_string())
         }
     }
-    #[test]
-    fn frozen_schema_survives_reload_and_hidden_direct_or_unowned_invokes_fail_closed() {
+    #[tokio::test]
+    async fn frozen_schema_survives_reload_and_hidden_direct_or_unowned_invokes_fail_closed() {
         let generation = Arc::new(std::sync::atomic::AtomicUsize::new(1));
         let mut registry = ToolRegistry::new();
         registry.register(ChangingTool {
@@ -439,21 +464,47 @@ mod tests {
             name: name.into(),
             arguments,
         };
-        assert!(frozen.admit_all(&[call("read_file", json!(1))]).is_ok());
+        assert!(
+            frozen
+                .admit_all(&[call("read_file", json!(1))])
+                .await
+                .is_ok()
+        );
         generation.store(2, std::sync::atomic::Ordering::SeqCst);
-        assert!(frozen.admit_all(&[call("read_file", json!(1))]).is_ok());
-        assert!(frozen.admit_all(&[call("read_file", json!(2))]).is_err());
-        assert!(frozen.admit_all(&[call("deferred", json!(1))]).is_err());
+        assert!(
+            frozen
+                .admit_all(&[call("read_file", json!(1))])
+                .await
+                .is_ok()
+        );
+        assert!(
+            frozen
+                .admit_all(&[call("read_file", json!(2))])
+                .await
+                .is_err()
+        );
+        assert!(
+            frozen
+                .admit_all(&[call("deferred", json!(1))])
+                .await
+                .is_err()
+        );
         assert!(
             frozen
                 .admit_all(&[call(
                     "tool_search",
                     json!({"name":"deferred","arguments":1})
                 )])
+                .await
                 .is_err()
         );
         let narrowed = frozen.subset(["read_file"]).unwrap();
-        assert!(narrowed.admit_all(&[call("read_file", json!(1))]).is_ok());
+        assert!(
+            narrowed
+                .admit_all(&[call("read_file", json!(1))])
+                .await
+                .is_ok()
+        );
         assert_eq!(narrowed.provider_specs().len(), 1);
         assert!(narrowed.specs().iter().all(|spec| spec.name != "deferred"));
         assert_ne!(
@@ -498,8 +549,8 @@ mod tests {
             Ok("ok".into())
         }
     }
-    #[test]
-    fn scheduling_parallelizes_independent_resources_and_fences_conflicting_writes() {
+    #[tokio::test]
+    async fn scheduling_parallelizes_independent_resources_and_fences_conflicting_writes() {
         let mut registry = ToolRegistry::new();
         registry.register(DescribedTool);
         let calls = [
@@ -518,7 +569,7 @@ mod tests {
         })
         .collect::<Vec<_>>();
         assert_eq!(
-            registry.scheduled_waves(&calls).unwrap(),
+            registry.scheduled_waves(&calls).await.unwrap(),
             vec![vec![0, 1], vec![2], vec![3], vec![4]]
         );
         assert!(

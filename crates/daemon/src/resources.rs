@@ -1,6 +1,11 @@
 //! 后台进程由 daemon 监督；SQLite 是状态 owner，进程句柄仅用于证明当前启动身份。
 use super::DaemonState;
-use agent_core::{ExactOwner, ResourceId, ResourceRecord};
+#[cfg(any(test, feature = "test-support"))]
+use agent_core::ExactOwner;
+use agent_core::{
+    EnterpriseOwnerEnvelope, ResourceId, ResourceRecord, SessionKey, SessionLifetimeId,
+    TenantContext,
+};
 use agent_runtime::{loop_engine::CancellationToken, tools::Tool};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
@@ -29,24 +34,29 @@ impl Drop for ProcessLease {
     }
 }
 impl DaemonState {
-    pub(crate) async fn start_background(
+    pub(crate) async fn start_background_execution(
         self: &Arc<Self>,
-        owner: ExactOwner,
+        envelope: EnterpriseOwnerEnvelope,
         command: String,
     ) -> Result<ResourceRecord> {
+        let owner = envelope.owner.clone();
         let snapshot = self
-            .run_store
-            .run_snapshot(&owner.run_id)?
-            .context("后台资源缺少冻结 RunSnapshot")?;
+            .resource_store
+            .read_resource_settings(&envelope)
+            .await?;
         if snapshot.sandbox_effective != "native" {
             bail!("后台执行暂不支持强隔离资源；拒绝启动 Native 进程");
         }
-        let record = self.run_store.create_resource(
-            &owner,
-            &snapshot.cwd,
-            &snapshot.sandbox_requested,
-            &snapshot.sandbox_effective,
-        )?;
+        let wall_limit=snapshot.billing_policy.as_ref().map(|f|std::time::Duration::from_millis(f.policy.limits.max_sandbox_wall_ms_per_resource));
+        let record = self
+            .resource_store
+            .create_run_resource(
+                &envelope,
+                &snapshot.cwd,
+                &snapshot.sandbox_requested,
+                &snapshot.sandbox_effective,
+            )
+            .await?;
         let mut process = Command::new("/bin/sh");
         process
             .arg("-c")
@@ -64,13 +74,9 @@ impl DaemonState {
         let mut child = match process.spawn() {
             Ok(child) => child,
             Err(error) => {
-                self.run_store.update_resource(
-                    &owner,
-                    record.id,
-                    "failed",
-                    None,
-                    Some("spawn failed"),
-                )?;
+                self.resource_store
+                    .update_run_resource(&envelope, record.id, "failed", None, Some("spawn failed"))
+                    .await?;
                 return Err(error.into());
             }
         };
@@ -80,9 +86,10 @@ impl DaemonState {
             "daemon-start:{}:{}:{}",
             owner.session_lifetime_id.0, record.id.0, pid
         );
-        if let Err(error) =
-            self.run_store
-                .update_resource(&owner, record.id, "running", Some(&identity), None)
+        if let Err(error) = self
+            .resource_store
+            .update_run_resource(&envelope, record.id, "running", Some(&identity), None)
+            .await
         {
             kill_group(pid);
             let _ = child.wait().await;
@@ -97,11 +104,13 @@ impl DaemonState {
         let stderr = child.stderr.take().context("缺少 stderr")?;
         let daemon = self.clone();
         let id = record.id;
+        let task_envelope = envelope.clone();
         let admitted=self.spawn_owned(async move {
-            let out=drain(stdout,daemon.clone(),owner.clone(),id,"stdout");
-            let err=drain(stderr,daemon.clone(),owner.clone(),id,"stderr");
+            let out=drain(stdout,daemon.clone(),task_envelope.clone(),id,"stdout");
+            let err=drain(stderr,daemon.clone(),task_envelope.clone(),id,"stderr");
             let wait=async {
                 tokio::select! {
+                    _=async {match wall_limit {Some(limit)=>tokio::time::sleep(limit).await,None=>std::future::pending::<()>().await}}=>{kill_group(pid);let _=child.wait().await;Ok(("stopped","frozen wall budget exhausted"))},
                     status=child.wait()=>status.map(|s|if s.success(){("completed","exit 0")}else{("failed","nonzero exit")}),
                     _=token.cancelled()=>{kill_group(pid);let _=child.wait().await;Ok(("stopped","exact resource stop"))},
                     _=daemon.shutdown.cancelled()=>{kill_group(pid);let _=child.wait().await;Ok(("stopped","daemon shutdown"))},
@@ -111,66 +120,145 @@ impl DaemonState {
             lease.disarm();
             let (state,reason)=status.unwrap_or(("failed","wait failed"));
             if outcome_out.is_err()||outcome_err.is_err(){tracing::warn!(resource_id=id.0,"后台日志持久化失败");}
-            if let Err(error)=daemon.run_store.update_resource(&owner,id,state,None,Some(reason)){tracing::warn!(resource_id=id.0,error=%error,"后台资源结算被拒绝");}
+            if let Err(error)=daemon.resource_store.update_run_resource(&task_envelope,id,state,None,Some(reason)).await{tracing::warn!(resource_id=id.0,error=%error,"后台资源结算被拒绝");}
             daemon.resource_tokens.lock().await.remove(&id);daemon.run_coordinator.queue_notify.notify_waiters();
         }).await;
         if !admitted {
             self.resource_tokens.lock().await.remove(&id);
-            self.run_store.update_resource(
-                &record.owner,
-                id,
-                "orphaned",
-                None,
-                Some("supervisor shutdown"),
-            )?;
+            self.resource_store
+                .update_run_resource(&envelope, id, "orphaned", None, Some("supervisor shutdown"))
+                .await?;
             bail!("daemon 正在关闭");
         }
-        Ok(self.run_store.read_resource(id)?)
+        Ok(self
+            .resource_store
+            .read_resource_record(
+                &envelope.scope,
+                &envelope.owner.session_key,
+                &envelope.owner.session_lifetime_id,
+                id,
+            )
+            .await?)
     }
+    pub(crate) async fn stop_resource_execution(
+        &self,
+        envelope: &EnterpriseOwnerEnvelope,
+        id: ResourceId,
+    ) -> Result<ResourceRecord> {
+        let record = self
+            .resource_store
+            .read_resource_record(
+                &envelope.scope,
+                &envelope.owner.session_key,
+                &envelope.owner.session_lifetime_id,
+                id,
+            )
+            .await?;
+        record.owner.fence(&envelope.owner)?;
+        if let Some(token) = self.resource_tokens.lock().await.get(&id).cloned() {
+            self.resource_store
+                .update_run_resource(envelope, id, "stopping", None, None)
+                .await?;
+            token.cancel();
+        } else if matches!(record.state.as_str(), "starting" | "running" | "stopping") {
+            return Ok(self
+                .resource_store
+                .update_run_resource(
+                    envelope,
+                    id,
+                    "orphaned",
+                    None,
+                    Some("无法证明当前进程身份，未发送kill"),
+                )
+                .await?);
+        }
+        Ok(self
+            .resource_store
+            .read_resource_record(
+                &envelope.scope,
+                &envelope.owner.session_key,
+                &envelope.owner.session_lifetime_id,
+                id,
+            )
+            .await?)
+    }
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn stop_resource(
         &self,
         owner: &ExactOwner,
         id: ResourceId,
     ) -> Result<ResourceRecord> {
-        let record = self.run_store.read_resource(id)?;
-        record.owner.fence(owner)?;
-        if let Some(token) = self.resource_tokens.lock().await.get(&id).cloned() {
-            self.run_store
-                .update_resource(owner, id, "stopping", None, None)?;
-            token.cancel();
-        } else if matches!(record.state.as_str(), "starting" | "running" | "stopping") {
-            return Ok(self.run_store.update_resource(
-                owner,
-                id,
-                "orphaned",
-                None,
-                Some("无法证明当前进程身份，未发送 kill"),
-            )?);
-        }
-        Ok(self.run_store.read_resource(id)?)
+        self.stop_resource_execution(
+            &EnterpriseOwnerEnvelope {
+                scope: self.scope(),
+                owner: owner.clone(),
+            },
+            id,
+        )
+        .await
     }
-    pub(crate) async fn wait_resource(
+    pub(crate) async fn wait_resource_scoped(
         &self,
+        scope: &TenantContext,
+        key: &SessionKey,
+        life: &SessionLifetimeId,
         id: ResourceId,
         timeout: Duration,
     ) -> Result<ResourceRecord> {
         let deadline = tokio::time::Instant::now() + timeout.min(Duration::from_secs(60));
         loop {
             let notified = self.run_coordinator.queue_notify.notified();
-            let record = self.run_store.read_resource(id)?;
+            let record = self
+                .resource_store
+                .read_resource_record(scope, key, life, id)
+                .await?;
             if !matches!(record.state.as_str(), "starting" | "running" | "stopping") {
                 return Ok(record);
             }
             if tokio::time::timeout_at(deadline, notified).await.is_err() {
-                return Ok(self.run_store.read_resource(id)?);
+                return Ok(self
+                    .resource_store
+                    .read_resource_record(scope, key, life, id)
+                    .await?);
             }
         }
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) async fn start_background(
+        self: &Arc<Self>,
+        owner: ExactOwner,
+        command: String,
+    ) -> Result<ResourceRecord> {
+        self.start_background_execution(
+            EnterpriseOwnerEnvelope {
+                scope: self.scope(),
+                owner,
+            },
+            command,
+        )
+        .await
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) async fn wait_resource(
+        &self,
+        id: ResourceId,
+        timeout: Duration,
+    ) -> Result<ResourceRecord> {
+        let record = self.legacy_run_store().read_resource(id)?;
+        self.wait_resource_scoped(
+            &self.scope(),
+            &record.owner.session_key,
+            &record.owner.session_lifetime_id,
+            id,
+            timeout,
+        )
+        .await
     }
 }
 async fn drain(
     mut reader: impl AsyncRead + Unpin,
     daemon: Arc<DaemonState>,
-    owner: ExactOwner,
+    envelope: EnterpriseOwnerEnvelope,
     id: ResourceId,
     label: &str,
 ) -> Result<()> {
@@ -182,11 +270,15 @@ async fn drain(
             break;
         }
         if error.is_none() {
-            if let Err(failure) = daemon.run_store.append_resource_log(
-                &owner,
-                id,
-                &format!("[{label}] {}", String::from_utf8_lossy(&chunk[..count])),
-            ) {
+            if let Err(failure) = daemon
+                .resource_store
+                .append_run_resource_log(
+                    &envelope,
+                    id,
+                    &format!("[{label}] {}", String::from_utf8_lossy(&chunk[..count])),
+                )
+                .await
+            {
                 error = Some(failure);
             } else {
                 daemon.run_coordinator.queue_notify.notify_waiters();
@@ -241,15 +333,24 @@ impl Tool for ResourceTool {
             .get()
             .and_then(Weak::upgrade)
             .context("资源 daemon 尚未就绪")?;
-        let (_, owner) =
-            agent_runtime::loop_engine::current_session_repository().context("要求 exact owner")?;
+        let envelope = agent_runtime::loop_engine::current_execution_envelope()
+            .context("资源工具要求固定准入proof")?;
+        let owner = &envelope.owner;
         if self.name != "resource_list" {
             let id = ResourceId(
                 args.get("resource_id")
                     .and_then(Value::as_u64)
                     .context("缺少 resource_id")?,
             );
-            let resource = daemon.run_store.read_resource(id)?;
+            let resource = daemon
+                .resource_store
+                .read_resource_record(
+                    &envelope.scope,
+                    &owner.session_key,
+                    &owner.session_lifetime_id,
+                    id,
+                )
+                .await?;
             if resource.owner.session_key != owner.session_key
                 || resource.owner.session_lifetime_id != owner.session_lifetime_id
             {
@@ -273,35 +374,60 @@ impl Tool for ResourceTool {
             .get()
             .and_then(Weak::upgrade)
             .context("资源 daemon 尚未就绪")?;
-        let (_, owner) =
-            agent_runtime::loop_engine::current_session_repository().context("要求 exact owner")?;
+        let envelope = agent_runtime::loop_engine::current_execution_envelope()
+            .context("资源工具要求固定准入proof")?;
+        let owner = &envelope.owner;
         if self.name == "resource_list" {
-            return Ok(serde_json::to_string(&daemon.run_store.list_resources(
-                &owner.session_lifetime_id,
-                ResourceId(0),
-                100,
-            )?)?);
+            return Ok(serde_json::to_string(
+                &daemon
+                    .resource_store
+                    .read_resource_page(
+                        &envelope.scope,
+                        &owner.session_key,
+                        &owner.session_lifetime_id,
+                        ResourceId(0),
+                        100,
+                    )
+                    .await?,
+            )?);
         }
         let id = ResourceId(
             args.get("resource_id")
                 .and_then(Value::as_u64)
                 .context("缺少 resource_id")?,
         );
-        let resource = daemon.run_store.read_resource(id)?;
+        let resource = daemon
+            .resource_store
+            .read_resource_record(
+                &envelope.scope,
+                &owner.session_key,
+                &owner.session_lifetime_id,
+                id,
+            )
+            .await?;
         let result = match self.name {
             "resource_status" => serde_json::to_value(resource)?,
             "resource_logs" => serde_json::to_value(
-                daemon.run_store.resource_logs(
-                    id,
-                    args.get("after_cursor")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0),
-                    20,
-                )?,
+                daemon
+                    .resource_store
+                    .read_resource_log_page(
+                        &envelope.scope,
+                        &owner.session_key,
+                        &owner.session_lifetime_id,
+                        id,
+                        args.get("after_cursor")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0),
+                        20,
+                    )
+                    .await?,
             )?,
             "resource_wait" => serde_json::to_value(
                 daemon
-                    .wait_resource(
+                    .wait_resource_scoped(
+                        &envelope.scope,
+                        &owner.session_key,
+                        &owner.session_lifetime_id,
                         id,
                         Duration::from_millis(
                             args.get("timeout_ms")
@@ -312,9 +438,17 @@ impl Tool for ResourceTool {
                     )
                     .await?,
             )?,
-            "resource_stop" => {
-                serde_json::to_value(daemon.stop_resource(&resource.owner, id).await?)?
-            }
+            "resource_stop" => serde_json::to_value(
+                daemon
+                    .stop_resource_execution(
+                        &EnterpriseOwnerEnvelope {
+                            scope: envelope.scope.clone(),
+                            owner: resource.owner.clone(),
+                        },
+                        id,
+                    )
+                    .await?,
+            )?,
             _ => bail!("未知资源工具"),
         };
         Ok(result.to_string())
@@ -347,12 +481,12 @@ impl Tool for BackgroundTool {
             .get()
             .and_then(Weak::upgrade)
             .context("后台 daemon 尚未就绪")?;
-        let (_, owner) =
-            agent_runtime::loop_engine::current_session_repository().context("要求 exact owner")?;
+        let envelope = agent_runtime::loop_engine::current_execution_envelope()
+            .context("资源工具要求固定准入proof")?;
         let snapshot = daemon
-            .run_store
-            .run_snapshot(&owner.run_id)?
-            .context("缺少 RunSnapshot")?;
+            .resource_store
+            .read_resource_settings(&envelope)
+            .await?;
         if snapshot.sandbox_effective != "native" {
             bail!("此后台执行接口只支持明确的 Native backend");
         }
@@ -374,12 +508,12 @@ impl Tool for BackgroundTool {
             .get()
             .and_then(Weak::upgrade)
             .context("后台 daemon 尚未就绪")?;
-        let (_, owner) =
-            agent_runtime::loop_engine::current_session_repository().context("要求 exact owner")?;
+        let envelope = agent_runtime::loop_engine::current_execution_envelope()
+            .context("资源工具要求固定准入proof")?;
         Ok(serde_json::to_string(
             &daemon
-                .start_background(
-                    owner,
+                .start_background_execution(
+                    envelope,
                     args.get("command")
                         .and_then(Value::as_str)
                         .context("缺少 command")?

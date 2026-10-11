@@ -1,0 +1,38 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.55s
+     Running tests/run_turn_contract.rs (target/debug/deps/run_turn_contract-f4d8aa1774b2031e)
+
+running 15 tests
+test local_turn_caller_cannot_stage_plan_in_foreign_legacy_scope ... ok
+test local_turn_caller_cannot_begin_plan_execution_in_foreign_legacy_scope ... ok
+test local_turn_caller_cannot_reject_tool_exchange_in_foreign_legacy_scope ... ok
+test local_turn_caller_cannot_read_plan_in_foreign_legacy_scope ... ok
+test local_turn_caller_cannot_append_transcript_in_foreign_legacy_scope ... ok
+test local_turn_caller_cannot_stage_assistant_in_foreign_legacy_scope ... ok
+test native_plan_and_output_corruption_fail_closed_before_reading_unbounded_saved_json ... ok
+test native_turn_input_budgets_and_legacy_plan_readback_do_not_create_or_overwrite_facts ... FAILED
+test rejected_exchange_keeps_original_not_executed_receipts_and_never_prepares_an_effect ... ok
+test turn_methods_deny_all_scope_and_fixed_owner_dimensions_without_creating_any_stage ... ok
+test native_turn_every_method_rechecks_frozen_revocation_and_expired_proof_without_acquiring_new_epoch ... ok
+test original_turn_commit_publishes_stages_and_transcript_once_and_survives_reopen ... ok
+test two_original_connections_plan_cas_and_transcript_replay_share_one_fact ... ok
+test original_turn_faults_roll_back_each_mutation_without_new_clock_or_partial_exchange ... ok
+test native_turn_waiting_for_real_sqlite_write_lock_keeps_timer_responsive ... ok
+
+failures:
+
+---- native_turn_input_budgets_and_legacy_plan_readback_do_not_create_or_overwrite_facts stdout ----
+
+thread 'native_turn_input_budgets_and_legacy_plan_readback_do_not_create_or_overwrite_facts' panicked at tests/run_turn_contract.rs:683:5:
+assertion `left == right` failed
+  left: 16
+ right: 15
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    native_turn_input_budgets_and_legacy_plan_readback_do_not_create_or_overwrite_facts
+
+test result: FAILED. 14 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.70s
+
+error: test failed, to rerun pass `--test run_turn_contract`

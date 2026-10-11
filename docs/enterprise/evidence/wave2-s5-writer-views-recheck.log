@@ -1,0 +1,92 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.56s
+     Running tests/runtime_contract.rs (target/debug/deps/runtime_contract-ef559da8ec38e611)
+
+running 1 test
+test native_writer_health_six_projections_and_graceful_restart_share_database_facts ... FAILED
+
+failures:
+
+---- native_writer_health_six_projections_and_graceful_restart_share_database_facts stdout ----
+
+thread 'native_writer_health_six_projections_and_graceful_restart_share_database_facts' panicked at tests/runtime_contract.rs:64:18:
+ACP 连接提前终止
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/6b00bc3880198600130e1cf62b8f8a93494488cc/library/std/src/panicking.rs:697:5
+   1: core::panicking::panic_fmt
+             at /rustc/6b00bc3880198600130e1cf62b8f8a93494488cc/library/core/src/panicking.rs:75:14
+   2: core::panicking::panic_display
+             at /rustc/6b00bc3880198600130e1cf62b8f8a93494488cc/library/core/src/panicking.rs:269:5
+   3: core::option::expect_failed
+             at /rustc/6b00bc3880198600130e1cf62b8f8a93494488cc/library/core/src/option.rs:2049:5
+   4: core::option::Option<T>::expect
+             at /rustc/6b00bc3880198600130e1cf62b8f8a93494488cc/library/core/src/option.rs:958:21
+   5: runtime_contract::AcpStdioContract::next::{{closure}}
+             at ./tests/runtime_contract.rs:59:14
+   6: runtime_contract::AcpStdioContract::query::{{closure}}
+             at ./tests/runtime_contract.rs:73:37
+   7: runtime_contract::native_writer_health_six_projections_and_graceful_restart_share_database_facts::{{closure}}::{{closure}}
+             at ./tests/runtime_contract.rs:3266:63
+   8: <tokio::time::timeout::Timeout<T> as core::future::future::Future>::poll
+             at /Users/pilot/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/tokio-1.53.1/src/time/timeout.rs:217:33
+   9: runtime_contract::native_writer_health_six_projections_and_graceful_restart_share_database_facts::{{closure}}
+             at ./tests/runtime_contract.rs:3301:8
+  10: <core::pin::Pin<P> as core::future::future::Future>::poll
+             at /rustc/6b00bc3880198600130e1cf62b8f8a93494488cc/library/core/src/future/future.rs:124:9
+  11: <core::pin::Pin<P> as core::future::future::Future>::poll
+             at /rustc/6b00bc3880198600130e1cf62b8f8a93494488cc/library/core/src/future/future.rs:124:9
+  12: tokio::runtime::scheduler::current_thread::CoreGuard::block_on::{{closure}}::{{closure}}::{{closure}}
+             at /Users/pilot/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:830:54
+  13: tokio::task::coop::with_budget
+             at /Users/pilot/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/tokio-1.53.1/src/task/coop/mod.rs:167:5
+  14: tokio::task::coop::budget
+             at /Users/pilot/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/tokio-1.53.1/src/task/coop/mod.rs:133:5
+  15: tokio::runtime::scheduler::current_thread::CoreGuard::block_on::{{closure}}::{{closure}}
+             at /Users/pilot/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:830:25
+  16: tokio::runtime::scheduler::current_thread::Context::enter
+             at /Users/pilot/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:488:19
+  17: tokio::runtime::scheduler::current_thread::CoreGuard::block_on::{{closure}}
+             at /Users/pilot/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:829:36
+  18: tokio::runtime::scheduler::current_thread::CoreGuard::enter::{{closure}}
+             at /Users/pilot/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:906:68
+  19: tokio::runtime::context::scoped::Scoped<T>::set
+             at /Users/pilot/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/tokio-1.53.1/src/runtime/context/scoped.rs:40:9
+  20: tokio::runtime::context::set_scheduler::{{closure}}
+             at /Users/pilot/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/tokio-1.53.1/src/runtime/context.rs:187:26
+  21: std::thread::local::LocalKey<T>::try_with
+             at /rustc/6b00bc3880198600130e1cf62b8f8a93494488cc/library/std/src/thread/local.rs:315:12
+  22: std::thread::local::LocalKey<T>::with
+             at /rustc/6b00bc3880198600130e1cf62b8f8a93494488cc/library/std/src/thread/local.rs:279:15
+  23: tokio::runtime::context::set_scheduler
+             at /Users/pilot/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/tokio-1.53.1/src/runtime/context.rs:187:9
+  24: tokio::runtime::scheduler::current_thread::CoreGuard::enter
+             at /Users/pilot/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:906:27
+  25: tokio::runtime::scheduler::current_thread::CoreGuard::block_on
+             at /Users/pilot/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:817:19
+  26: tokio::runtime::scheduler::current_thread::CurrentThread::block_on::{{closure}}
+             at /Users/pilot/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:218:28
+  27: tokio::runtime::context::runtime::enter_runtime
+             at /Users/pilot/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/tokio-1.53.1/src/runtime/context/runtime.rs:65:16
+  28: tokio::runtime::scheduler::current_thread::CurrentThread::block_on
+             at /Users/pilot/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:206:9
+  29: tokio::runtime::runtime::Runtime::block_on_inner
+             at /Users/pilot/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/tokio-1.53.1/src/runtime/runtime.rs:374:47
+  30: tokio::runtime::runtime::Runtime::block_on
+             at /Users/pilot/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/tokio-1.53.1/src/runtime/runtime.rs:343:13
+  31: runtime_contract::native_writer_health_six_projections_and_graceful_restart_share_database_facts
+             at ./tests/runtime_contract.rs:3260:5
+  32: runtime_contract::native_writer_health_six_projections_and_graceful_restart_share_database_facts::{{closure}}
+             at ./tests/runtime_contract.rs:3259:90
+  33: core::ops::function::FnOnce::call_once
+             at /rustc/6b00bc3880198600130e1cf62b8f8a93494488cc/library/core/src/ops/function.rs:250:5
+  34: core::ops::function::FnOnce::call_once
+             at /rustc/6b00bc3880198600130e1cf62b8f8a93494488cc/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+
+failures:
+    native_writer_health_six_projections_and_graceful_restart_share_database_facts
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 36 filtered out; finished in 9.03s
+
+error: test failed, to rerun pass `--test runtime_contract`

@@ -1,0 +1,11 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+error[E0308]: mismatched types
+   --> tests/writer_contract.rs:778:52
+    |
+778 |         assert!(!messages.iter().any(|m| m.role == "assistant"));
+    |                                          ------    ^^^^^^^^^^^ expected `Role`, found `&str`
+    |                                          |
+    |                                          expected because this is `agent_core::Role`
+
+For more information about this error, try `rustc --explain E0308`.
+error: could not compile `my-agent` (test "writer_contract") due to 1 previous error

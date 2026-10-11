@@ -1,0 +1,72 @@
+   Compiling agent-core v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/core)
+   Compiling agent-daemon-protocol v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-protocol)
+   Compiling agent-pack v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/pack)
+   Compiling agent-identity v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/identity)
+   Compiling agent-storage-ports v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-ports)
+   Compiling agent-plugin v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/plugin)
+   Compiling agent-memory v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/memory)
+   Compiling agent-sandbox v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/sandbox)
+   Compiling agent-context v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/context)
+   Compiling agent-policy v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/policy)
+   Compiling agent-workflow v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/workflow)
+   Compiling agent-artifact v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/artifact)
+   Compiling agent-registry v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/registry)
+   Compiling agent-daemon-client v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-client)
+   Compiling agent-entry-support v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/entry-support)
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling agent-storage-postgres v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-postgres)
+   Compiling agent-cli v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/cli)
+   Compiling agent-acp v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/acp)
+   Compiling agent-gateway v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/gateway)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+warning: fields `run_store` and `maintenance_store` are never read
+  --> crates/daemon/src/lib.rs:55:16
+   |
+41 | pub struct DaemonState {
+   |            ----------- fields in this struct
+...
+55 |     pub(crate) run_store: Option<Arc<dyn ControlRepository>>,
+   |                ^^^^^^^^^
+...
+60 |     pub(crate) maintenance_store: Option<Arc<dyn MaintenanceRepository>>,
+   |                ^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: methods `legacy_run_store` and `legacy_maintenance_store` are never used
+   --> crates/daemon/src/lib.rs:957:8
+    |
+956 | impl DaemonState {
+    | ---------------- methods in this implementation
+957 |     fn legacy_run_store(&self) -> &Arc<dyn ControlRepository> {
+    |        ^^^^^^^^^^^^^^^^
+...
+960 |     fn legacy_maintenance_store(&self) -> &Arc<dyn MaintenanceRepository> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `stop_resource`, `start_background`, and `wait_resource` are never used
+   --> crates/daemon/src/resources.rs:186:25
+    |
+36  | impl DaemonState {
+    | ---------------- methods in this implementation
+...
+186 |     pub(crate) async fn stop_resource(
+    |                         ^^^^^^^^^^^^^
+...
+227 |     pub(crate) async fn start_background(
+    |                         ^^^^^^^^^^^^^^^^
+...
+242 |     pub(crate) async fn wait_resource(
+    |                         ^^^^^^^^^^^^^
+
+warning: `agent-daemon` (lib) generated 3 warnings
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 17s
+     Running tests/workflow_contract.rs (target/debug/deps/workflow_contract-19d63e2865ec85c3)
+
+running 1 test
+test sqlite_workflow_native_fence ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.07s
+

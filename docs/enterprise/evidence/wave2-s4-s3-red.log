@@ -1,0 +1,20 @@
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 14.50s
+     Running tests/runtime_contract.rs (target/debug/deps/runtime_contract-5f9e2fbd50e087e1)
+
+running 1 test
+
+thread 'object_artifacts_use_original_tool_receipt_and_restart_without_provider_replay' panicked at tests/runtime_contract.rs:3130:9:
+S3 配置必须命中真实对象 backend，不能静默生成 Local 路径：/private/var/folders/kz/d16_93b90sv94mfdrvr3_7xc0000gn/T/my-agent-restart-36490-0/.my-agent/runtime.artifacts/sha256-d5036704053888a7f3f0f354e91cc2dd36c7dccc03a361325a120dcd5dd86039.txt
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test object_artifacts_use_original_tool_receipt_and_restart_without_provider_replay ... FAILED
+
+failures:
+
+failures:
+    object_artifacts_use_original_tool_receipt_and_restart_without_provider_replay
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 34 filtered out; finished in 1.42s
+
+error: test failed, to rerun pass `--test runtime_contract`

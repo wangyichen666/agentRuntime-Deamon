@@ -1,0 +1,58 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.40s
+     Running tests/hook_observation_contract.rs (target/debug/deps/hook_observation_contract-4cd8e1608e4d6c21)
+
+running 7 tests
+test pending_hook_publications_do_not_expose_foreign_lifecycle ... FAILED
+test hook_readback_does_not_create_a_new_snapshot_revision ... ok
+test saved_hook_publication_operation_must_match_original_sql_key ... FAILED
+test saved_hook_run_owner_must_match_canonical_run_incarnation ... FAILED
+test hook_history_foreign_must_be_forbidden_before_corrupt_private_json ... FAILED
+test hook_publication_ack_foreign_must_not_write_dispatched ... FAILED
+test saved_legal_hook_effect_has_whole_outcome_byte_budget ... FAILED
+
+failures:
+
+---- pending_hook_publications_do_not_expose_foreign_lifecycle stdout ----
+
+thread 'pending_hook_publications_do_not_expose_foreign_lifecycle' panicked at tests/hook_observation_contract.rs:43:5:
+不应交付外域待发布记录，实际行数 1
+
+---- saved_hook_publication_operation_must_match_original_sql_key stdout ----
+
+thread 'saved_hook_publication_operation_must_match_original_sql_key' panicked at tests/hook_observation_contract.rs:67:5:
+保存行身份不一致必须损坏，实际 Ok(1)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- saved_hook_run_owner_must_match_canonical_run_incarnation stdout ----
+
+thread 'saved_hook_run_owner_must_match_canonical_run_incarnation' panicked at tests/hook_observation_contract.rs:88:5:
+保存owner不能借另一generation背书，实际 Ok(1)
+
+---- hook_history_foreign_must_be_forbidden_before_corrupt_private_json stdout ----
+
+thread 'hook_history_foreign_must_be_forbidden_before_corrupt_private_json' panicked at tests/hook_observation_contract.rs:36:5:
+必须先拒绝范围，实际 Err(Protocol("expected ident at line 1 column 2"))
+
+---- hook_publication_ack_foreign_must_not_write_dispatched stdout ----
+
+thread 'hook_publication_ack_foreign_must_not_write_dispatched' panicked at tests/hook_observation_contract.rs:50:5:
+必须先拒绝范围，实际 Ok(())
+
+---- saved_legal_hook_effect_has_whole_outcome_byte_budget stdout ----
+
+thread 'saved_legal_hook_effect_has_whole_outcome_byte_budget' panicked at tests/hook_observation_contract.rs:78:5:
+整个结果也须SQL预算，实际 Ok(1)
+
+
+failures:
+    hook_history_foreign_must_be_forbidden_before_corrupt_private_json
+    hook_publication_ack_foreign_must_not_write_dispatched
+    pending_hook_publications_do_not_expose_foreign_lifecycle
+    saved_hook_publication_operation_must_match_original_sql_key
+    saved_hook_run_owner_must_match_canonical_run_incarnation
+    saved_legal_hook_effect_has_whole_outcome_byte_budget
+
+test result: FAILED. 1 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+
+error: test failed, to rerun pass `-p my-agent --test hook_observation_contract`

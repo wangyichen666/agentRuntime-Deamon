@@ -1,0 +1,23 @@
+   Compiling agent-gateway v0.1.0 (/private/var/folders/kz/d16_93b90sv94mfdrvr3_7xc0000gn/T/agent-enterprise-red-0ld9dhnx/repo/crates/gateway)
+   Compiling my-agent v0.1.0 (/private/var/folders/kz/d16_93b90sv94mfdrvr3_7xc0000gn/T/agent-enterprise-red-0ld9dhnx/repo)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.14s
+     Running tests/architecture_contract.rs (/Users/pilot/Documents/myproject/agent-rust/target/debug/deps/architecture_contract-16f2cb91acc5cfe9)
+
+running 1 test
+test enterprise_every_workspace_library_is_reviewed_and_checks_all_cargo_dependency_tables ... FAILED
+
+failures:
+
+---- enterprise_every_workspace_library_is_reviewed_and_checks_all_cargo_dependency_tables stdout ----
+
+thread 'enterprise_every_workspace_library_is_reviewed_and_checks_all_cargo_dependency_tables' panicked at tests/architecture_contract.rs:1045:9:
+gateway 有禁止依赖
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    enterprise_every_workspace_library_is_reviewed_and_checks_all_cargo_dependency_tables
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.02s
+
+error: test failed, to rerun pass `--test architecture_contract`

@@ -1,0 +1,23 @@
+   Compiling agent-gateway v0.1.0 (/private/var/folders/kz/d16_93b90sv94mfdrvr3_7xc0000gn/T/agent-enterprise-red-0ld9dhnx/repo/crates/gateway)
+   Compiling my-agent v0.1.0 (/private/var/folders/kz/d16_93b90sv94mfdrvr3_7xc0000gn/T/agent-enterprise-red-0ld9dhnx/repo)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.31s
+     Running tests/architecture_contract.rs (/Users/pilot/Documents/myproject/agent-rust/target/debug/deps/architecture_contract-099f64080a5785ad)
+
+running 1 test
+test enterprise_workspace_has_no_second_mutable_business_owner ... FAILED
+
+failures:
+
+---- enterprise_workspace_has_no_second_mutable_business_owner stdout ----
+
+thread 'enterprise_workspace_has_no_second_mutable_business_owner' panicked at tests/architecture_contract.rs:914:9:
+/private/var/folders/kz/d16_93b90sv94mfdrvr3_7xc0000gn/T/agent-enterprise-red-0ld9dhnx/repo/crates/gateway/src/serve.rs 有影子业务 owner：["EnterpriseRedShadowOwner.terminals"]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    enterprise_workspace_has_no_second_mutable_business_owner
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.31s
+
+error: test failed, to rerun pass `--test architecture_contract`

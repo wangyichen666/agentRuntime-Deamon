@@ -1,0 +1,20 @@
+    Checking agent-storage-ports v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-ports)
+    Checking agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+    Checking agent-artifact v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/artifact)
+    Checking agent-storage-postgres v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-postgres)
+    Checking agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+    Checking agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+    Checking my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Checking agent-cli v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/cli)
+error: using `clone` on type `RepositoryError` which implements the `Copy` trait
+   --> tests/run_attempt_contract.rs:518:36
+    |
+518 |             assert_eq!(result, Err(expected.clone()), "{fault}");
+    |                                    ^^^^^^^^^^^^^^^^ help: try removing the `clone` call: `expected`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#clone_on_copy
+    = note: `-D clippy::clone-on-copy` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::clone_on_copy)]`
+
+error: could not compile `my-agent` (test "run_attempt_contract") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

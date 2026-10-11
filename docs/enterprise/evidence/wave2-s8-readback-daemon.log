@@ -1,0 +1,39 @@
+   Compiling agent-core v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/core)
+   Compiling agent-daemon-protocol v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-protocol)
+   Compiling agent-storage-ports v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-ports)
+   Compiling agent-memory v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/memory)
+   Compiling agent-context v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/context)
+   Compiling agent-sandbox v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/sandbox)
+   Compiling agent-identity v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/identity)
+   Compiling agent-policy v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/policy)
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling agent-artifact v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/artifact)
+   Compiling agent-storage-postgres v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-postgres)
+   Compiling agent-daemon-client v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-client)
+   Compiling agent-entry-support v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/entry-support)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-gateway v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/gateway)
+   Compiling agent-cli v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/cli)
+   Compiling agent-acp v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/acp)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 40.81s
+     Running tests/runtime_contract.rs (target/debug/deps/runtime_contract-ef559da8ec38e611)
+
+running 1 test
+
+thread 'scoped_async_session_readback_is_consistent_across_six_entries_and_restart' panicked at tests/runtime_contract.rs:54:13:
+assertion `left == right` failed: ACP v2：{"jsonrpc":"2.0","id":10,"error":{"code":-32603,"message":"Internal error","data":"daemon RPC RpcError { code: -32602, message: \"daemon 协议错误：JSON-RPC 帧不是合法 JSON: unknown field `domain`, expected one of `schema_version`, `session_id`, `session_lifetime_id`, `snapshot_revision`, `metadata_revision`, `metadata`, `transcript_revision`, `projection_generation`, `history_mode`, `omitted`, `messages`, `message_ids`, `batch_ranges`, `active_owner`, `run_owners`, `active_runs`, `queue_rows`, `queue_cursor`, `pending_interactions`, `last_durable_terminal`, `current_plan`, `plan_digest`, `context_usage`\", data: None }"}}
+  left: Object {"code": Number(-32603), "message": String("Internal error"), "data": String("daemon RPC RpcError { code: -32602, message: \"daemon 协议错误：JSON-RPC 帧不是合法 JSON: unknown field `domain`, expected one of `schema_version`, `session_id`, `session_lifetime_id`, `snapshot_revision`, `metadata_revision`, `metadata`, `transcript_revision`, `projection_generation`, `history_mode`, `omitted`, `messages`, `message_ids`, `batch_ranges`, `active_owner`, `run_owners`, `active_runs`, `queue_rows`, `queue_cursor`, `pending_interactions`, `last_durable_terminal`, `current_plan`, `plan_digest`, `context_usage`\", data: None }")}
+ right: Object {"code": Number(-32041), "message": String("无权访问此域"), "data": Object {"domain": String("coordination"), "kind": String("forbidden"), "retryable": Bool(false), "safe_auto_retry": Bool(false), "recovery_action": String("contact_administrator")}}
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test scoped_async_session_readback_is_consistent_across_six_entries_and_restart ... FAILED
+
+failures:
+
+failures:
+    scoped_async_session_readback_is_consistent_across_six_entries_and_restart
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 40 filtered out; finished in 3.01s
+
+error: test failed, to rerun pass `--test runtime_contract`

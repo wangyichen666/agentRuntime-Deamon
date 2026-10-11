@@ -1,0 +1,19 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.23s
+     Running tests/artifact_contract.rs (target/debug/deps/artifact_contract-29882413c564e0d7)
+
+running 1 test
+
+thread 'artifact_invalid_database_reference_cannot_commit_a_terminal_tool_receipt' panicked at tests/artifact_contract.rs:291:5:
+摘要/大小不匹配时，不得发布原 tool terminal/ref
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test artifact_invalid_database_reference_cannot_commit_a_terminal_tool_receipt ... FAILED
+
+failures:
+
+failures:
+    artifact_invalid_database_reference_cannot_commit_a_terminal_tool_receipt
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.07s
+
+error: test failed, to rerun pass `--test artifact_contract`

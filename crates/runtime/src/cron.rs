@@ -17,7 +17,7 @@ use tracing::{debug, warn};
 use crate::context::{ContextConfig, ContextManager};
 use crate::loop_engine::{CancellationToken, LoopEngine};
 use crate::plan::PlanStore;
-use crate::provider::Provider;
+use crate::provider::{Provider, ProviderManager};
 use crate::safety::Approval;
 use crate::session::SessionStore;
 use crate::tools::ToolRegistry;
@@ -25,6 +25,7 @@ use crate::tools::ToolRegistry;
 const MAX_HISTORY: usize = 20;
 const CRON_SYSTEM_PROMPT: &str = "你正在执行个人 Agent 的无人值守定时任务。使用全新独立历史，只完成给定 prompt。所有工具仍受安全策略约束；任何需要人工审批的动作都会被拒绝，必须改用安全方案或清晰报告失败。";
 static NEXT_JOB_ID: AtomicU64 = AtomicU64::new(0);
+static NEXT_CRON_RUN_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -287,12 +288,33 @@ pub trait ScheduledJobRunner: Send + Sync {
     async fn run(&self, job: &CronJob) -> Result<String>;
 }
 
+#[derive(Clone)]
+pub struct CronRepositories {
+    pub execution: Arc<dyn agent_storage_ports::RunExecutionRepository>,
+    pub identity: Arc<dyn agent_storage_ports::IdentityReadRepository>,
+    pub attempts: Arc<dyn agent_storage_ports::RunAttemptRepository>,
+    pub tools: Arc<dyn agent_storage_ports::RunToolRepository>,
+    pub turns: Arc<dyn agent_storage_ports::RunTurnRepository>,
+    pub requests: Arc<dyn agent_storage_ports::RunContextRepository>,
+    pub discoveries: Arc<dyn agent_storage_ports::RunDiscoveryRepository>,
+    pub memories: Arc<dyn agent_storage_ports::ScopedMemoryRepository>,
+    pub hook_execution: Arc<dyn agent_storage_ports::HookExecutionRepository>,
+    pub verifier: Arc<dyn agent_core::AuthorizationVerifier>,
+}
 pub struct AgentCronRunner {
+    identity_binding: agent_core::RuntimeIdentity,
     provider: Arc<dyn Provider>,
     tools: ToolRegistry,
     workspace: PathBuf,
     context_config: ContextConfig,
     timeout: Duration,
+    repository: Option<CronRepositories>,
+    artifacts: Option<Arc<agent_artifact::ArtifactService>>,
+    provider_manager: Option<Arc<ProviderManager>>,
+    hooks: Option<(
+        Arc<crate::hooks::HookDispatcher>,
+        Arc<dyn crate::hooks::HookTaskOwner>,
+    )>,
 }
 
 impl AgentCronRunner {
@@ -309,98 +331,362 @@ impl AgentCronRunner {
             .map(Duration::from_secs)
             .unwrap_or_else(|| Duration::from_secs(600));
         Self {
+            identity_binding: agent_core::RuntimeIdentity::local_cron(),
             provider,
             tools,
             workspace,
             context_config,
             timeout,
+            repository: None,
+            artifacts: None,
+            provider_manager: None,
+            hooks: None,
         }
+    }
+    /// 原 daemon 的事实源、writer proof 与 artifact backend；独立历史仍属于新 native session。
+    pub fn with_canonical_execution<T>(
+        self,
+        repository: Arc<T>,
+        artifacts: Option<Arc<agent_artifact::ArtifactService>>,
+        verifier: Arc<dyn agent_core::AuthorizationVerifier>,
+    ) -> Self
+    where
+        T: agent_storage_ports::RunExecutionRepository
+            + agent_storage_ports::IdentityReadRepository
+            + agent_storage_ports::RunAttemptRepository
+            + agent_storage_ports::RunToolRepository
+            + agent_storage_ports::RunTurnRepository
+            + agent_storage_ports::RunContextRepository
+            + agent_storage_ports::ScopedMemoryRepository
+            + agent_storage_ports::HookExecutionRepository
+            + agent_storage_ports::RunDiscoveryRepository
+            + 'static,
+    {
+        self.with_canonical_ports(
+            CronRepositories {
+                execution: repository.clone(),
+                identity: repository.clone(),
+                attempts: repository.clone(),
+                tools: repository.clone(),
+                turns: repository.clone(),
+                requests: repository.clone(),
+                memories: repository.clone(),
+                hook_execution: repository.clone(),
+                discoveries: repository,
+                verifier,
+            },
+            artifacts,
+        )
+    }
+
+    pub fn with_canonical_ports(
+        mut self,
+        repositories: CronRepositories,
+        artifacts: Option<Arc<agent_artifact::ArtifactService>>,
+    ) -> Self {
+        self.repository = Some(repositories);
+        self.artifacts = artifacts;
+        self
+    }
+    /// 仅由启动组合提供独立Cron workload；job参数不包含主体或scope。
+    pub fn with_identity_binding(mut self, binding: agent_core::RuntimeIdentity) -> Result<Self> {
+        if binding.principal.kind != agent_core::SubjectKind::Workload {
+            return Err(agent_storage::RuntimeError::Authorization(
+                agent_core::AuthorizationError::Unauthenticated,
+            )
+            .into());
+        }
+        self.identity_binding = binding;
+        Ok(self)
+    }
+    pub fn with_hooks(
+        mut self,
+        dispatcher: Arc<crate::hooks::HookDispatcher>,
+        tasks: Arc<dyn crate::hooks::HookTaskOwner>,
+    ) -> Self {
+        self.hooks = Some((dispatcher, tasks));
+        self
+    }
+    fn hook_scope(
+        &self,
+        ports: &CronRepositories,
+        envelope: &agent_core::EnterpriseOwnerEnvelope,
+    ) -> Option<crate::hooks::HookScope> {
+        self.hooks
+            .as_ref()
+            .map(|(dispatcher, tasks)| crate::hooks::HookScope {
+                dispatcher: dispatcher.clone(),
+                execution: crate::hooks::HookExecutionContext {
+                    store: ports.hook_execution.clone(),
+                    scope: envelope.scope.clone(),
+                    envelope: Some(envelope.clone()),
+                    tasks: tasks.clone(),
+                },
+            })
+    }
+    async fn observe_terminal(
+        &self,
+        ports: &CronRepositories,
+        envelope: &agent_core::EnterpriseOwnerEnvelope,
+        status: agent_core::RunStatus,
+        content: Option<&str>,
+        cancel: &CancellationToken,
+    ) {
+        let Some(scope) = self.hook_scope(ports, envelope) else {
+            return;
+        };
+        let observation=crate::hooks::with_scope(scope,async {
+            if let Some(content)=content {use sha2::{Digest,Sha256};crate::hooks::current(agent_core::HookEvent::AssistantReply,"reply",serde_json::json!({"content_bytes":content.len(),"content_sha256":format!("{:x}",Sha256::digest(content.as_bytes()))}),cancel).await?;}
+            crate::hooks::current(agent_core::HookEvent::AfterTurn,"terminal",serde_json::json!({"status":status}),cancel).await?;
+            crate::hooks::current(agent_core::HookEvent::Notification,"terminal",serde_json::json!({"kind":"run_terminal","status":status}),cancel).await?;
+            crate::hooks::current(agent_core::HookEvent::Stop,"stop",serde_json::json!({"status":status,"continuation_allowed":false}),cancel).await?;
+            Ok::<(),anyhow::Error>(())
+        }).await;
+        if let Err(error) = observation {
+            tracing::warn!(%error,"Cron终态Hook观察失败，保留原run终态");
+        }
+    }
+    pub fn with_provider_manager(mut self, manager: Arc<ProviderManager>) -> Self {
+        self.provider_manager = Some(manager);
+        self
     }
 }
 
 #[async_trait]
 impl ScheduledJobRunner for AgentCronRunner {
     async fn run(&self, job: &CronJob) -> Result<String> {
+        use agent_core::*;
+        use agent_storage::RuntimeError;
+        let ports = self.repository.as_ref().ok_or(RuntimeError::Authorization(
+            AuthorizationError::Unauthenticated,
+        ))?;
+        let route = self
+            .provider_manager
+            .as_ref()
+            .map(|manager| manager.freeze(self.context_config.token_budget));
+        let provider = route
+            .as_ref()
+            .map(|route| route.primary())
+            .unwrap_or_else(|| self.provider.clone());
         let context = ContextManager::with_system_prompt(
-            self.provider.clone(),
+            provider.clone(),
             &self.workspace,
             self.context_config.clone(),
             Arc::new(PlanStore::memory_only()),
             CRON_SYSTEM_PROMPT,
         )?;
-        use agent_storage::{RunStore, SessionLifecycle, SessionQuery};
-        let key = agent_core::SessionKey(format!("session-cron-{}-{}.jsonl", job.id, unix_now()?));
-        let store = Arc::new(RunStore::open(
-            &self.workspace.join(".my-agent/runtime.sqlite3"),
-        )?);
-        let metadata = store.create_session(&key)?;
+        let occurrence = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("系统时间早于 UNIX_EPOCH")?
+            .as_nanos();
+        let key = agent_core::SessionKey(format!(
+            "session-cron-{}-{occurrence}-{}.jsonl",
+            job.id,
+            NEXT_CRON_RUN_ID.fetch_add(1, Ordering::Relaxed)
+        ));
         let tools = self.tools.frozen()?;
         let specs = tools.specs();
         let snapshot: agent_core::RunSnapshot = serde_json::from_value(serde_json::json!({
-            "tools":specs,"route":null,"cwd":self.workspace.to_string_lossy(),"permission_mode":"risk_approval",
+            "entry_channel":HookChannel::Cron,
+            "artifact_store_id":self.artifacts.as_ref().map(|s|s.store_id()),
+            "tools":specs,"route":route.as_ref().map(|r|&r.snapshot),"cwd":self.workspace.to_string_lossy(),"permission_mode":"risk_approval",
             "sandbox_requested":"native","sandbox_effective":"native","context_read_only":false,"max_tool_calls":null,
-            "context_token_budget":context.token_budget(),"context_policy_fingerprint":context.fingerprint(),"config_generation":0,
+            "context_token_budget":context.token_budget(),"context_policy_fingerprint":context.fingerprint(),"config_generation":route.as_ref().map_or(0,|r|r.snapshot.config_generation),
             "tool_catalog_digest":format!("{:x}",sha2::Sha256::digest(serde_json::to_vec(&specs)?))
         }))?;
-        let admitted = store.admit_run(
-            &agent_core::RunAdmission {
-                session_key: key.clone(),
-                expected_lifetime: Some(metadata.lifetime),
-                request_id: agent_core::RequestId::String(format!("cron:{}", key.0)),
-                input: job.prompt.clone(),
-                mode: agent_core::AdmissionMode::Queue,
-                plan_execution: None,
+        let identity = ports
+            .identity
+            .read_identity(
+                &self.identity_binding.scope,
+                &self.identity_binding.principal.subject_id,
+            )
+            .await
+            .map_err(RuntimeError::from)?;
+        if identity.scope != self.identity_binding.scope
+            || identity.principal.kind != SubjectKind::Workload
+            || identity.principal.subject_id != self.identity_binding.principal.subject_id
+            || (self.identity_binding.scope != TenantContext::local()
+                && identity.principal != self.identity_binding.principal)
+        {
+            return Err(RuntimeError::Authorization(AuthorizationError::Unauthenticated).into());
+        }
+        let request_id = RequestId::String(format!("cron:{}", key.0));
+        let authorization = AuthorizationRequest {
+            context: RequestContext {
+                scope: identity.scope.clone(),
+                principal: identity.principal.clone(),
+                request_id: request_id.clone(),
+                trace: TraceContext {
+                    trace_id: format!("cron:{}", key.0),
+                },
             },
-            &snapshot,
-        )?;
-        let run = match admitted {
-            agent_core::Admission::New(run) | agent_core::Admission::Existing(run) => run,
+            expected_policy: identity.policy.version,
+            action: Action::SessionPrompt,
+            attributes: AuthorizationAttributes {
+                workspace: snapshot.cwd.clone(),
+                entry_channel: HookChannel::Cron,
+                tool_effect: None,
+                timestamp_ms: 0,
+                network: NetworkBoundary::None,
+            },
         };
-        anyhow::ensure!(
-            store.try_start_queued(&run.run_id)?,
-            "cron session writer 忙碌"
-        );
+        let (admitted, owner) = ports
+            .execution
+            .admit_workload_run(
+                &RunAdmission {
+                    workflow_node: None,
+                    session_key: key.clone(),
+                    expected_lifetime: None,
+                    request_id,
+                    input: job.prompt.clone(),
+                    mode: AdmissionMode::RejectIfBusy,
+                    plan_execution: None,
+                },
+                &snapshot,
+                &authorization,
+                ports.verifier.clone(),
+            )
+            .await
+            .map_err(RuntimeError::from)?;
+        let run = match admitted {
+            Admission::New(run) | Admission::Existing(run) => run,
+        };
+        let envelope = EnterpriseOwnerEnvelope {
+            scope: identity.scope,
+            owner,
+        };
+        if !ports
+            .execution
+            .start_queued_run(&envelope)
+            .await
+            .map_err(RuntimeError::from)?
+        {
+            return Err(RuntimeError::Coordination(CoordinationError::Conflict).into());
+        }
         let session = Arc::new(SessionStore::from_env(&self.workspace).open_known_session(&key.0)?);
-        let owner = store.run_owner(&run.run_id)?;
-        let session = Arc::new(session.with_trace_lifetime(&owner.session_lifetime_id)?);
-        let runner = LoopEngine::new(self.provider.clone(), tools, context, session);
-        let mut history = store.session_snapshot(&key)?.messages;
-        let result = tokio::time::timeout(
-            self.timeout,
-            crate::loop_engine::with_tool_audit(
-                store.clone(),
-                run.run_id.clone(),
-                runner.run_turn(&mut history, job.prompt.clone()),
-            ),
-        )
-        .await;
+        let session = Arc::new(session.with_trace_lifetime(&envelope.owner.session_lifetime_id)?);
+        let runner = LoopEngine::new(provider, tools, context, session)
+            .with_artifact_service(self.artifacts.clone());
+        let runner = match route {
+            Some(route) => runner.with_route(route),
+            None => runner,
+        };
+        let mut history = ports
+            .requests
+            .read_run_request_source(&envelope, "default", "initial-cron-history")
+            .await
+            .map_err(RuntimeError::from)?
+            .snapshot
+            .messages;
+        let cancellation = CancellationToken::new();
+        let execute = crate::loop_engine::with_native_execution(
+            envelope.clone(),
+            crate::loop_engine::NativeExecutionPorts {
+                attempts: ports.attempts.clone(),
+                tools: ports.tools.clone(),
+                turns: ports.turns.clone(),
+                requests: ports.requests.clone(),
+                discoveries: ports.discoveries.clone(),
+                memories: ports.memories.clone(),
+            },
+            async {
+                if let Some(scope) = self.hook_scope(ports, &envelope) {
+                    crate::hooks::with_scope(
+                        scope,
+                        runner.run_turn_with_events(
+                            &mut history,
+                            job.prompt.clone(),
+                            None,
+                            cancellation.clone(),
+                        ),
+                    )
+                    .await
+                } else {
+                    runner
+                        .run_turn_with_events(
+                            &mut history,
+                            job.prompt.clone(),
+                            None,
+                            cancellation.clone(),
+                        )
+                        .await
+                }
+            },
+        );
+        let result = tokio::time::timeout(self.timeout, execute).await;
         match result {
             Ok(Ok(content)) => {
-                store.finish(
-                    &run.run_id,
-                    agent_core::RunStatus::Completed,
+                let settled = ports
+                    .execution
+                    .commit_run_turn(
+                        &envelope,
+                        &TurnCommit {
+                            owner: envelope.owner.clone(),
+                            status: RunStatus::Completed,
+                            content: Some(content.clone()),
+                            error: None,
+                        },
+                    )
+                    .await
+                    .map_err(RuntimeError::from)?;
+                if settled.status != RunStatus::Completed {
+                    return Err(RunOutcomeUnknown { run_id: run.run_id }.into());
+                }
+                self.observe_terminal(
+                    ports,
+                    &envelope,
+                    settled.status,
                     Some(&content),
-                    None,
-                )?;
+                    &cancellation,
+                )
+                .await;
                 Ok(content)
             }
             Ok(Err(error)) => {
-                store.finish(
-                    &run.run_id,
-                    agent_core::RunStatus::Failed,
-                    None,
-                    Some((-32002, &error.to_string())),
-                )?;
+                let settled = ports
+                    .execution
+                    .commit_run_turn(
+                        &envelope,
+                        &TurnCommit {
+                            owner: envelope.owner.clone(),
+                            status: RunStatus::Failed,
+                            content: None,
+                            error: Some((-32002, error.to_string())),
+                        },
+                    )
+                    .await
+                    .map_err(RuntimeError::from)?;
+                if settled.status != RunStatus::Failed {
+                    return Err(RunOutcomeUnknown { run_id: run.run_id }.into());
+                }
+                self.observe_terminal(ports, &envelope, settled.status, None, &cancellation)
+                    .await;
                 Err(error)
             }
-            Err(error) => {
-                store.finish(
-                    &run.run_id,
-                    agent_core::RunStatus::UnknownAfterRestart,
+            Err(_) => {
+                cancellation.cancel();
+                ports
+                    .execution
+                    .commit_run_turn(
+                        &envelope,
+                        &TurnCommit {
+                            owner: envelope.owner.clone(),
+                            status: RunStatus::UnknownAfterRestart,
+                            content: None,
+                            error: Some((-32002, "cron 超时，执行结果待核实".into())),
+                        },
+                    )
+                    .await
+                    .map_err(RuntimeError::from)?;
+                self.observe_terminal(
+                    ports,
+                    &envelope,
+                    RunStatus::UnknownAfterRestart,
                     None,
-                    Some((-32002, "cron 超时，执行结果待核实")),
-                )?;
-                Err(anyhow::anyhow!(error))
+                    &cancellation,
+                )
+                .await;
+                Err(RunOutcomeUnknown { run_id: run.run_id }.into())
             }
         }
     }
@@ -510,6 +796,9 @@ impl CronManager {
             attempts = attempts.saturating_add(1);
             match self.runner.run(&job).await {
                 Ok(result) => break (true, result),
+                Err(error) if cron_retry_requires_reconcile(&error) => {
+                    break (false, format!("{error:#}"));
+                }
                 Err(error) if attempts <= job.max_retries => {
                     let exponent = attempts.saturating_sub(1).min(20);
                     let delay = job.backoff_seconds.saturating_mul(1_u64 << exponent);
@@ -539,8 +828,28 @@ impl CronManager {
     }
 
     pub async fn keeps_daemon_alive(&self) -> bool {
-        self.heartbeat.is_some() || self.store.has_enabled_jobs().await
+        self.heartbeat.is_some()
+            || !self.running.lock().await.is_empty()
+            || self.store.has_enabled_jobs().await
     }
+}
+
+fn cron_retry_requires_reconcile(error: &anyhow::Error) -> bool {
+    if error
+        .downcast_ref::<agent_core::RunOutcomeUnknown>()
+        .is_some()
+    {
+        return true;
+    }
+    matches!(
+        error.downcast_ref::<agent_storage::RuntimeError>(),
+        Some(
+            agent_storage::RuntimeError::Authorization(_)
+                | agent_storage::RuntimeError::Coordination(_)
+                | agent_storage::RuntimeError::Persistence(_)
+                | agent_storage::RuntimeError::Artifact(_)
+        )
+    )
 }
 
 pub struct UnattendedApproval;
@@ -565,6 +874,7 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     use crate::provider::{Message, Response, ToolSpec};
+    use agent_storage_ports::SessionReadRepository;
 
     use super::*;
 
@@ -698,6 +1008,12 @@ mod tests {
             )
             .await
             .unwrap();
+        let canonical = Arc::new(
+            agent_storage::RunStore::open(&workspace.join(".my-agent/runtime.sqlite3"))
+                .unwrap()
+                .enable_session_writer()
+                .unwrap(),
+        );
         let runner = AgentCronRunner::new(
             Arc::new(TextProvider),
             ToolRegistry::new(),
@@ -709,13 +1025,21 @@ mod tests {
                 strong_compression_percent: 85,
                 summary_chunk_tokens: 100_000,
             },
-        );
+        )
+        .with_canonical_execution(canonical, None, Arc::new(agent_policy::PolicyEngine));
         assert_eq!(runner.run(&job).await.unwrap(), "scheduled-result");
         use agent_storage::{RunStore, SessionQuery};
         let repository = RunStore::open(&workspace.join(".my-agent/runtime.sqlite3")).unwrap();
         let sessions = repository.session_metadata_list().unwrap();
         assert_eq!(sessions.len(), 1);
-        let snapshot = repository.session_snapshot(&sessions[0].key).unwrap();
+        let snapshot = repository
+            .read_session(
+                &agent_core::TenantContext::local(),
+                &sessions[0].key,
+                agent_core::HistoryReadMode::Canonical,
+            )
+            .await
+            .unwrap();
         assert_eq!(snapshot.messages.len(), 2);
         assert_eq!(
             snapshot.messages[1].content.as_deref(),
@@ -758,5 +1082,350 @@ mod tests {
     fn accepts_standard_five_field_cron() {
         assert!(parse_five_field_cron("0 9 * * 1-5").is_ok());
         assert!(parse_five_field_cron("0 9 * *").is_err());
+    }
+    struct AmbiguousProvider {
+        calls: AtomicUsize,
+    }
+    #[async_trait]
+    impl Provider for AmbiguousProvider {
+        async fn chat(&self, _messages: &[Message], _tools: &[ToolSpec]) -> Result<Response> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                Ok(Response::ToolCalls(vec![agent_core::ToolCall {
+                    id: "effect-once".into(),
+                    name: "write_file".into(),
+                    arguments: serde_json::json!({}),
+                }]))
+            } else {
+                Ok(Response::Text("文本无法证明副作用结果".into()))
+            }
+        }
+    }
+    struct AmbiguousEffect {
+        path: PathBuf,
+        calls: Arc<AtomicUsize>,
+    }
+    #[async_trait]
+    impl crate::tools::Tool for AmbiguousEffect {
+        fn name(&self) -> &str {
+            "write_file"
+        }
+        fn description(&self) -> &str {
+            "写入测试文件后模拟外部结果丢失"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object","properties":{},"additionalProperties":false})
+        }
+        async fn execute(&self, _args: serde_json::Value) -> Result<String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            std::fs::write(&self.path, "只执行一次")?;
+            Err(agent_core::ToolOutcomeUnknown("受控丢失确认".into()).into())
+        }
+    }
+    #[tokio::test]
+    async fn native_cron_unknown_side_effect_is_not_success_and_is_not_retried() {
+        let workspace = workspace("canonical-unknown");
+        let repository = Arc::new(
+            agent_storage::RunStore::open(&workspace.join(".my-agent/runtime.sqlite3"))
+                .unwrap()
+                .enable_session_writer()
+                .unwrap(),
+        );
+        let store = Arc::new(CronStore::load(&workspace).await.unwrap());
+        let job = store
+            .add(
+                "unknown".into(),
+                ScheduleSpec::Interval { seconds: 86400 },
+                "执行一次".into(),
+                3,
+                0,
+            )
+            .await
+            .unwrap();
+        let provider = Arc::new(AmbiguousProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut tools = ToolRegistry::new();
+        tools.register(AmbiguousEffect {
+            path: workspace.join("only-once.txt"),
+            calls: calls.clone(),
+        });
+        let runner = Arc::new(
+            AgentCronRunner::new(
+                provider.clone(),
+                tools,
+                workspace.clone(),
+                ContextConfig {
+                    token_budget: 1_000_000,
+                    recent_messages: 100,
+                    mild_compression_percent: 60,
+                    strong_compression_percent: 85,
+                    summary_chunk_tokens: 100_000,
+                },
+            )
+            .with_canonical_execution(
+                repository.clone(),
+                None,
+                Arc::new(agent_policy::PolicyEngine),
+            ),
+        );
+        let manager = CronManager::new(store, runner, Duration::from_secs(1), Duration::ZERO, None);
+        let record = manager.run_now(&job.id).await.unwrap();
+        assert!(!record.success);
+        assert_eq!(record.attempts, 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("only-once.txt")).unwrap(),
+            "只执行一次"
+        );
+        use agent_storage::SessionQuery;
+        let sessions = repository.session_metadata_list().unwrap();
+        assert_eq!(sessions.len(), 1);
+        let db = rusqlite::Connection::open(workspace.join(".my-agent/runtime.sqlite3")).unwrap();
+        let status: String = db
+            .query_row("SELECT status FROM runs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "unknown_after_restart");
+        let outcome: String = db
+            .query_row("SELECT outcome FROM tool_executions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(outcome, "outcome_unknown");
+        let run: String = db
+            .query_row("SELECT id FROM runs", [], |r| r.get(0))
+            .unwrap();
+        let native = repository
+            .read_run(&agent_core::RunId(run))
+            .unwrap()
+            .unwrap();
+        assert_eq!(native.status, agent_core::RunStatus::UnknownAfterRestart);
+        assert!(provider.calls.load(Ordering::SeqCst) <= 2);
+        drop(db);
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+    #[tokio::test]
+    async fn immediate_repetitions_of_one_job_have_distinct_native_occurrences() {
+        let workspace = workspace("distinct-occurrences");
+        let store = CronStore::load(&workspace).await.unwrap();
+        let job = store
+            .add(
+                "fast".into(),
+                ScheduleSpec::Interval { seconds: 86400 },
+                "独立历史".into(),
+                0,
+                0,
+            )
+            .await
+            .unwrap();
+        let canonical = Arc::new(
+            agent_storage::RunStore::open(&workspace.join(".my-agent/runtime.sqlite3"))
+                .unwrap()
+                .enable_session_writer()
+                .unwrap(),
+        );
+        let runner = AgentCronRunner::new(
+            Arc::new(TextProvider),
+            ToolRegistry::new(),
+            workspace.clone(),
+            ContextConfig {
+                token_budget: 1_000_000,
+                recent_messages: 100,
+                mild_compression_percent: 60,
+                strong_compression_percent: 85,
+                summary_chunk_tokens: 100_000,
+            },
+        )
+        .with_canonical_execution(canonical, None, Arc::new(agent_policy::PolicyEngine));
+        runner.run(&job).await.unwrap();
+        runner.run(&job).await.unwrap();
+        use agent_storage::SessionQuery;
+        let repository =
+            agent_storage::RunStore::open(&workspace.join(".my-agent/runtime.sqlite3")).unwrap();
+        let sessions = repository.session_metadata_list().unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert_ne!(sessions[0].key, sessions[1].key);
+        for session in sessions {
+            assert_eq!(
+                repository
+                    .read_session(
+                        &agent_core::TenantContext::local(),
+                        &session.key,
+                        agent_core::HistoryReadMode::Canonical
+                    )
+                    .await
+                    .unwrap()
+                    .messages
+                    .len(),
+                2
+            );
+        }
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+    struct AdvancingOwnerProvider {
+        path: PathBuf,
+    }
+    #[async_trait]
+    impl Provider for AdvancingOwnerProvider {
+        async fn chat(&self, _: &[Message], _: &[ToolSpec]) -> Result<Response> {
+            let db = rusqlite::Connection::open(&self.path)?;
+            db.execute(
+                "UPDATE runs SET generation=generation+1 WHERE status='running'",
+                [],
+            )?;
+            Ok(Response::Text("迟到结果不能结算新generation".into()))
+        }
+    }
+    fn native_runner(
+        repository: Arc<agent_storage::RunStore>,
+        provider: Arc<dyn Provider>,
+        workspace: PathBuf,
+    ) -> AgentCronRunner {
+        AgentCronRunner::new(
+            provider,
+            ToolRegistry::new(),
+            workspace,
+            ContextConfig {
+                token_budget: 1_000_000,
+                recent_messages: 100,
+                mild_compression_percent: 60,
+                strong_compression_percent: 85,
+                summary_chunk_tokens: 100_000,
+            },
+        )
+        .with_canonical_execution(repository, None, Arc::new(agent_policy::PolicyEngine))
+    }
+    #[tokio::test]
+    async fn native_cron_late_result_cannot_finalize_a_later_owner_generation() {
+        let workspace = workspace("late-owner");
+        let path = workspace.join(".my-agent/runtime.sqlite3");
+        let repository = Arc::new(
+            agent_storage::RunStore::open(&path)
+                .unwrap()
+                .enable_session_writer()
+                .unwrap(),
+        );
+        let store = CronStore::load(&workspace).await.unwrap();
+        let job = store
+            .add(
+                "late".into(),
+                ScheduleSpec::Interval { seconds: 86400 },
+                "执行".into(),
+                0,
+                0,
+            )
+            .await
+            .unwrap();
+        let runner = native_runner(
+            repository.clone(),
+            Arc::new(AdvancingOwnerProvider { path: path.clone() }),
+            workspace.clone(),
+        );
+        assert!(runner.run(&job).await.is_err());
+        let db = rusqlite::Connection::open(path).unwrap();
+        let (status, terminals): (String, u64) = db
+            .query_row(
+                "SELECT status,(SELECT count(*) FROM events WHERE event='terminal') FROM runs",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "running", "旧执行体不能用重取owner结算新generation");
+        assert_eq!(terminals, 0);
+        db.execute_batch("UPDATE runs SET generation=generation-1")
+            .unwrap();
+        drop(db);
+        drop(runner);
+        drop(repository);
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+    #[tokio::test]
+    async fn native_cron_has_its_own_frozen_workload_authorization() {
+        let workspace = workspace("workload-identity");
+        let path = workspace.join(".my-agent/runtime.sqlite3");
+        let repository = Arc::new(
+            agent_storage::RunStore::open(&path)
+                .unwrap()
+                .enable_session_writer()
+                .unwrap(),
+        );
+        let store = CronStore::load(&workspace).await.unwrap();
+        let job = store
+            .add(
+                "workload".into(),
+                ScheduleSpec::Interval { seconds: 86400 },
+                "执行".into(),
+                0,
+                0,
+            )
+            .await
+            .unwrap();
+        let runner = native_runner(
+            repository.clone(),
+            Arc::new(TextProvider),
+            workspace.clone(),
+        );
+        assert_eq!(runner.run(&job).await.unwrap(), "scheduled-result");
+        let db = rusqlite::Connection::open(path).unwrap();
+        let count: u64 = db
+            .query_row(
+                "SELECT count(*) FROM run_authorizations WHERE subject_id='local-cron-workload'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "不能借Local人类身份或缺失授权代表后台workload");
+        drop(db);
+        drop(runner);
+        drop(repository);
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn native_cron_real_sqlite_write_lock_does_not_block_runtime_timer() {
+        let workspace = workspace("async-admission");
+        let path = workspace.join(".my-agent/runtime.sqlite3");
+        let repository = Arc::new(
+            agent_storage::RunStore::open(&path)
+                .unwrap()
+                .enable_session_writer()
+                .unwrap(),
+        );
+        let store = CronStore::load(&workspace).await.unwrap();
+        let job = store
+            .add(
+                "async".into(),
+                ScheduleSpec::Interval { seconds: 86400 },
+                "执行".into(),
+                0,
+                0,
+            )
+            .await
+            .unwrap();
+        let runner = native_runner(
+            repository.clone(),
+            Arc::new(TextProvider),
+            workspace.clone(),
+        );
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let holder = std::thread::spawn(move || {
+            let db = rusqlite::Connection::open(path).unwrap();
+            db.execute_batch("BEGIN IMMEDIATE").unwrap();
+            tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+            db.execute_batch("COMMIT").unwrap();
+        });
+        rx.recv().unwrap();
+        let started = std::time::Instant::now();
+        let (result, timer) = tokio::join!(runner.run(&job), async {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            started.elapsed()
+        });
+        holder.join().unwrap();
+        result.unwrap();
+        assert!(
+            timer < Duration::from_millis(150),
+            "timer被同步Cron数据库调用阻塞 {timer:?}"
+        );
+        drop(runner);
+        drop(repository);
+        let _ = std::fs::remove_dir_all(workspace);
     }
 }

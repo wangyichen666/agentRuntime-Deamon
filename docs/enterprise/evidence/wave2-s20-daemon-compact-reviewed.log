@@ -1,0 +1,13 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.20s
+     Running tests/runtime_contract.rs (target/debug/deps/runtime_contract-b79d5cf341cb953c)
+
+running 5 tests
+test acp_v2_long_prompt_and_native_compact_allow_exact_control_without_private_terminal ... ok
+test compact_memory_receipts_survive_restart_and_all_three_entries ... ok
+test automatic_compact_hooks_follow_real_intents_and_settlements ... ok
+test manual_compact_has_immediate_native_started_exact_cancel_and_unknown_restart ... ok
+test manual_compact_hooks_publish_no_gain_rejection_and_summary_failure_after_settlement ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 45 filtered out; finished in 11.49s
+

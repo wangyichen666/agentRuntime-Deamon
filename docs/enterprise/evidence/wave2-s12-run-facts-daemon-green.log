@@ -1,0 +1,31 @@
+   Compiling agent-daemon-protocol v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-protocol)
+error[E0428]: the name `Run` is defined multiple times
+  --> crates/daemon-protocol/src/slash.rs:24:5
+   |
+11 |     Run,
+   |     --- previous definition of the type `Run` here
+...
+24 |     Run,
+   |     ^^^ `Run` redefined here
+   |
+   = note: `Run` must be defined only once in the type namespace of this enum
+
+error[E0004]: non-exhaustive patterns: `&SlashAction::Run` not covered
+  --> crates/daemon-protocol/src/slash.rs:6:23
+   |
+6  | #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+   |                       ^^^^^ pattern `&SlashAction::Run` not covered
+   |
+note: `SlashAction` defined here
+  --> crates/daemon-protocol/src/slash.rs:7:10
+   |
+7  | pub enum SlashAction {
+   |          ^^^^^^^^^^^
+...
+24 |     Run,
+   |     --- not covered
+   = note: the matched value is of type `&SlashAction`
+
+Some errors have detailed explanations: E0004, E0428.
+For more information about an error, try `rustc --explain E0004`.
+error: could not compile `agent-daemon-protocol` (lib) due to 2 previous errors

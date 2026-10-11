@@ -1,0 +1,29 @@
+   Compiling agent-storage-postgres v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-postgres)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.78s
+     Running tests/architecture_contract.rs (target/debug/deps/architecture_contract-777cb3ed41c11e94)
+
+running 20 tests
+test enterprise_quality_red_fixture_detects_qualified_placeholders ... ok
+test checker_detects_grouped_aliased_and_fully_qualified_imports ... ok
+test enterprise_cargo_red_fixtures_detect_renamed_target_build_and_inherited_dependencies ... ok
+test enterprise_shadow_owner_red_fixtures_detect_runs_approvals_aliases_enums_and_statics ... ok
+test enterprise_channel_red_fixtures_detect_alias_std_unbounded_and_zero_capacity ... ok
+test enterprise_traceability_covers_all_waves_without_claiming_missing_implementations ... ok
+test physical_runtime_and_adapter_crates_have_real_implementations ... ok
+test root_is_composition_only_and_test_support_is_not_a_production_bypass ... ok
+test enterprise_every_workspace_library_is_reviewed_and_checks_all_cargo_dependency_tables ... ok
+test extracted_context_cannot_acquire_session_or_storage_owners ... ok
+test context_has_no_private_session_map_or_message_history ... ok
+test workspace_libraries_have_only_allowed_dependency_edges ... ok
+test provider_cannot_import_tool_business_or_control_plane ... ok
+test entries_cannot_import_storage_runtime_or_session_concrete_types ... ok
+test storage_cannot_depend_on_daemon_or_entry_control_owners ... ok
+test compatibility_facade_does_not_redefine_protocol_or_domain_types ... ok
+test enterprise_channels_only_allow_exact_documented_legacy_sites_and_no_new_unbounded ... ok
+test long_lived_mutable_transcript_owner_cannot_multiply ... ok
+test workspace_libraries_cannot_panic_or_print_in_production ... ok
+test enterprise_workspace_has_no_second_mutable_business_owner ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.88s
+

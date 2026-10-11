@@ -1,0 +1,70 @@
+    Updating `rsproxy-sparse` index
+     Locking 16 packages to latest Rust 1.88 compatible versions
+      Adding byteorder v1.5.0
+      Adding cmov v0.5.4
+      Adding ctutils v0.4.3
+      Adding fallible-iterator v0.2.0
+      Adding hmac v0.13.0
+      Adding libredox v0.1.25
+      Adding objc2-core-foundation v0.3.2
+      Adding objc2-system-configuration v0.3.2
+      Adding phf v0.13.1
+      Adding phf_shared v0.13.1
+      Adding postgres-protocol v0.6.12
+      Adding postgres-types v0.2.14
+      Adding tokio-postgres v0.7.18
+      Adding wasi v0.14.7+wasi-0.2.4
+      Adding wasite v1.0.2
+      Adding whoami v2.1.3
+ Downloading crates ...
+  Downloaded fallible-iterator v0.2.0 (registry `rsproxy-sparse`)
+  Downloaded tokio-postgres v0.7.18 (registry `rsproxy-sparse`)
+  Downloaded objc2-core-foundation v0.3.2 (registry `rsproxy-sparse`)
+  Downloaded byteorder v1.5.0 (registry `rsproxy-sparse`)
+  Downloaded postgres-types v0.2.14 (registry `rsproxy-sparse`)
+  Downloaded hmac v0.13.0 (registry `rsproxy-sparse`)
+  Downloaded cmov v0.5.4 (registry `rsproxy-sparse`)
+  Downloaded phf_shared v0.13.1 (registry `rsproxy-sparse`)
+  Downloaded postgres-protocol v0.6.12 (registry `rsproxy-sparse`)
+  Downloaded objc2-system-configuration v0.3.2 (registry `rsproxy-sparse`)
+  Downloaded phf v0.13.1 (registry `rsproxy-sparse`)
+  Downloaded ctutils v0.4.3 (registry `rsproxy-sparse`)
+  Downloaded whoami v2.1.3 (registry `rsproxy-sparse`)
+    Checking agent-core v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/core)
+    Checking cmov v0.5.4
+    Checking tokio-util v0.7.19
+    Checking objc2-core-foundation v0.3.2
+    Checking fallible-iterator v0.2.0
+    Checking byteorder v1.5.0
+    Checking phf_shared v0.13.1
+    Checking ctutils v0.4.3
+    Checking phf v0.13.1
+    Checking objc2-system-configuration v0.3.2
+    Checking reqwest v0.12.28
+    Checking digest v0.11.3
+    Checking whoami v2.1.3
+    Checking agent-daemon-protocol v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-protocol)
+    Checking agent-storage-ports v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-ports)
+    Checking agent-sandbox v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/sandbox)
+    Checking agent-context v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/context)
+    Checking agent-memory v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/memory)
+    Checking agent-policy v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/policy)
+    Checking agent-identity v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/identity)
+    Checking md-5 v0.11.0
+    Checking sha2 v0.11.0
+    Checking hmac v0.13.0
+    Checking agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+    Checking postgres-protocol v0.6.12
+    Checking lopdf v0.45.0
+    Checking agent-daemon-client v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-client)
+    Checking postgres-types v0.2.14
+    Checking agent-entry-support v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/entry-support)
+    Checking tokio-postgres v0.7.18
+    Checking agent-acp v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/acp)
+    Checking agent-gateway v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/gateway)
+    Checking agent-cli v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/cli)
+    Checking agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+    Checking agent-storage-postgres v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-postgres)
+    Checking agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+    Checking my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 20.57s

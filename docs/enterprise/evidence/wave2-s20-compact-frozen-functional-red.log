@@ -1,0 +1,28 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.03s
+     Running tests/run_context_contract.rs (target/debug/deps/run_context_contract-ee6fecea6942ef36)
+
+running 2 tests
+
+thread 'native_compact_settlement_rechecks_frozen_read_only_before_any_terminal' panicked at tests/run_context_contract.rs:830:5:
+assertion `left == right` failed: 结算必须再次复核frozen只读政策，实际为 Err(Authorization(Forbidden))
+  left: Err(Authorization(Forbidden))
+ right: Err(Coordination(Conflict))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test native_compact_settlement_rechecks_frozen_read_only_before_any_terminal ... FAILED
+
+thread 'native_compact_saved_frozen_snapshot_budget_is_checked_before_decode' panicked at tests/run_context_contract.rs:806:5:
+assertion `left == right` failed: 合法大冻结快照不能先装入Rust，实际为 Err(Authorization(Forbidden))
+  left: Err(Authorization(Forbidden))
+ right: Err(Coordination(Corrupt))
+test native_compact_saved_frozen_snapshot_budget_is_checked_before_decode ... FAILED
+
+failures:
+
+failures:
+    native_compact_saved_frozen_snapshot_budget_is_checked_before_decode
+    native_compact_settlement_rechecks_frozen_read_only_before_any_terminal
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.13s
+
+error: test failed, to rerun pass `--test run_context_contract`

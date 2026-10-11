@@ -1,0 +1,21 @@
+[
+  {
+    "name": "clippy",
+    "command": [
+      "cargo",
+      "clippy",
+      "--locked",
+      "--workspace",
+      "--all-targets",
+      "--all-features",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "exit_code": 0,
+    "seconds": 68.253886,
+    "started_at_utc": "2026-10-09T03:29:51.546808+00:00",
+    "log": "docs/enterprise/evidence/wave2-s25-reviewed-preflight-clippy.log",
+    "verification": "locally verified"
+  }
+]

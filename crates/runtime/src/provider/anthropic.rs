@@ -88,12 +88,24 @@ impl Provider for AnthropicProvider {
         tools: &[ToolSpec],
         events: mpsc::UnboundedSender<ProviderEvent>,
     ) -> Result<()> {
+        self.chat_stream_bounded(messages, tools, events, None).await
+    }
+
+    async fn chat_stream_bounded(
+        &self, messages: &[Message], tools: &[ToolSpec],
+        events: mpsc::UnboundedSender<ProviderEvent>, max_output: Option<u64>,
+    ) -> Result<()> {
+        let mut payload=self.request_payload(messages,tools);
+        if let Some(max)=max_output {
+            if !(1..=32768).contains(&max) {anyhow::bail!("输出 token 上限无效");}
+            payload["max_tokens"]=json!(max);
+        }
         let response = self
             .client
             .post(&self.endpoint)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
-            .json(&self.request_payload(messages, tools))
+            .json(&payload)
             .send()
             .await
             .map_err(|error| super::ProviderError::from_reqwest(&error))?;

@@ -1,0 +1,19 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.87s
+     Running tests/runtime_contract.rs (target/debug/deps/runtime_contract-3192f35a438df59d)
+
+running 1 test
+
+thread 'transactional_outbox_is_durable_before_publication_and_shared_after_restart' panicked at tests/runtime_contract.rs:3046:5:
+必须存在共享持久outbox读回：{"frame":"response","jsonrpc":"2.0","id":"outbox","error":{"code":-32601,"message":"未知 RPC 方法: outbox.readback"}}
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test transactional_outbox_is_durable_before_publication_and_shared_after_restart ... FAILED
+
+failures:
+
+failures:
+    transactional_outbox_is_durable_before_publication_and_shared_after_restart
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 32 filtered out; finished in 1.10s
+
+error: test failed, to rerun pass `--test runtime_contract`

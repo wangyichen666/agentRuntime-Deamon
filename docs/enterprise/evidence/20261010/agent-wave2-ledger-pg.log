@@ -1,0 +1,49 @@
+warning: fields `run_store` and `maintenance_store` are never read
+  --> crates/daemon/src/lib.rs:47:16
+   |
+40 | pub struct DaemonState {
+   |            ----------- fields in this struct
+...
+47 |     pub(crate) run_store: Option<Arc<dyn ControlRepository>>,
+   |                ^^^^^^^^^
+...
+52 |     pub(crate) maintenance_store: Option<Arc<dyn MaintenanceRepository>>,
+   |                ^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: methods `legacy_run_store` and `legacy_maintenance_store` are never used
+   --> crates/daemon/src/lib.rs:853:8
+    |
+852 | impl DaemonState {
+    | ---------------- methods in this implementation
+853 |     fn legacy_run_store(&self) -> &Arc<dyn ControlRepository> {
+    |        ^^^^^^^^^^^^^^^^
+...
+856 |     fn legacy_maintenance_store(&self) -> &Arc<dyn MaintenanceRepository> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `stop_resource`, `start_background`, and `wait_resource` are never used
+   --> crates/daemon/src/resources.rs:184:25
+    |
+36  | impl DaemonState {
+    | ---------------- methods in this implementation
+...
+184 |     pub(crate) async fn stop_resource(
+    |                         ^^^^^^^^^^^^^
+...
+225 |     pub(crate) async fn start_background(
+    |                         ^^^^^^^^^^^^^^^^
+...
+240 |     pub(crate) async fn wait_resource(
+    |                         ^^^^^^^^^^^^^
+
+warning: `agent-daemon` (lib) generated 3 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.65s
+     Running tests/ledger_contract.rs (target/debug/deps/ledger_contract-e100c54ee450d2c8)
+
+running 1 test
+test postgres_quota_admission_terminal_idempotency_and_audit_scope ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.34s
+

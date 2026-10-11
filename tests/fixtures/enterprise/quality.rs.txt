@@ -1,0 +1,5 @@
+fn forbidden() {
+    std::println!("不得写库 stdout");
+    core::todo!("不得提交占位实现");
+    std::unimplemented!("不得提交空实现");
+}

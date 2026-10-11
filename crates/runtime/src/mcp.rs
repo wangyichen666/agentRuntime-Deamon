@@ -22,6 +22,7 @@ const MCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 struct ServerConfig {
+    config_digest:String,
     name: String,
     command: String,
     args: Vec<String>,
@@ -103,6 +104,7 @@ impl McpManager {
                                         description: remote.description,
                                         input_schema: remote.input_schema,
                                         server_name: config.name.clone(),
+                                        config_digest:config.config_digest.clone(),
                                         client: client.clone(),
                                         safety: self.safety.clone(),
                                     }),
@@ -215,6 +217,7 @@ impl DynamicToolSource for McpManager {
 }
 
 struct McpTool {
+    config_digest:String,
     bridge_name: String,
     remote_name: String,
     description: String,
@@ -226,6 +229,7 @@ struct McpTool {
 
 #[async_trait]
 impl Tool for McpTool {
+    fn extension_origin(&self)->Option<(String,String)> {Some((format!("mcp/{}",self.server_name),self.config_digest.clone()))}
     fn name(&self) -> &str {
         &self.bridge_name
     }
@@ -823,6 +827,7 @@ fn parse_server_config(name: &str, value: &Value, workspace: &Path) -> Result<Se
         .transpose()?
         .unwrap_or_else(|| workspace.to_path_buf());
     Ok(ServerConfig {
+        config_digest: {use sha2::Digest;format!("{:x}",sha2::Sha256::digest(serde_json::to_vec(value)?))},
         name: name.to_owned(),
         command,
         args,

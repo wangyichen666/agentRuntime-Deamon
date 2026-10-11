@@ -6,6 +6,7 @@ rust-version = "1.88"
 publish = false
 
 [dependencies]
+rustix = {version="1",features=["fs"]}
 agent-core = { version = "=0.1.0", path = "../core" }
 agent-daemon-client = { version = "=0.1.0", path = "../daemon-client" }
 agent-daemon-protocol = { version = "=0.1.0", path = "../daemon-protocol" }

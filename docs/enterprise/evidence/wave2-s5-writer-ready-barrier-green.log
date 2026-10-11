@@ -1,0 +1,38 @@
+   Compiling agent-core v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/core)
+   Compiling tokio-util v0.7.19
+   Compiling tower v0.5.3
+   Compiling tokio-rustls v0.26.4
+   Compiling chrono v0.4.45
+   Compiling rustls-platform-verifier v0.7.1
+   Compiling referencing v0.33.0
+   Compiling keyring v3.6.3
+   Compiling tower-http v0.6.11
+   Compiling h2 v0.4.20
+   Compiling jsonschema v0.33.0
+   Compiling cron v0.17.0
+   Compiling agent-storage-ports v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-ports)
+   Compiling agent-daemon-protocol v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-protocol)
+   Compiling agent-sandbox v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/sandbox)
+   Compiling agent-memory v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/memory)
+   Compiling agent-context v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/context)
+   Compiling agent-policy v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/policy)
+   Compiling agent-identity v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/identity)
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling hyper v1.11.1
+   Compiling agent-daemon-client v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-client)
+   Compiling hyper-util v0.1.20
+   Compiling hyper-rustls v0.27.9
+   Compiling reqwest v0.13.5
+   Compiling reqwest v0.12.28
+   Compiling object_store v0.14.2
+   Compiling agent-artifact v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/artifact)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 32.42s
+     Running unittests src/lib.rs (target/debug/deps/agent_daemon-b167120b5f3ab6e4)
+
+running 1 test
+test lifecycle::tests::socket_before_ready_publication_never_triggers_an_upgrade_stop ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 0.70s
+

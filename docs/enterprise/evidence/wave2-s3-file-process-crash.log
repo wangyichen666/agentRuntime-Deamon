@@ -1,0 +1,19 @@
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+warning: unused variable: `reference`
+  --> crates/storage/src/artifact_publication.rs:56:25
+   |
+56 |                     let reference = store.file_artifacts.finalize(staged)?;
+   |                         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_reference`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: `agent-storage` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.81s
+     Running unittests src/lib.rs (target/debug/deps/agent_storage-fbe85d492dbd06bf)
+
+running 2 tests
+test artifact_publication::tests::process_kill_after_finalize_rolls_back_reference_and_preserves_original_running_receipt ... ok
+test artifact_publication::tests::second_database_connection_gc_cannot_cross_reference_publication_transaction ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 73 filtered out; finished in 0.13s
+

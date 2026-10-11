@@ -44,6 +44,26 @@ fn validate<T: for<'de> Deserialize<'de>>(
 }
 
 pub fn normalize_request(mut request: JsonRpcRequest) -> Result<JsonRpcRequest, ProtocolError> {
+    if let Some(gateway) = &request.gateway {
+        crate::BearerCredential::new(gateway.token.as_str().into())?;
+        if request.protocol_version != Some(1)
+            || request.authorization.is_none()
+            || !matches!(
+                gateway.channel,
+                agent_core::HookChannel::Http | agent_core::HookChannel::WebSocket
+            )
+        {
+            return Err(ProtocolError::InvalidParams("Gateway envelope无效".into()));
+        }
+    }
+    if let Some(token) = &request.authorization {
+        crate::BearerCredential::new(token.as_str().into())?;
+        if request.protocol_version != Some(1) {
+            return Err(ProtocolError::InvalidParams(
+                "认证连接必须使用协议v1".into(),
+            ));
+        }
+    }
     if let Some(version) = request.protocol_version
         && version != 1
     {
@@ -56,6 +76,27 @@ pub fn normalize_request(mut request: JsonRpcRequest) -> Result<JsonRpcRequest, 
     {
         request.params = serde_json::json!({});
     }
+    // 即使 legacy 兼容入口也不能吞掉客户端自报的可信身份字段。
+    if let Some(object) = request.params.as_object()
+        && object.keys().any(|key| {
+            [
+                "tenant_id",
+                "project_id",
+                "organization_id",
+                "agent_uid",
+                // credential.issue 的目标subject由管理员命令选择，认证主体仍仅在envelope。
+                "principal",
+                "roles",
+                "policy_version",
+            ]
+            .contains(&key.as_str())
+                || key == "subject_id" && request.method != "credential.issue"
+        })
+    {
+        return Err(ProtocolError::InvalidParams(
+            "身份与租户作用域由认证入口决定".into(),
+        ));
+    }
     let strict = request.protocol_version == Some(1);
     macro_rules! check {
         ($ty:ty, $($field:literal),* $(,)?) => {
@@ -63,6 +104,38 @@ pub fn normalize_request(mut request: JsonRpcRequest) -> Result<JsonRpcRequest, 
         };
     }
     match request.method.as_str() {
+        "workflow.message" => validate::<agent_core::WorkflowMessage>(&mut request.params,&[],true)?,
+        "workflow.publish" => validate::<agent_core::WorkflowPublish>(&mut request.params,&[],true)?,
+        "workflow.start" => validate::<agent_core::WorkflowStart>(&mut request.params,&[],true)?,
+        "workflow.control" => validate::<agent_core::WorkflowControl>(&mut request.params,&[],true)?,
+        "workflow.read" => validate::<WorkflowReadParams>(&mut request.params,&[],true)?,
+        "registry.mutate" => validate::<agent_core::RegistryMutation>(&mut request.params,&[],true)?,
+        "registry.generation" => validate::<RegistryGenerationParams>(&mut request.params,&[],true)?,
+        "registry.readback" => validate::<EmptyParams>(&mut request.params,&[],true)?,
+        "credential.status" => validate::<EmptyParams>(&mut request.params, &[], true)?,
+        "runtime.endpoint" => validate::<EmptyParams>(&mut request.params, &[], true)?,
+        "credential.issue" => validate::<CredentialIssueParams>(&mut request.params, &[], true)?,
+        "credential.revoke" => validate::<CredentialRevokeParams>(&mut request.params, &[], true)?,
+        "directory.create" => validate::<DirectoryCreateParams>(&mut request.params, &[], true)?,
+        "directory.find" => validate::<DirectoryCreateParams>(&mut request.params, &[], true)?,
+        "directory.resolve" => validate::<DirectoryResolveParams>(&mut request.params, &[], true)?,
+        "access.acquire" => validate::<AccessAcquireParams>(&mut request.params, &[], true)?,
+        "oauth.begin" | "oauth.consume" => validate::<agent_core::OAuthLoginProof>(&mut request.params, &[], true)?,
+        "access.release" => validate::<AccessReleaseParams>(&mut request.params, &[], true)?,
+        "audit.readback" => validate::<AuditReadParams>(&mut request.params, &[], true)?,
+        "quota.readback" => validate::<QuotaReadParams>(&mut request.params, &[], true)?,
+        "billing.configure" => validate::<BillingConfigureParams>(&mut request.params, &[], true)?,
+        "billing.readback" | "billing.accounts" => validate::<EmptyParams>(&mut request.params, &[], true)?,
+        "billing.usage" => validate::<BillingUsageParams>(&mut request.params, &[], true)?,
+        "quota.configure" => validate::<QuotaConfigureParams>(&mut request.params, &[], true)?,
+        "identity.manage" => validate::<IdentityManageParams>(&mut request.params, &[], true)?,
+        "identity.readback" => validate::<EmptyParams>(&mut request.params, &[], true)?,
+        "outbox.readback" => {
+            validate::<OutboxReadParams>(&mut request.params, &["after", "limit"], true)?
+        }
+        "run.authorization" => {
+            validate::<AuthorizationReadParams>(&mut request.params, &["owner"], true)?
+        }
         "context.readback" => check!(
             ContextReadParams,
             "session_id",
@@ -366,4 +439,39 @@ pub fn normalize_request(mut request: JsonRpcRequest) -> Result<JsonRpcRequest, 
         }
     }
     Ok(request)
+}
+
+#[cfg(test)]
+mod enterprise_tests {
+    use super::*;
+    #[test]
+    fn legacy_and_versioned_requests_cannot_claim_principal_or_tenant() {
+        for version in [None, Some(1)] {
+            for method in ["identity.readback", "chat.send"] {
+                for field in ["tenant_id", "principal", "subject_id", "roles"] {
+                    let mut request = JsonRpcRequest::new(
+                        crate::RequestId::Number(1),
+                        method,
+                        serde_json::json!({"message":"正文"}),
+                    );
+                    request.protocol_version = version;
+                    request.params[field] = serde_json::json!("伪造身份");
+                    assert!(normalize_request(request).is_err());
+                }
+            }
+        }
+    }
+    #[test]
+    fn authorization_readback_requires_full_owner_and_rejects_unknown_identity_fields() {
+        let mut request = JsonRpcRequest::new(
+            crate::RequestId::Number(1),
+            "run.authorization",
+            serde_json::json!({"owner":{"run_id":"run-1"}}),
+        );
+        assert!(normalize_request(request.clone()).is_err());
+        request.params = serde_json::json!({"owner":{"session_key":"s","session_lifetime_id":"l","run_id":"run-1","run_generation":1,"turn_id":"turn-1"}});
+        assert!(normalize_request(request.clone()).is_ok());
+        request.params["owner"]["tenant_id"] = serde_json::json!("foreign");
+        assert!(normalize_request(request).is_err());
+    }
 }

@@ -1,0 +1,12 @@
+[package]
+name = "agent-storage-ports"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+
+[dependencies]
+agent-core = { version = "=0.1.0", path = "../core" }
+async-trait = "0.1"
+serde_json = "1"
+sha2 = "0.10"

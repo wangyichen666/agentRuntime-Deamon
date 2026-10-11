@@ -1,0 +1,25 @@
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 12.46s
+     Running tests/runtime_contract.rs (target/debug/deps/runtime_contract-ef559da8ec38e611)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 0.00s
+
+     Running tests/writer_contract.rs (target/debug/deps/writer_contract-12f2878073cdb615)
+
+running 8 tests
+test sqlite_writer_repository_uses_database_time_complete_scope_and_epoch_cas ... ok
+test native_writer_renewal_preserves_epoch_and_does_not_advance_business_event_clock ... ok
+test writer_two_independent_connections_have_one_winner_with_controlled_barrier ... ok
+test native_lifecycle_fork_rotation_tombstone_and_graceful_release_preserve_writer_fence ... ok
+test native_writer_expired_process_cannot_self_reacquire_and_unconfigured_store_cannot_bypass ... ok
+test native_writer_old_callback_terminal_transcript_and_recovery_are_fenced_after_takeover ... ok
+test lost_writer_cannot_settle_native_tools_provider_resource_or_ownerless_hook ... ok
+test writer_schema_migration_backup_atomic_rollback_and_future_version_are_verified ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.34s
+

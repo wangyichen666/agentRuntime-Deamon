@@ -1,0 +1,24 @@
+[package]
+name = "agent-artifact"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+
+[dependencies]
+agent-core = { version = "=0.1.0", path = "../core" }
+agent-storage-ports = { version = "=0.1.0", path = "../storage-ports" }
+async-trait = "0.1"
+bytes = "1"
+futures-util = "0.3"
+object_store = { version = "=0.14.2", default-features = false, features = ["aws-base", "reqwest", "ring"] }
+reqwest = { version = "=0.13.5", default-features = false, features = ["rustls-no-provider", "stream"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["net", "sync", "time"] }
+url = "2"
+
+rustls = { version="0.23", default-features=false, features=["ring","std","tls12"] }
+webpki-roots = "1"
+
+rustix = { version="=1.1.4", features=["fs"] }

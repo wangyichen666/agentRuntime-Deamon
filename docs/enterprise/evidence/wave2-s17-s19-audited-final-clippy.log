@@ -1,0 +1,17 @@
+    Checking agent-core v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/core)
+error: items after a test module
+   --> crates/core/src/enterprise.rs:251:1
+    |
+251 | mod tests {
+    | ^^^^^^^^^
+...
+296 | pub const LOCAL_CRON_SUBJECT: &str = "local-cron-workload";
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#items_after_test_module
+    = note: `-D clippy::items-after-test-module` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::items_after_test_module)]`
+    = help: move the items to before the test module was defined
+
+error: could not compile `agent-core` (lib test) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

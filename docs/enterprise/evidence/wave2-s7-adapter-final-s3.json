@@ -1,0 +1,61 @@
+{
+  "backend": "真实 S3-compatible MinIO / TLS / pinned image",
+  "image": "minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e",
+  "results": [
+    {
+      "name": "image_digest",
+      "exit_code": 0,
+      "seconds": 0.10118462471291423
+    },
+    {
+      "name": "test_ca",
+      "exit_code": 0,
+      "seconds": 0.05251404223963618
+    },
+    {
+      "name": "test_csr",
+      "exit_code": 0,
+      "seconds": 0.024454124737530947
+    },
+    {
+      "name": "test_tls_certificate",
+      "exit_code": 0,
+      "seconds": 0.005716083105653524
+    },
+    {
+      "name": "create_isolated_tls_minio",
+      "exit_code": 0,
+      "seconds": 0.15594037482514977
+    },
+    {
+      "name": "tls_health",
+      "exit_code": 0
+    },
+    {
+      "name": "actual_s3_wire_integrity_tls_and_tenant_scope",
+      "exit_code": 0,
+      "seconds": 10.378889166284353
+    },
+    {
+      "name": "object_repository_real_contracts",
+      "exit_code": 0,
+      "seconds": 0.49642904195934534
+    },
+    {
+      "name": "daemon_original_receipt_and_restart",
+      "exit_code": 0,
+      "seconds": 4.510928167030215
+    },
+    {
+      "name": "daemon_native_writer_cron_original_receipt",
+      "exit_code": 0,
+      "seconds": 2.420160667039454
+    },
+    {
+      "name": "remove_only_created_container",
+      "exit_code": 0,
+      "seconds": 0.2455512499436736
+    }
+  ],
+  "verification": "locally verified"
+}

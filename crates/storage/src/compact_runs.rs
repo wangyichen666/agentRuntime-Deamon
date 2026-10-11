@@ -37,31 +37,21 @@ impl CompactRunRepository for RunStore {
         request: &CompactRunRequest,
         snapshot: &RunSnapshot,
     ) -> Result<Admission, RuntimeError> {
-        let admission = RunAdmission {
-            plan_execution: None,
-            session_key: request.session_key.clone(),
-            expected_lifetime: Some(request.session_lifetime_id.clone()),
-            request_id: RequestId::String(format!("compact:{}", request.operation_id)),
-            input: serde_json::to_string(request).map_err(protocol)?,
-            mode: AdmissionMode::RejectIfBusy,
-        };
+        let admission = compact_admission(request)?;
         self.admit_run_inner(
             &admission,
             snapshot.route.as_ref(),
             Some(snapshot),
             None,
             Some(request),
+            None,
         )
     }
     fn compact_operation(
         &self,
         request: &CompactRunRequest,
     ) -> Result<Option<RunRecord>, RuntimeError> {
-        let mut db = self.lock_connection()?;
-        let tx = db.transaction()?;
-        let result = existing_in(&tx, request)?;
-        super::views::commit(tx)?;
-        Ok(result)
+        self.compact_operation_scoped(&TenantContext::local(), request)
     }
     fn compact_request(
         &self,
@@ -69,73 +59,54 @@ impl CompactRunRepository for RunStore {
         lifetime: &SessionLifetimeId,
         operation: &str,
     ) -> Result<Option<CompactRunRequest>, RuntimeError> {
-        let mut db = self.lock_connection()?;
-        let tx = db.transaction()?;
-        let raw: Option<String> = tx
-            .query_row(
-                "SELECT request_json FROM compact_run_links WHERE operation_id=?1",
-                params![operation],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let request = raw
-            .map(|raw| serde_json::from_str::<CompactRunRequest>(&raw).map_err(protocol))
-            .transpose()?;
-        if let Some(request) = &request {
-            if request.session_key != *key
-                || request.session_lifetime_id != *lifetime
-                || request.operation_id != operation
-            {
-                return Err(RuntimeError::Protocol("compact operation 身份冲突".into()));
-            }
-            existing_in(&tx, request)?
-                .ok_or_else(|| RuntimeError::Protocol("compact operation 缺 run".into()))?;
-        }
-        super::views::commit(tx)?;
-        Ok(request)
+        self.compact_request_scoped(&TenantContext::local(), key, lifetime, operation)
     }
     fn compact_snapshot(
         &self,
         run: &RunId,
     ) -> Result<(RunRecord, CompactRunReadback), RuntimeError> {
-        let mut db = self.lock_connection()?;
-        let tx = db.transaction()?;
-        let record = read_run_in(&tx, &run.0)?
-            .ok_or_else(|| RuntimeError::Protocol("compact run 缺失".into()))?;
-        let receipt = readback_in(&tx, run)?
-            .ok_or_else(|| RuntimeError::Protocol("compact 缺 canonical linkage".into()))?;
-        super::views::commit(tx)?;
-        Ok((record, receipt))
+        self.compact_fact_scoped(&TenantContext::local(), run)?
+            .map(|fact| (fact.run, fact.receipt))
+            .ok_or_else(|| RuntimeError::Protocol("compact缺canonical linkage".into()))
     }
     fn compact_run(&self, run: &RunId) -> Result<Option<CompactRunReadback>, RuntimeError> {
-        let mut db = self.lock_connection()?;
-        let tx = db.transaction()?;
-        let result = readback_in(&tx, run)?;
-        super::views::commit(tx)?;
-        Ok(result)
+        Ok(self
+            .compact_fact_scoped(&TenantContext::local(), run)?
+            .map(|fact| fact.receipt))
     }
 }
 
 pub(crate) fn existing_in(
     db: &Connection,
     request: &CompactRunRequest,
+    scope: &TenantContext,
 ) -> Result<Option<RunRecord>, RuntimeError> {
-    let meta = sessions::metadata_in(db, &request.session_key)?
-        .filter(|meta| !meta.deleted && meta.lifetime == request.session_lifetime_id)
-        .ok_or_else(|| RuntimeError::Protocol("compact lifetime 已变化".into()))?;
+    let meta = sessions::scoped_metadata_in(db, scope, &request.session_key)?;
+    if meta.lifetime != request.session_lifetime_id {
+        return Err(AuthorizationError::StaleOwner.into());
+    }
+    sessions::lifetime_owner_in(db, &request.session_key, &request.session_lifetime_id)?;
+    let bytes:u64=db.query_row("SELECT COALESCE((SELECT length(CAST(l.request_json AS BLOB)) FROM compact_run_links l JOIN runs r ON r.id=l.run_id WHERE l.operation_id=?1 AND r.session_id=?2 AND r.lifetime=?3),0)",params![request.operation_id,request.session_key.0,request.session_lifetime_id.0],|r|r.get(0))?;
+    if bytes > 16384 {
+        return Err(CoordinationError::Corrupt.into());
+    }
     let row: Option<(String, String)> = db
         .query_row(
-            "SELECT run_id,request_json FROM compact_run_links WHERE operation_id=?1",
-            params![request.operation_id],
+            "SELECT l.run_id,l.request_json FROM compact_run_links l JOIN runs r ON r.id=l.run_id WHERE l.operation_id=?1 AND r.session_id=?2 AND r.lifetime=?3",
+            params![request.operation_id,request.session_key.0,request.session_lifetime_id.0],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
     if let Some((run, raw)) = row {
         let stored: CompactRunRequest = serde_json::from_str(&raw).map_err(protocol)?;
-        if stored != *request || stored.session_lifetime_id != meta.lifetime {
-            return Err(RuntimeError::Protocol(
-                "compact operation 身份或 source 冲突".into(),
-            ));
+        if stored.session_key != request.session_key
+            || stored.session_lifetime_id != meta.lifetime
+            || stored.operation_id != request.operation_id
+        {
+            return Err(CoordinationError::Corrupt.into());
+        }
+        if stored != *request {
+            return Err(CoordinationError::Conflict.into());
         }
         let run = read_run_in(db, &run)?
             .ok_or_else(|| RuntimeError::Protocol("compact run 缺失".into()))?;
@@ -169,6 +140,18 @@ pub(crate) fn source_check_in(
         ));
     }
     if let Some(run) = &request.compatibility_owner_run_id {
+        let visible: u64 = db.query_row(
+            "SELECT count(*) FROM runs WHERE id=?1 AND session_id=?2 AND lifetime=?3",
+            params![run.0, request.session_key.0, request.session_lifetime_id.0],
+            |r| r.get(0),
+        )?;
+        if visible != 1 {
+            return Err(AuthorizationError::Forbidden.into());
+        }
+        let bytes:u64=db.query_row("SELECT COALESCE((SELECT length(CAST(snapshot_json AS BLOB)) FROM run_snapshots WHERE run_id=?1),0)",[&run.0],|r|r.get(0))?;
+        if bytes > 1024 * 1024 {
+            return Err(CoordinationError::Corrupt.into());
+        }
         let owner = sessions::owner_in(db, run)?;
         sessions::fence_in(db, &owner)?;
         if owner.session_key != request.session_key
@@ -272,6 +255,11 @@ pub(crate) fn readback_in(
     db: &Connection,
     run: &RunId,
 ) -> Result<Option<CompactRunReadback>, RuntimeError> {
+    let bytes:u64=db.query_row("SELECT COALESCE((SELECT length(CAST(l.request_json AS BLOB))+length(CAST(l.source_json AS BLOB))+length(CAST(c.source_json AS BLOB))+length(CAST(r.input AS BLOB))+length(CAST(r.request_id_wire_json AS BLOB))+length(CAST(COALESCE(r.content,'') AS BLOB))+length(CAST(COALESCE(r.error_message,'') AS BLOB)) FROM compact_run_links l JOIN compact_operations c ON c.operation=l.operation_id JOIN runs r ON r.id=l.run_id WHERE l.run_id=?1),0)",[&run.0],|r|r.get(0))?;
+    if bytes > 1024 * 1024 {
+        return Err(CoordinationError::Corrupt.into());
+    }
+
     struct Row {
         operation: String,
         source: String,
@@ -326,6 +314,14 @@ pub(crate) fn readback_in(
     }
     let record = read_run_in(db, &run.0)?
         .ok_or_else(|| RuntimeError::Protocol("compact readback 缺 run".into()))?;
+    let admission_input: String =
+        db.query_row("SELECT input FROM runs WHERE id=?1", [&run.0], |r| r.get(0))?;
+    let original: CompactRunRequest =
+        serde_json::from_str(&admission_input).map_err(|_| CoordinationError::Corrupt)?;
+    if original != request || record.request_id != RequestId::String(format!("compact:{operation}"))
+    {
+        return Err(CoordinationError::Corrupt.into());
+    }
     let outcome = match record.status {
         RunStatus::Running if state == "pending" => CompactRunOutcome::Started,
         RunStatus::Completed if state == "committed" && generation.is_some() => {
@@ -419,7 +415,125 @@ pub(crate) fn terminal_in(
         "UPDATE turns SET status=?2 WHERE run_id=?1",
         params![run.0, status.as_str()],
     )?;
+    crate::ledgers::terminal_in(db, run, status)?;
     Ok(())
+}
+
+fn compact_admission(request: &CompactRunRequest) -> Result<RunAdmission, RuntimeError> {
+    let admission = RunAdmission {
+        workflow_node: None,
+        plan_execution: None,
+        session_key: request.session_key.clone(),
+        expected_lifetime: Some(request.session_lifetime_id.clone()),
+        request_id: RequestId::String(format!("compact:{}", request.operation_id)),
+        input: serde_json::to_string(request).map_err(protocol)?,
+        mode: AdmissionMode::RejectIfBusy,
+    };
+    Ok(admission)
+}
+
+impl RunStore {
+    pub(crate) fn compact_operation_scoped(
+        &self,
+        scope: &TenantContext,
+        request: &CompactRunRequest,
+    ) -> Result<Option<RunRecord>, RuntimeError> {
+        let mut db = self.lock_connection()?;
+        let tx = db.transaction()?;
+        let result = existing_in(&tx, request, scope)?;
+        tx.commit()?;
+        Ok(result)
+    }
+    pub(crate) fn compact_request_scoped(
+        &self,
+        scope: &TenantContext,
+        key: &SessionKey,
+        lifetime: &SessionLifetimeId,
+        operation: &str,
+    ) -> Result<Option<CompactRunRequest>, RuntimeError> {
+        let mut db = self.lock_connection()?;
+        let tx = db.transaction()?;
+        crate::enterprise::check_session_scope_in(&tx, scope, key)?;
+        sessions::lifetime_owner_in(&tx, key, lifetime)?;
+        let bytes:u64=tx.query_row("SELECT COALESCE((SELECT length(CAST(l.request_json AS BLOB)) FROM compact_run_links l JOIN runs r ON r.id=l.run_id WHERE l.operation_id=?1 AND r.session_id=?2 AND r.lifetime=?3),0)",params![operation,key.0,lifetime.0],|r|r.get(0))?;
+        if bytes > 16384 {
+            return Err(CoordinationError::Corrupt.into());
+        }
+        let raw: Option<String> = tx
+            .query_row(
+                "SELECT l.request_json FROM compact_run_links l JOIN runs r ON r.id=l.run_id WHERE l.operation_id=?1 AND r.session_id=?2 AND r.lifetime=?3",
+                params![operation,key.0,lifetime.0],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let request = raw
+            .map(|raw| serde_json::from_str::<CompactRunRequest>(&raw).map_err(protocol))
+            .transpose()?;
+        if let Some(request) = &request {
+            if request.session_key != *key
+                || request.session_lifetime_id != *lifetime
+                || request.operation_id != operation
+            {
+                return Err(RuntimeError::Protocol("compact operation 身份冲突".into()));
+            }
+            existing_in(&tx, request, scope)?
+                .ok_or_else(|| RuntimeError::Protocol("compact operation 缺 run".into()))?;
+        }
+        tx.commit()?;
+        Ok(request)
+    }
+
+    pub(crate) fn compact_fact_scoped(
+        &self,
+        scope: &TenantContext,
+        run: &RunId,
+    ) -> Result<Option<RunCompactReadback>, RuntimeError> {
+        let mut db = self.lock_connection()?;
+        let tx = db.transaction()?;
+        crate::enterprise::check_run_scope_in(&tx, scope, run)?;
+        let owner = sessions::owner_in(&tx, run)?;
+        sessions::lifetime_owner_in(&tx, &owner.session_key, &owner.session_lifetime_id)?;
+        let receipt = readback_in(&tx, run)?;
+        let value = if let Some(receipt) = receipt {
+            let run = read_run_in(&tx, &run.0)?.ok_or(CoordinationError::Corrupt)?;
+            let view_stamp = crate::views::stamp_in(&tx, &run.run_id, run.last_seq)?;
+            Some(RunCompactReadback {
+                run,
+                receipt,
+                view_stamp,
+            })
+        } else {
+            None
+        };
+        tx.commit()?;
+        Ok(value)
+    }
+    pub(crate) fn admit_compact_owned(
+        &self,
+        request: &CompactRunRequest,
+        snapshot: &RunSnapshot,
+        authorization: &AuthorizationRequest,
+        verifier: &dyn AuthorizationVerifier,
+    ) -> Result<(Admission, ExactOwner), RuntimeError> {
+        if authorization.action != Action::SessionPrompt
+            || authorization.context.request_id
+                != RequestId::String(format!("compact:{}", request.operation_id))
+            || authorization.attributes.workspace != snapshot.cwd
+        {
+            return Err(AuthorizationError::ProtocolViolation.into());
+        }
+        let admission = compact_admission(request)?;
+        self.admit_run_inner_owned(
+            &admission,
+            snapshot.route.as_ref(),
+            Some(snapshot),
+            None,
+            Some(request),
+            Some((authorization, verifier)),
+            true,
+            false,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -531,6 +645,7 @@ mod tests {
             stale.expected_revision = TranscriptSeq(1);
             assert!(store.compact_operation(&stale).is_err());
             let collision = RunAdmission {
+                workflow_node: None,
                 plan_execution: None,
                 session_key: request.session_key.clone(),
                 expected_lifetime: Some(request.session_lifetime_id.clone()),
@@ -701,6 +816,7 @@ mod tests {
     fn schema16_compact_upgrade_has_verified_backup_rollback_and_future_rejection() {
         let path = path();
         let (store, request, _) = fixture(&path);
+        crate::enterprise::remove_v21_for_fixture(&store.lock_connection().unwrap());
         store.lock_connection().unwrap().execute_batch("DROP TABLE provider_requests; DROP TABLE event_view_stamps; DROP TABLE tool_discoveries; DROP TABLE compact_run_links; DELETE FROM schema_migrations WHERE version>=17; CREATE TRIGGER migration_fault BEFORE INSERT ON schema_migrations WHEN NEW.version=17 BEGIN SELECT RAISE(ABORT,'compact migration fault'); END").unwrap();
         drop(store);
         assert!(RunStore::open(&path).is_err());
@@ -738,7 +854,7 @@ mod tests {
         store
             .lock_connection()
             .unwrap()
-            .execute("INSERT INTO schema_migrations VALUES(21,0)", [])
+            .execute("INSERT INTO schema_migrations VALUES(28,0)", [])
             .unwrap();
         drop(store);
         assert!(RunStore::open(&path).is_err());

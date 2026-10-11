@@ -19,6 +19,34 @@ pub trait DiscoveryRepository: Send + Sync {
     fn request_cancellation(&self, owner: &ExactOwner) -> Result<(), RuntimeError>;
 }
 
+fn check_discovery_owner(
+    db: &Connection,
+    owner: &ExactOwner,
+    execution: Option<&EnterpriseOwnerEnvelope>,
+) -> Result<(), RuntimeError> {
+    let local;
+    let envelope = if let Some(execution) = execution {
+        execution
+    } else {
+        local = EnterpriseOwnerEnvelope {
+            scope: TenantContext::local(),
+            owner: owner.clone(),
+        };
+        &local
+    };
+    crate::execution::check_execution_in(db, envelope)?;
+    if envelope.owner != *owner {
+        return Err(AuthorizationError::StaleOwner.into());
+    }
+    Ok(())
+}
+fn discovery_budget_in(db: &Connection, run: &RunId) -> Result<u64, RuntimeError> {
+    let (count,bytes):(u64,u64)=db.query_row("SELECT count(*),COALESCE(sum(length(CAST(receipt_json AS BLOB))+length(CAST(operation_id AS BLOB))+length(CAST(receipt_digest AS BLOB))),0) FROM (SELECT receipt_json,operation_id,receipt_digest FROM tool_discoveries WHERE run_id=?1 LIMIT 129)",[&run.0],|r|Ok((r.get(0)?,r.get(1)?)))?;
+    if count > 128 || bytes > 1024 * 1024 {
+        return Err(CoordinationError::Corrupt.into());
+    }
+    Ok(bytes)
+}
 fn protocol(error: serde_json::Error) -> RuntimeError {
     RuntimeError::Protocol(error.to_string())
 }
@@ -27,28 +55,8 @@ fn catalog_in(
     owner: &ExactOwner,
     generation: &str,
 ) -> Result<RunSnapshot, RuntimeError> {
-    sessions::fence_in(db, owner)?;
-    let raw: String = db.query_row(
-        "SELECT snapshot_json FROM run_snapshots WHERE run_id=?1",
-        params![owner.run_id.0],
-        |row| row.get(0),
-    )?;
-    let snapshot: RunSnapshot = serde_json::from_str(&raw).map_err(protocol)?;
-    let digest = format!(
-        "{:x}",
-        Sha256::digest(serde_json::to_vec(&snapshot.tools).map_err(protocol)?)
-    );
-    if digest != generation
-        || snapshot.tool_catalog_digest != generation
-        || snapshot
-            .tools
-            .windows(2)
-            .any(|pair| pair[0].name >= pair[1].name)
-    {
-        return Err(RuntimeError::Protocol(
-            "发现许可的 frozen catalog/generation 损坏或过期".into(),
-        ));
-    }
+    let snapshot = super::requests::frozen_in(db, &owner.run_id)?;
+    agent_storage_ports::validate_frozen_tool_catalog(&snapshot, generation)?;
     Ok(snapshot)
 }
 fn validate(
@@ -56,40 +64,13 @@ fn validate(
     snapshot: &RunSnapshot,
     owner: &ExactOwner,
 ) -> Result<(), RuntimeError> {
-    if receipt.schema_version != 1
-        || receipt.owner != *owner
-        || receipt.operation_id.is_empty()
-        || receipt.operation_id.len() > 512
-        || receipt.result.schema_version != 1
-        || receipt.result.catalog_generation != snapshot.tool_catalog_digest
-        || receipt.query.query.trim().is_empty()
-        || receipt.query.query.len() > 2048
-        || !(1..=TOOL_SEARCH_LIMIT).contains(&receipt.query.limit.unwrap_or(5))
-        || receipt.result.tools.len() > receipt.query.limit.unwrap_or(5)
-        || serde_json::to_vec(&receipt.result).map_err(protocol)?.len() > TOOL_SEARCH_BYTES
-        || receipt
-            .result
-            .tools
-            .iter()
-            .any(|tool| !snapshot.tools.contains(tool))
-        || receipt
-            .result
-            .tools
-            .iter()
-            .map(|tool| &tool.name)
-            .collect::<std::collections::BTreeSet<_>>()
-            .len()
-            != receipt.result.tools.len()
-    {
-        return Err(RuntimeError::Protocol(
-            "发现 receipt 身份/schema/授权集合无效".into(),
-        ));
-    }
-    Ok(())
+    agent_storage_ports::validate_discovery_receipt(receipt, snapshot, owner)
+        .map_err(|error| RuntimeError::Protocol(error.to_string()))
 }
 fn receipts_in(db: &Connection, run: &RunId) -> Result<Vec<ToolDiscoveryReceipt>, RuntimeError> {
     let owner = sessions::owner_in(db, run)?;
-    sessions::fence_in(db, &owner)?;
+    sessions::lifetime_owner_in(db, &owner.session_key, &owner.session_lifetime_id)?;
+    discovery_budget_in(db, run)?;
     let mut query=db.prepare("SELECT operation_id,receipt_json,receipt_digest FROM tool_discoveries WHERE run_id=?1 ORDER BY rowid LIMIT 129")?;
     let rows = query
         .query_map(params![run.0], |row| {
@@ -109,7 +90,15 @@ fn receipts_in(db: &Connection, run: &RunId) -> Result<Vec<ToolDiscoveryReceipt>
                 return Err(RuntimeError::Protocol("发现 receipt 摘要损坏".into()));
             }
             let receipt: ToolDiscoveryReceipt = serde_json::from_str(&raw).map_err(protocol)?;
-            let snapshot = catalog_in(db, &owner, &receipt.result.catalog_generation)?;
+            let snapshot =
+                catalog_in(db, &owner, &receipt.result.catalog_generation).map_err(|error| {
+                    match error {
+                        RuntimeError::Coordination(CoordinationError::Conflict) => {
+                            CoordinationError::Corrupt.into()
+                        }
+                        error => error,
+                    }
+                })?;
             validate(&receipt, &snapshot, &owner)?;
             if operation != receipt.operation_id {
                 return Err(RuntimeError::Protocol("发现 operation 身份损坏".into()));
@@ -123,28 +112,63 @@ impl DiscoveryRepository for RunStore {
         &self,
         receipt: &ToolDiscoveryReceipt,
     ) -> Result<ToolDiscoveryReceipt, RuntimeError> {
+        self.publish_discovery_scoped(receipt, None)
+    }
+    fn discovered_tool(
+        &self,
+        owner: &ExactOwner,
+        generation: &str,
+        name: &str,
+    ) -> Result<bool, RuntimeError> {
+        self.discovered_tool_scoped(owner, generation, name, None)
+    }
+    fn discoveries(&self, run: &RunId) -> Result<Vec<ToolDiscoveryReceipt>, RuntimeError> {
+        self.discoveries_scoped(&TenantContext::local(), run)
+    }
+    fn request_cancellation(&self, owner: &ExactOwner) -> Result<(), RuntimeError> {
+        self.request_cancellation_scoped(owner, None)
+    }
+}
+
+impl RunStore {
+    pub(crate) fn publish_discovery_scoped(
+        &self,
+        receipt: &ToolDiscoveryReceipt,
+        execution: Option<&EnterpriseOwnerEnvelope>,
+    ) -> Result<ToolDiscoveryReceipt, RuntimeError> {
         let mut db = self.lock_connection()?;
-        let tx = db.transaction()?;
+        let tx = db.transaction_with_behavior(if execution.is_some() {
+            rusqlite::TransactionBehavior::Immediate
+        } else {
+            rusqlite::TransactionBehavior::Deferred
+        })?;
+        check_discovery_owner(&tx, &receipt.owner, execution)?;
+        let saved_bytes = discovery_budget_in(&tx, &receipt.owner.run_id)?;
         let snapshot = catalog_in(&tx, &receipt.owner, &receipt.result.catalog_generation)?;
         validate(receipt, &snapshot, &receipt.owner)?;
         let raw = serde_json::to_string(receipt).map_err(protocol)?;
         let digest = format!("{:x}", Sha256::digest(raw.as_bytes()));
         let existing: Option<(String, String, String)> = tx
             .query_row(
-                "SELECT run_id,receipt_json,receipt_digest FROM tool_discoveries WHERE operation_id=?1",
-                params![receipt.operation_id],
+                "SELECT run_id,receipt_json,receipt_digest FROM tool_discoveries WHERE operation_id=?1 AND run_id=?2",
+                params![receipt.operation_id, receipt.owner.run_id.0],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
         if let Some((run_id, existing, saved_digest)) = existing {
             if format!("{:x}", Sha256::digest(existing.as_bytes())) != saved_digest {
-                return Err(RuntimeError::Protocol("发现 receipt 摘要损坏".into()));
+                return Err(CoordinationError::Corrupt.into());
             }
-            let saved: ToolDiscoveryReceipt = serde_json::from_str(&existing).map_err(protocol)?;
-            if run_id != receipt.owner.run_id.0 || saved != *receipt {
+            let saved: ToolDiscoveryReceipt =
+                serde_json::from_str(&existing).map_err(|_| CoordinationError::Corrupt)?;
+            validate(&saved, &snapshot, &receipt.owner).map_err(|_| CoordinationError::Corrupt)?;
+            if run_id != saved.owner.run_id.0 || saved.operation_id != receipt.operation_id {
+                return Err(CoordinationError::Corrupt.into());
+            }
+            if saved != *receipt {
                 return Err(RuntimeError::Protocol("发现 operation 输入冲突".into()));
             }
-            super::views::commit(tx)?;
+            tx.commit()?;
             return Ok(saved);
         }
         let run = read_run_in(&tx, &receipt.owner.run_id.0)?
@@ -168,10 +192,23 @@ impl DiscoveryRepository for RunStore {
                 "发现发布 owner 已停止/取消或预算耗尽".into(),
             ));
         }
+        let incoming_bytes = raw.len() + receipt.operation_id.len() + digest.len();
+        if saved_bytes.saturating_add(incoming_bytes as u64) > 1024 * 1024 {
+            return Err(CoordinationError::InvalidRequest.into());
+        }
         tx.execute(
             "INSERT INTO tool_discoveries VALUES(?1,?2,?3,?4)",
             params![receipt.operation_id, run.run_id.0, raw, digest],
-        )?;
+        )
+        .map_err(|error| match &error {
+            rusqlite::Error::SqliteFailure(code, _)
+                if code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY
+                    || code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE =>
+            {
+                RuntimeError::Coordination(CoordinationError::Conflict)
+            }
+            _ => RuntimeError::from(error),
+        })?;
         super::insert_event(
             &tx,
             &run.run_id,
@@ -181,14 +218,16 @@ impl DiscoveryRepository for RunStore {
         super::views::commit(tx)?;
         Ok(receipt.clone())
     }
-    fn discovered_tool(
+    pub(crate) fn discovered_tool_scoped(
         &self,
         owner: &ExactOwner,
         generation: &str,
         name: &str,
+        execution: Option<&EnterpriseOwnerEnvelope>,
     ) -> Result<bool, RuntimeError> {
         let mut db = self.lock_connection()?;
         let tx = db.transaction()?;
+        check_discovery_owner(&tx, owner, execution)?;
         catalog_in(&tx, owner, generation)?;
         let run = read_run_in(&tx, &owner.run_id.0)?
             .ok_or_else(|| RuntimeError::Protocol("发现缺 run".into()))?;
@@ -198,26 +237,41 @@ impl DiscoveryRepository for RunStore {
             |row| row.get(0),
         )?;
         if run.status != RunStatus::Running || cancelled != 0 {
-            return Err(RuntimeError::Protocol("执行许可 owner 已结束/取消".into()));
+            return Err(CoordinationError::Conflict.into());
         }
         let result = receipts_in(&tx, &owner.run_id)?.iter().any(|receipt| {
             receipt.result.catalog_generation == generation
                 && receipt.result.tools.iter().any(|tool| tool.name == name)
         });
-        super::views::commit(tx)?;
+        tx.commit()?;
         Ok(result)
     }
-    fn discoveries(&self, run: &RunId) -> Result<Vec<ToolDiscoveryReceipt>, RuntimeError> {
+    pub(crate) fn discoveries_scoped(
+        &self,
+        scope: &TenantContext,
+        run: &RunId,
+    ) -> Result<Vec<ToolDiscoveryReceipt>, RuntimeError> {
         let mut db = self.lock_connection()?;
         let tx = db.transaction()?;
+        crate::enterprise::check_run_scope_in(&tx, scope, run)?;
+        let owner = sessions::owner_in(&tx, run)?;
+        sessions::lifetime_owner_in(&tx, &owner.session_key, &owner.session_lifetime_id)?;
         let result = receipts_in(&tx, run)?;
-        super::views::commit(tx)?;
+        tx.commit()?;
         Ok(result)
     }
-    fn request_cancellation(&self, owner: &ExactOwner) -> Result<(), RuntimeError> {
+    pub(crate) fn request_cancellation_scoped(
+        &self,
+        owner: &ExactOwner,
+        execution: Option<&EnterpriseOwnerEnvelope>,
+    ) -> Result<(), RuntimeError> {
         let mut db = self.lock_connection()?;
-        let tx = db.transaction()?;
-        sessions::fence_in(&tx, owner)?;
+        let tx = db.transaction_with_behavior(if execution.is_some() {
+            rusqlite::TransactionBehavior::Immediate
+        } else {
+            rusqlite::TransactionBehavior::Deferred
+        })?;
+        check_discovery_owner(&tx, owner, execution)?;
         let run = read_run_in(&tx, &owner.run_id.0)?
             .ok_or_else(|| RuntimeError::Protocol("取消缺 run".into()))?;
         if !matches!(
@@ -250,11 +304,12 @@ mod tests {
     use crate::{SessionLifecycle, SessionQuery, TurnRepository};
     use serde_json::json;
 
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     fn path() -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
             "discovery-{}-{}.sqlite3",
             std::process::id(),
-            super::super::now_ms()
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ))
     }
     fn fixture(path: &std::path::Path) -> (RunStore, ToolDiscoveryReceipt) {
@@ -270,6 +325,7 @@ mod tests {
         let generation = format!("{:x}", Sha256::digest(serde_json::to_vec(&tools).unwrap()));
         let snapshot: RunSnapshot = serde_json::from_value(json!({"tools":tools,"route":null,"cwd":".","permission_mode":"request_approval","sandbox_requested":"native","sandbox_effective":"native","context_read_only":false,"max_tool_calls":8,"config_generation":0,"tool_catalog_digest":generation})).unwrap();
         let admission = RunAdmission {
+            workflow_node: None,
             session_key: meta.key,
             expected_lifetime: Some(meta.lifetime),
             request_id: RequestId::Number(1),
@@ -377,6 +433,7 @@ mod tests {
             let Admission::New(run) = store
                 .admit_run(
                     &RunAdmission {
+                        workflow_node: None,
                         session_key: other.key,
                         expected_lifetime: Some(other.lifetime),
                         request_id: RequestId::Number(2),
@@ -444,10 +501,81 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn discovery_ports_yield_on_real_connection_lock_and_detached_worker_finishes_once() {
+        use agent_storage_ports::RunDiscoveryRepository;
+        for operation in ["publish", "permission", "history", "cancel"] {
+            let file = path();
+            let (store, receipt) = fixture(&file);
+            let env = EnterpriseOwnerEnvelope {
+                scope: TenantContext::local(),
+                owner: receipt.owner.clone(),
+            };
+            if operation != "publish" {
+                store.publish_discovery(&receipt).unwrap();
+            }
+            let occupied = store.clone();
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+            let holder = std::thread::spawn(move || {
+                let db = occupied.lock_connection().unwrap();
+                ready_tx.send(()).unwrap();
+                let _ = release_rx.recv_timeout(std::time::Duration::from_secs(5));
+                drop(db);
+            });
+            ready_rx.await.unwrap();
+            let started = std::time::Instant::now();
+            let result = tokio::time::timeout(std::time::Duration::from_millis(25), async {
+                match operation {
+                    "publish" => store
+                        .publish_run_discovery(&env, &receipt)
+                        .await
+                        .map(|_| ()),
+                    "permission" => store
+                        .read_discovered_tool(
+                            &env,
+                            &receipt.result.catalog_generation,
+                            "memory__recall",
+                        )
+                        .await
+                        .map(|_| ()),
+                    "history" => store
+                        .read_run_discoveries(&env.scope, &env.owner.run_id)
+                        .await
+                        .map(|_| ()),
+                    _ => store.request_run_cancellation(&env).await,
+                }
+            })
+            .await;
+            let elapsed = started.elapsed();
+            let permits = store.blocking_budget.available_permits();
+            let _ = release_tx.send(());
+            holder.join().unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while store.blocking_budget.available_permits() != 4 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(result.is_err(), "连接锁仍持有 {operation}");
+            assert!(
+                elapsed < std::time::Duration::from_millis(150),
+                "SQL锁阻塞Tokio timer {operation}: {elapsed:?}"
+            );
+            assert_eq!(permits, 3, "等待者取消后worker仍持有permit {operation}");
+            assert_eq!(store.discoveries(&env.owner.run_id).unwrap(), vec![receipt]);
+            let cancellations:u64=store.lock_connection().unwrap().query_row("SELECT count(*) FROM events WHERE run_id=?1 AND event='cancellation_requested'",[&env.owner.run_id.0],|r|r.get(0)).unwrap();
+            assert_eq!(cancellations, u64::from(operation == "cancel"));
+            drop(store);
+            std::fs::remove_file(file).unwrap();
+        }
+    }
     #[test]
     fn schema17_discovery_upgrade_backup_transaction_rollback_and_future_rejection() {
         let file = path();
         let (store, receipt) = fixture(&file);
+        crate::enterprise::remove_v21_for_fixture(&store.lock_connection().unwrap());
         store.lock_connection().unwrap().execute_batch("DROP TABLE provider_requests; DROP TABLE event_view_stamps; DROP TABLE tool_discoveries; DELETE FROM schema_migrations WHERE version>=18; CREATE TRIGGER discovery_fault BEFORE INSERT ON schema_migrations WHEN NEW.version=18 BEGIN SELECT RAISE(ABORT,'discovery migration fault'); END").unwrap();
         drop(store);
         assert!(RunStore::open(&file).is_err());
@@ -481,7 +609,7 @@ mod tests {
         store
             .lock_connection()
             .unwrap()
-            .execute("INSERT INTO schema_migrations VALUES(21,0)", [])
+            .execute("INSERT INTO schema_migrations VALUES(28,0)", [])
             .unwrap();
         drop(store);
         assert!(RunStore::open(&file).is_err());

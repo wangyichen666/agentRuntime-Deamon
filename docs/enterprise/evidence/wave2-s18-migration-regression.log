@@ -1,0 +1,86 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 58.40s
+     Running tests/enterprise_identity_contract.rs (target/debug/deps/enterprise_identity_contract-f265bb2dfb7eb26d)
+
+running 9 tests
+test expired_time_claim_is_rechecked_after_entering_admission_transaction ... ok
+test concurrent_duplicate_operation_commits_one_authorization_and_payload_conflicts ... ok
+test policy_publish_during_admission_cannot_commit_stale_authorization ... ok
+test async_authorization_uses_shared_native_writer_proof_and_never_reacquires_expired_epoch ... ok
+test authorization_insert_failure_rolls_back_session_run_queue_and_transcript ... ok
+test deny_scope_revocation_and_corruption_never_commit_business_facts ... ok
+test authorized_admission_freezes_policy_and_restart_readback_without_new_facts ... ok
+test async_identity_and_frozen_authorization_preserve_scope_epoch_and_exact_owner_errors ... ok
+test v20_upgrade_maps_legacy_sessions_without_fabricating_run_authorizations_and_failure_is_atomic ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
+
+     Running tests/object_artifact_contract.rs (target/debug/deps/object_artifact_contract-fea04dd63d2d205f)
+
+running 10 tests
+test s3_native_receipt_idempotency_restart_and_commit_fault_contract ... ignored, 必须使用隔离 TLS MinIO 的真实 S3 lane
+test s3_cleartext_endpoint_and_unverified_certificate_configuration_fail_closed ... ok
+test object_io_failure_keeps_original_tool_running_and_prepared_evidence ... ok
+test file_object_port_has_prepared_native_receipt_idempotency_and_restart_contract ... ok
+test interrupted_native_tool_cannot_be_replayed_from_prepared_artifact_evidence ... ok
+test object_io_does_not_hold_canonical_sqlite_transaction_and_late_owner_is_fenced ... ok
+test object_reference_and_tool_terminal_rollback_in_the_same_native_transaction ... ok
+test object_denormalized_column_corruption_and_native_receipt_tampering_fail_closed ... ok
+test object_backend_is_bound_to_frozen_run_and_prepared_gc_protects_file ... ok
+test object_schema_upgrade_has_verified_backup_atomic_failure_and_future_version_rejection ... ok
+
+test result: ok. 9 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.41s
+
+     Running tests/publication_contract.rs (target/debug/deps/publication_contract-aeb0e7f91586a409)
+
+running 14 tests
+test postgres_equal_public_session_and_run_keys_remain_isolated_by_full_scope ... ignored, 独立真实 PostgreSQL lane
+test postgres_expired_epoch_and_crash_before_ack_are_recovered_by_real_worker ... ignored, 独立真实 PostgreSQL lane
+test postgres_immutable_payload_corruption_future_schema_and_disconnect_fail_closed ... ignored, 独立真实 PostgreSQL lane
+test postgres_reconnect_after_inbox_commit_uses_same_ids_and_no_duplicate_receipt ... ignored, 独立真实 PostgreSQL lane
+test postgres_shared_publication_contract ... ignored, 必须通过独立真实 PostgreSQL lane 运行，不把普通本地测试当成 PostgreSQL 验证
+test postgres_two_connections_have_one_winner_without_sleep ... ignored, 独立真实 PostgreSQL lane
+test sqlite_shared_publication_contract ... ok
+test sqlite_receipt_foreign_scope_and_wrong_digest_are_rejected_by_database_foreign_key ... ok
+test sqlite_independent_connections_compete_with_controlled_barrier_and_single_lease_winner ... ok
+test sqlite_restart_after_inbox_commit_before_ack_replays_receipt_without_business_writes ... ok
+test sqlite_outbox_failure_rolls_back_original_event_and_terminal_transaction ... ok
+test sqlite_tamper_is_rejected_and_sql_trigger_prevents_body_rewrites ... ok
+test sqlite_async_delivery_write_yields_the_runtime_during_real_database_lock ... ok
+test sqlite_v21_migration_does_not_backfill_old_events_and_verified_backup_reopens ... ok
+
+test result: ok. 8 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.38s
+
+     Running tests/readback_contract.rs (target/debug/deps/readback_contract-d7ec3956ba41e3d9)
+
+running 7 tests
+test retired_lifetime_cannot_disclose_ownerless_transcript_to_another_session ... ok
+test local_session_page_filters_scope_before_limit_and_cursor ... ok
+test local_readback_never_reads_a_foreign_or_absent_session ... ok
+test damaged_run_lifetime_cannot_project_another_sessions_terminal ... ok
+test async_scoped_readback_and_page_share_canonical_facts_after_restart ... ok
+test v24_upgrade_keeps_ambiguous_legacy_history_quarantined_with_verified_backup ... ok
+test conflicting_v24_lifetime_owners_and_migration_failure_leave_schema_and_facts_unchanged ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s
+
+     Running tests/writer_contract.rs (target/debug/deps/writer_contract-e9d6441652868fc2)
+
+running 14 tests
+test corrupted_provider_receipt_cannot_redirect_unknown_to_another_attempt ... ok
+test native_writer_renewal_preserves_epoch_and_does_not_advance_business_event_clock ... ok
+test native_lifecycle_fork_rotation_tombstone_and_graceful_release_preserve_writer_fence ... ok
+test enabling_writer_does_not_take_over_an_unleased_live_legacy_run ... ok
+test native_writer_expired_process_cannot_self_reacquire_and_unconfigured_store_cannot_bypass ... ok
+test native_writer_old_callback_terminal_transcript_and_recovery_are_fenced_after_takeover ... ok
+test expiry_in_native_commit_rolls_back_tool_receipt_turn_event_and_clock_together ... ok
+test lost_writer_cannot_settle_native_tools_provider_resource_or_ownerless_hook ... ok
+test expired_native_writer_cannot_publish_an_object_as_a_retryable_storage_failure ... ok
+test sqlite_writer_repository_uses_database_time_complete_scope_and_epoch_cas ... ok
+test protected_database_rejects_unconfigured_new_session_without_partial_facts ... ok
+test writer_two_independent_connections_have_one_winner_with_controlled_barrier ... ok
+test interrupted_provider_settlement_is_unknown_atomic_and_rejects_late_success ... ok
+test writer_schema_migration_backup_atomic_rollback_and_future_version_are_verified ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.68s
+

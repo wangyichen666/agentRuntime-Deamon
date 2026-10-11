@@ -1,0 +1,45 @@
+[
+  {
+    "name": "libraries",
+    "exit_code": 0,
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "-p",
+      "agent-storage",
+      "-p",
+      "agent-runtime",
+      "--lib",
+      "--all-features"
+    ]
+  },
+  {
+    "name": "daemon-request",
+    "exit_code": 0,
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--test",
+      "runtime_contract",
+      "provider_context_readback_rebuilds_captured_request_without_replay_or_writes",
+      "--",
+      "--nocapture"
+    ]
+  },
+  {
+    "name": "daemon-summary",
+    "exit_code": 0,
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--test",
+      "runtime_contract",
+      "compact_memory_receipts_survive_restart_and_all_three_entries",
+      "--",
+      "--nocapture"
+    ]
+  }
+]

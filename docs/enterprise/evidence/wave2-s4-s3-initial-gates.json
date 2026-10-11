@@ -1,0 +1,37 @@
+[
+  {
+    "name": "tests",
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--workspace",
+      "--all-targets",
+      "--all-features"
+    ],
+    "exit_code": 101,
+    "seconds": 72.283245,
+    "started_at_utc": "2026-10-07T08:59:49.539947+00:00",
+    "log": "docs/enterprise/evidence/wave2-s4-s3-initial-tests.log",
+    "verification": "failed/unverified"
+  },
+  {
+    "name": "clippy",
+    "command": [
+      "cargo",
+      "clippy",
+      "--locked",
+      "--workspace",
+      "--all-targets",
+      "--all-features",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "exit_code": 101,
+    "seconds": 16.546749,
+    "started_at_utc": "2026-10-07T09:01:01.824118+00:00",
+    "log": "docs/enterprise/evidence/wave2-s4-s3-initial-clippy.log",
+    "verification": "failed/unverified"
+  }
+]

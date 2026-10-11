@@ -1,0 +1,1 @@
+{"returncode": 1, "stderr": " INFO NOTICE: schema \"offline_contract_1\" already exists, skipping\n INFO NOTICE: relation \"coordination_migrations\" already exists, skipping\nError: Conflict\n", "expected": "Conflict"}

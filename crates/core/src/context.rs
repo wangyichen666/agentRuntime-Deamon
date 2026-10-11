@@ -96,6 +96,41 @@ pub fn preserves_current_turn(source: &[Message], replacement: &[Message]) -> bo
     replacement.ends_with(&source[current_turn_start(source)..])
 }
 
+/// 两种事实源共用 compact 候选规则，保留当前轮次及完整工具配对。
+pub fn validate_compaction_candidate(
+    source: &[Message],
+    candidate: &[Message],
+) -> Result<(), crate::CoordinationError> {
+    if !preserves_current_turn(source, candidate)
+        || candidate.is_empty()
+        || candidate.iter().all(|message| {
+            message
+                .content
+                .as_deref()
+                .is_none_or(|content| content.trim().is_empty())
+        })
+    {
+        return Err(crate::CoordinationError::InvalidRequest);
+    }
+    let mut pending = std::collections::VecDeque::new();
+    for message in candidate {
+        if message.role == Role::Tool {
+            if pending.pop_front() != message.tool_call_id.as_deref() {
+                return Err(crate::CoordinationError::InvalidRequest);
+            }
+        } else {
+            if !pending.is_empty() {
+                return Err(crate::CoordinationError::InvalidRequest);
+            }
+            pending.extend(message.tool_calls.iter().map(|call| call.id.as_str()));
+        }
+    }
+    if !pending.is_empty() {
+        return Err(crate::CoordinationError::InvalidRequest);
+    }
+    Ok(())
+}
+
 /// 显式选取的父 run 材料；来源已由宿主核实，文本可能截断或过滤。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DelegationContext {
@@ -103,4 +138,19 @@ pub struct DelegationContext {
     pub parent: ExactOwner,
     pub sources: Vec<crate::MemorySourceEvidence>,
     pub digest: String,
+}
+
+/// 同事务的原运行上下文，不是入口DTO或缓存事实。
+#[derive(Clone, Debug)]
+pub struct RunContextReadback {
+    pub snapshot: crate::SessionSnapshot,
+    pub projection: ContextProjection,
+    pub frozen: crate::RunSnapshot,
+}
+/// 原compact运行、回执和最后事件stamp的同事务投影。
+#[derive(Clone, Debug)]
+pub struct RunCompactReadback {
+    pub run: crate::RunRecord,
+    pub receipt: crate::CompactRunReadback,
+    pub view_stamp: Option<crate::ViewStamp>,
 }

@@ -1,0 +1,3 @@
+error: no test target named `run_event_contract` in `agent-storage` package
+help: available test in `my-agent` package:
+    run_event_contract

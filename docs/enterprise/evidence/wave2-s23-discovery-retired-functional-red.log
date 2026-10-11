@@ -1,0 +1,19 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.80s
+     Running tests/run_discovery_contract.rs (target/debug/deps/run_discovery_contract-10274f22e49e13bc)
+
+running 1 test
+
+thread 'retired_discovery_readback_uses_permanent_lifetime_without_current_writer' panicked at tests/run_discovery_contract.rs:72:5:
+永久归属历史读取不要求当前head/writer，实际 Err(Protocol("stale session lifetime"))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test retired_discovery_readback_uses_permanent_lifetime_without_current_writer ... FAILED
+
+failures:
+
+failures:
+    retired_discovery_readback_uses_permanent_lifetime_without_current_writer
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.05s
+
+error: test failed, to rerun pass `--test run_discovery_contract`

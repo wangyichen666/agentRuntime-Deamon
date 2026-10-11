@@ -1,0 +1,16 @@
+{
+  "date": "2026-10-09",
+  "enterprise_ready": false,
+  "full_gates_run": false,
+  "postgres_version": "18.6",
+  "postgres_canonical_schema": 2,
+  "native_memory_delegation_recovery_contract": "passed",
+  "resource_lifecycle_rollback_contract": "passed",
+  "temporary_database_cleaned": true,
+  "daemon_smoke": [
+    {"backend":"sqlite","startup":"passed","chat":"passed","restart_dedup":"passed","model_calls":1},
+    {"backend":"postgres-local","startup":"passed","chat":"passed","restart_dedup":"passed","model_calls":1,"sqlite_facts_created":false}
+  ],
+  "model_service": "isolated_loopback_fixture",
+  "full_enterprise_backend_verified": false
+}

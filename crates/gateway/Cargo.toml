@@ -7,6 +7,7 @@ publish = false
 
 [dependencies]
 agent-core = { version = "=0.1.0", path = "../core" }
+agent-identity = { version = "=0.1.0", path = "../identity" }
 agent-daemon-client = { version = "=0.1.0", path = "../daemon-client" }
 agent-daemon-protocol = { version = "=0.1.0", path = "../daemon-protocol" }
 agent-entry-support = { version = "=0.1.0", path = "../entry-support" }

@@ -1,0 +1,27 @@
+   Compiling agent-acp v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/acp)
+   Compiling agent-cli v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/cli)
+   Compiling agent-gateway v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/gateway)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling agent-artifact v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/artifact)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+error[E0599]: no method named `health_report` found for struct `RunStore` in the current scope
+   --> tests/object_artifact_contract.rs:428:25
+    |
+428 |     assert_eq!(upgraded.health_report().unwrap()["schema_version"], 23);
+    |                         ^^^^^^^^^^^^^ method not found in `RunStore`
+    |
+   ::: /Users/pilot/Documents/myproject/agent-rust/crates/storage/src/ports.rs:493:8
+    |
+493 |     fn health_report(&self) -> Result<Value, RuntimeError>;
+    |        ------------- the method is available for `RunStore` here
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `MaintenanceRepository` which provides `health_report` is implemented but not in scope; perhaps you want to import it
+    |
+2   + use agent_storage::MaintenanceRepository;
+    |
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `my-agent` (test "object_artifact_contract") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

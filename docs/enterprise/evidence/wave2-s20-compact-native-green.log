@@ -1,0 +1,9 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+error[E0599]: no variant named `Clear` found for enum `agent_core::SessionCommand`
+   --> tests/run_context_contract.rs:460:30
+    |
+460 |             &SessionCommand::Clear {
+    |                              ^^^^^ variant not found in `agent_core::SessionCommand`
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `my-agent` (test "run_context_contract") due to 1 previous error

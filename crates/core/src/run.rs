@@ -44,6 +44,23 @@ impl RunStatus {
     }
 }
 
+/// 两种存储后端共用的终态归一化规则；未知外部副作用不能被成功或取消覆盖。
+pub fn normalize_run_terminal_status(
+    requested: RunStatus,
+    incomplete_tools: bool,
+    incomplete_providers: bool,
+    started_side_effects: bool,
+) -> RunStatus {
+    if incomplete_tools
+        || incomplete_providers
+        || (requested == RunStatus::Cancelled && started_side_effects)
+    {
+        RunStatus::UnknownAfterRestart
+    } else {
+        requested
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -73,4 +90,11 @@ mod tests {
             Err(DomainError::UnknownRunStatus("future".into()))
         );
     }
+}
+
+/// 调度器只引用原 native run 的未确认结果，不能将成功文本当作终态证明。
+#[derive(Debug, thiserror::Error)]
+#[error("运行结果未确认，须核对原始 run：{run_id:?}")]
+pub struct RunOutcomeUnknown {
+    pub run_id: crate::RunId,
 }

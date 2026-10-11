@@ -1,0 +1,42 @@
+    Updating `rsproxy-sparse` index
+ Downloading crates ...
+  Downloaded reqwest v0.13.5 (registry `rsproxy-sparse`)
+reqwest #http #request #client
+higher level HTTP client library
+version: 0.13.5
+license: MIT OR Apache-2.0
+rust-version: 1.85.0
+documentation: https://docs.rs/reqwest
+repository: https://github.com/seanmonstar/reqwest
+crates.io: https://crates.io/crates/reqwest/0.13.5
+features:
+ +default                     = [default-tls, charset, http2, system-proxy]
+  __rustls                    = [dep:hyper-rustls, dep:tokio-rustls, dep:rustls, __tls]
+  __rustls-aws-lc-rs          = [hyper-rustls?/aws-lc-rs, tokio-rustls?/aws-lc-rs, rustls?/aws-lc-rs, quinn?/rustls-aws-lc-rs]
+  __tls                       = [dep:rustls-pki-types, tokio/io-util]
+  charset                     = [dep:encoding_rs, dep:mime]
+  default-tls                 = [rustls]
+  http2                       = [dep:h2, hyper/http2, hyper-util/http2, hyper-rustls?/http2]
+  rustls                      = [__rustls-aws-lc-rs, dep:rustls-platform-verifier, __rustls]
+  system-proxy                = [hyper-util/client-proxy-system]
+  __native-tls                = [dep:hyper-tls, dep:native-tls-crate, __tls, dep:tokio-native-tls]
+  __native-tls-alpn           = [native-tls-crate?/alpn, hyper-tls?/alpn]
+  blocking                    = [dep:futures-channel, futures-channel?/sink, dep:futures-util, futures-util?/io, futures-util?/sink, tokio/sync]
+  brotli                      = [tower-http/decompression-br]
+  cookies                     = [dep:cookie_crate, dep:cookie_store]
+  deflate                     = [tower-http/decompression-deflate]
+  form                        = [dep:serde, dep:serde_urlencoded]
+  gzip                        = [tower-http/decompression-gzip]
+  hickory-dns                 = [dep:hickory-resolver, dep:once_cell]
+  http3                       = [rustls, dep:h3, dep:h3-quinn, dep:quinn, tokio/macros]
+  json                        = [dep:serde, dep:serde_json]
+  multipart                   = [dep:mime_guess, dep:futures-util]
+  native-tls                  = [__native-tls, __native-tls-alpn]
+  native-tls-no-alpn          = [__native-tls]
+  native-tls-vendored         = [__native-tls, native-tls-crate?/vendored, __native-tls-alpn]
+  native-tls-vendored-no-alpn = [__native-tls, native-tls-crate?/vendored]
+  query                       = [dep:serde, dep:serde_urlencoded]
+  rustls-no-provider          = [dep:rustls-platform-verifier, __rustls]
+  socks                       = []
+  stream                      = [tokio/fs, dep:futures-util, dep:tokio-util, dep:wasm-streams]
+  zstd                        = [tower-http/decompression-zstd]

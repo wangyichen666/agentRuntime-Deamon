@@ -1,47 +1,26 @@
 //! 学习信号只接受用户反馈，查询原文与记忆内容不复制到学习表。
-use super::{MaintenanceRepository, MemoryRepository, RunStore, RuntimeError, SessionQuery};
+#[cfg(test)]
+use super::MemoryRepository;
+use super::{RunStore, RuntimeError, SessionQuery};
 use agent_core::*;
 use rusqlite::{OptionalExtension, params};
 
 impl RunStore {
     pub fn next_memory_ingest_due(&self) -> Result<Option<i64>, RuntimeError> {
+        self.next_memory_ingest_due_scoped(&TenantContext::local())
+    }
+    pub(crate) fn next_memory_ingest_due_scoped(
+        &self,
+        scope: &TenantContext,
+    ) -> Result<Option<i64>, RuntimeError> {
         let db = self.lock_connection()?;
-        Ok(db.query_row("SELECT MIN(COALESCE(b.retry_at_ms,0)) FROM turn_commits t JOIN runs r ON r.id=t.run_id JOIN session_heads h ON h.lifetime=r.lifetime AND h.deleted=0 LEFT JOIN memory_ingest_retries b ON b.run_id=t.run_id WHERE t.status='completed' AND NOT EXISTS(SELECT 1 FROM compact_run_links c WHERE c.run_id=t.run_id) AND NOT EXISTS(SELECT 1 FROM memory_ingests i WHERE i.run_id=t.run_id) AND NOT EXISTS(SELECT 1 FROM run_snapshots s WHERE s.run_id=t.run_id AND json_extract(s.snapshot_json,'$.context_read_only')=1) AND COALESCE(b.attempts,0)<3",[],|r|r.get(0))?)
+        Ok(db.query_row("SELECT MIN(COALESCE(b.retry_at_ms,0)) FROM turn_commits t JOIN runs r ON r.id=t.run_id JOIN session_scopes sc ON sc.session_id=r.session_id JOIN tenants tn ON tn.id=sc.tenant_id JOIN session_heads h ON h.session_id=r.session_id AND h.lifetime=r.lifetime AND h.deleted=0 LEFT JOIN memory_ingest_retries b ON b.run_id=t.run_id WHERE tn.organization_id=?1 AND sc.tenant_id=?2 AND sc.project_id=?3 AND sc.agent_uid=?4 AND t.status='completed' AND NOT EXISTS(SELECT 1 FROM compact_run_links c WHERE c.run_id=t.run_id) AND NOT EXISTS(SELECT 1 FROM memory_ingests i WHERE i.run_id=t.run_id) AND NOT EXISTS(SELECT 1 FROM run_snapshots s WHERE s.run_id=t.run_id AND CASE WHEN length(CAST(s.snapshot_json AS BLOB))<=1048576 AND json_valid(s.snapshot_json) THEN json_extract(s.snapshot_json,'$.context_read_only')=1 ELSE 0 END) AND COALESCE(b.attempts,0)<3",params![scope.organization_id.as_str(),scope.tenant_id.as_str(),scope.project_id.as_str(),scope.agent_uid.as_str()],|r|r.get(0))?)
     }
     pub fn memory_assessments(
         &self,
         visibility: &MemoryVisibility,
     ) -> Result<Vec<MemoryAssessment>, RuntimeError> {
-        let db = self.lock_connection()?;
-        // 与候选集的上限对齐，不能因新评价挤掉仍在候选集中的旧负反馈。
-        let mut q = db.prepare("SELECT memory_id,content_digest,feedback FROM memory_assessments WHERE lifetime=?1 AND memory_id IN (SELECT id FROM memories WHERE ((scope='session' AND lifetime=?1) OR (scope='project' AND project=?2) OR (scope='global' AND ?3 AND json_extract(data_json,'$.confirmed_by_user')=1 AND json_extract(data_json,'$.layer')='semantic')) AND (json_extract(data_json,'$.expires_at') IS NULL OR json_extract(data_json,'$.expires_at')>?4) ORDER BY rowid DESC LIMIT 1000) ORDER BY memory_id")?;
-        let rows = q
-            .query_map(
-                params![
-                    visibility.lifetime.0,
-                    visibility.project,
-                    visibility.allow_confirmed_global,
-                    super::now_ms() / 1000
-                ],
-                |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                    ))
-                },
-            )?
-            .collect::<Result<Vec<_>, _>>()?;
-        rows.into_iter()
-            .map(|(memory_id, content_digest, raw)| {
-                Ok(MemoryAssessment {
-                    memory_id,
-                    content_digest,
-                    feedback: serde_json::from_str(&raw)
-                        .map_err(|e| RuntimeError::Protocol(e.to_string()))?,
-                })
-            })
-            .collect()
+        self.memory_assessments_scoped(visibility, None)
     }
 
     pub fn record_memory_exposures(
@@ -50,6 +29,96 @@ impl RunStore {
         entries: &[MemoryExposure],
         channel: &str,
         policy: &str,
+    ) -> Result<(), RuntimeError> {
+        self.record_memory_exposures_scoped(owner, entries, channel, policy, None)
+    }
+
+    pub fn memory_feedback(
+        &self,
+        owner: &ExactOwner,
+        operation: &str,
+        memory_id: &str,
+        feedback: MemoryFeedback,
+    ) -> Result<(), RuntimeError> {
+        self.memory_feedback_scoped(owner, operation, memory_id, feedback, None)
+    }
+
+    pub fn flywheel_report(
+        &self,
+        lifetime: &SessionLifetimeId,
+    ) -> Result<serde_json::Value, RuntimeError> {
+        self.flywheel_report_scoped(lifetime, None)
+    }
+
+    pub fn recover_memory_ingests(&self, limit: usize) -> Result<usize, RuntimeError> {
+        self.recover_memory_ingests_scoped(&TenantContext::local(), limit, false)
+    }
+    pub(crate) fn recover_memory_ingests_scoped(
+        &self,
+        scope: &TenantContext,
+        limit: usize,
+        native: bool,
+    ) -> Result<usize, RuntimeError> {
+        let runs = {
+            let db = self.lock_connection()?;
+            let mut q=db.prepare("SELECT CASE WHEN typeof(t.run_id)='text' AND length(CAST(t.run_id AS BLOB)) BETWEEN 1 AND 1024 THEN t.run_id END FROM turn_commits t JOIN runs r ON r.id=t.run_id JOIN session_scopes sc ON sc.session_id=r.session_id JOIN tenants tn ON tn.id=sc.tenant_id JOIN session_heads h ON h.session_id=r.session_id AND h.lifetime=r.lifetime AND h.deleted=0 WHERE tn.organization_id=?3 AND sc.tenant_id=?4 AND sc.project_id=?5 AND sc.agent_uid=?6 AND t.status='completed' AND NOT EXISTS(SELECT 1 FROM compact_run_links c WHERE c.run_id=t.run_id) AND NOT EXISTS(SELECT 1 FROM memory_ingests i WHERE i.run_id=t.run_id) AND NOT EXISTS(SELECT 1 FROM run_snapshots s WHERE s.run_id=t.run_id AND CASE WHEN length(CAST(s.snapshot_json AS BLOB))<=1048576 AND json_valid(s.snapshot_json) THEN json_extract(s.snapshot_json,'$.context_read_only')=1 ELSE 0 END) AND NOT EXISTS(SELECT 1 FROM memory_ingest_retries b WHERE b.run_id=t.run_id AND (b.attempts>=3 OR b.retry_at_ms>?1)) ORDER BY t.rowid LIMIT ?2")?;
+            q.query_map(
+                params![
+                    super::now_ms(),
+                    limit.min(32) as i64,
+                    scope.organization_id.as_str(),
+                    scope.tenant_id.as_str(),
+                    scope.project_id.as_str(),
+                    scope.agent_uid.as_str()
+                ],
+                |r| r.get::<_, Option<String>>(0),
+            )?
+            .collect::<Result<Vec<_>, _>>()?
+        };
+        let mut completed = 0;
+        for run in runs {
+            let run = run.ok_or(CoordinationError::Corrupt)?;
+            let owner = self.run_owner(&RunId(run.clone()))?;
+            let envelope = EnterpriseOwnerEnvelope {
+                scope: scope.clone(),
+                owner: owner.clone(),
+            };
+            match self.ingest_memory_scoped(&owner, if native { Some(&envelope) } else { None }) {
+                Ok(()) => {
+                    self.write_memory_maintenance_scoped(&envelope, "completed")?;
+                    completed += 1;
+                }
+                Err(error) => {
+                    tracing::warn!(run_id=%run,error=%error,"记忆恢复维护失败");
+                    let mut connection = self.lock_connection()?;
+                    let db = connection
+                        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                    // 竞争 clear/delete 后不再写旧 lifetime；其他故障有界退避。
+                    if crate::execution::check_execution_in(&db, &envelope).is_ok() {
+                        db.execute("INSERT INTO memory_ingest_retries VALUES(?1,1,?2) ON CONFLICT(run_id) DO UPDATE SET attempts=attempts+1,retry_at_ms=excluded.retry_at_ms",params![run,super::now_ms()+60_000])?;
+                        crate::ports::maintenance_diagnostic_in(
+                            &db,
+                            &owner,
+                            "memory_ingest",
+                            "failed",
+                        )?;
+                        db.commit()?;
+                    }
+                }
+            }
+        }
+        Ok(completed)
+    }
+}
+
+impl RunStore {
+    pub(crate) fn record_memory_exposures_scoped(
+        &self,
+        owner: &ExactOwner,
+        entries: &[MemoryExposure],
+        channel: &str,
+        policy: &str,
+        envelope: Option<&EnterpriseOwnerEnvelope>,
     ) -> Result<(), RuntimeError> {
         if entries.len() > 20
             || !matches!(channel, "context_prepared" | "tool_result_prepared")
@@ -60,19 +129,19 @@ impl RunStore {
             ));
         }
         let mut db = self.lock_connection()?;
-        let tx = db.transaction()?;
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        crate::run_memories::check_memory_proof_in(&tx, owner, envelope)?;
         super::sessions::fence_in(&tx, owner)?;
-        let snapshot: Option<String> = tx
-            .query_row(
-                "SELECT snapshot_json FROM run_snapshots WHERE run_id=?1",
-                params![owner.run_id.0],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let snapshot = snapshot
-            .map(|raw| serde_json::from_str::<RunSnapshot>(&raw))
-            .transpose()
-            .map_err(|e| RuntimeError::Protocol(e.to_string()))?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM run_snapshots WHERE run_id=?1)",
+            params![owner.run_id.0],
+            |r| r.get(0),
+        )?;
+        let snapshot = if exists {
+            Some(crate::requests::frozen_in(&tx, &owner.run_id)?)
+        } else {
+            None
+        };
         // 只读运行可以读取已有评价，但不产生学习数据。
         if snapshot.as_ref().is_some_and(|s| s.context_read_only) {
             return Ok(());
@@ -83,19 +152,12 @@ impl RunStore {
             allow_confirmed_global: true,
         };
         for entry in entries {
-            let raw: Option<String> = tx
-                .query_row(
-                    "SELECT data_json FROM memories WHERE id=?1",
-                    params![entry.id],
-                    |r| r.get(0),
-                )
-                .optional()?;
+            let saved =
+                crate::run_memories::read_memory_in(&tx, &entry.id, envelope.map(|e| &e.scope))?;
             // 并发遗忘时只忽略已不存在的项，绝不复活它。
-            let Some(raw) = raw else {
+            let Some(saved) = saved else {
                 continue;
             };
-            let saved: MemoryRecord =
-                serde_json::from_str(&raw).map_err(|e| RuntimeError::Protocol(e.to_string()))?;
             if !visibility.allows(&saved, super::now_ms() as u64 / 1000)
                 || saved.content_digest != entry.content_digest
                 || saved.revision != entry.revision
@@ -121,24 +183,27 @@ impl RunStore {
         super::views::commit(tx)?;
         Ok(())
     }
-
-    pub fn memory_feedback(
+    pub(crate) fn memory_feedback_scoped(
         &self,
         owner: &ExactOwner,
         operation: &str,
         memory_id: &str,
         feedback: MemoryFeedback,
+        envelope: Option<&EnterpriseOwnerEnvelope>,
     ) -> Result<(), RuntimeError> {
         if operation.is_empty() || operation.len() > 128 || memory_id.len() > 512 {
             return Err(RuntimeError::Protocol("feedback 标识超出预算".into()));
         }
         let mut db = self.lock_connection()?;
-        let tx = db.transaction()?;
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        crate::run_memories::check_memory_proof_in(&tx, owner, envelope)?;
         super::memory::writable(&tx, owner)?;
+        let _ = crate::run_memories::read_memory_in(&tx, memory_id, envelope.map(|e| &e.scope))?;
         let command = serde_json::to_string(&(memory_id, feedback))
             .map_err(|e| RuntimeError::Protocol(e.to_string()))?;
-        let old:Option<String>=tx.query_row("SELECT command_json FROM memory_feedback_receipts WHERE run_id=?1 AND operation_id=?2",params![owner.run_id.0,operation],|r|r.get(0)).optional()?;
+        let old:Option<Option<String>>=tx.query_row("SELECT CASE WHEN length(CAST(command_json AS BLOB))<=4096 THEN command_json END FROM memory_feedback_receipts WHERE run_id=?1 AND operation_id=?2",params![owner.run_id.0,operation],|r|r.get(0)).optional()?;
         if let Some(old) = old {
+            let old = old.ok_or(CoordinationError::Corrupt)?;
             if old != command {
                 return Err(RuntimeError::Protocol("feedback operation 幂等冲突".into()));
             }
@@ -175,12 +240,24 @@ impl RunStore {
         super::views::commit(tx)?;
         Ok(())
     }
-
-    pub fn flywheel_report(
+    pub(crate) fn flywheel_report_scoped(
         &self,
         lifetime: &SessionLifetimeId,
+        context: Option<(&TenantContext, &SessionKey)>,
     ) -> Result<serde_json::Value, RuntimeError> {
-        let db = self.lock_connection()?;
+        let mut connection = self.lock_connection()?;
+        let db = connection.transaction()?;
+        if let Some((scope, key)) = context {
+            crate::run_memories::check_memory_read_in(
+                &db,
+                &MemoryVisibility {
+                    lifetime: lifetime.clone(),
+                    project: String::new(),
+                    allow_confirmed_global: false,
+                },
+                Some((scope, key)),
+            )?;
+        }
         let active: bool = db.query_row(
             "SELECT EXISTS(SELECT 1 FROM session_heads WHERE lifetime=?1 AND deleted=0)",
             params![lifetime.0],
@@ -199,7 +276,7 @@ impl RunStore {
             params![lifetime.0],
             |r| r.get(0),
         )?;
-        let mut q=db.prepare("SELECT e.run_id,e.memory_id,e.content_digest,e.channel,e.policy,r.status,a.feedback FROM memory_exposures e JOIN runs r ON r.id=e.run_id LEFT JOIN memory_assessments a ON a.lifetime=e.lifetime AND a.memory_id=e.memory_id AND a.content_digest=e.content_digest WHERE e.lifetime=?1 ORDER BY e.created_at_ms DESC,e.run_id,e.memory_id LIMIT 100")?;
+        let mut q=db.prepare("SELECT CASE WHEN length(CAST(e.run_id AS BLOB)) BETWEEN 1 AND 1024 THEN e.run_id END,CASE WHEN length(CAST(e.memory_id AS BLOB)) BETWEEN 1 AND 512 THEN e.memory_id END,CASE WHEN length(CAST(e.content_digest AS BLOB))=64 THEN e.content_digest END,CASE WHEN length(CAST(e.channel AS BLOB))<=80 THEN e.channel END,CASE WHEN length(CAST(e.policy AS BLOB))<=80 THEN e.policy END,r.status,CASE WHEN length(CAST(a.feedback AS BLOB))<=64 THEN a.feedback END FROM memory_exposures e JOIN runs r ON r.id=e.run_id LEFT JOIN memory_assessments a ON a.lifetime=e.lifetime AND a.memory_id=e.memory_id AND a.content_digest=e.content_digest WHERE e.lifetime=?1 ORDER BY e.created_at_ms DESC,e.run_id,e.memory_id LIMIT 100")?;
         let rows=q.query_map(params![lifetime.0],|r| Ok(serde_json::json!({"run_id":r.get::<_,String>(0)?,"memory_id":r.get::<_,String>(1)?,"content_digest":r.get::<_,String>(2)?,"channel":r.get::<_,String>(3)?,"policy":r.get::<_,String>(4)?,"run_status":r.get::<_,String>(5)?,"feedback":r.get::<_,Option<String>>(6)?.and_then(|s|serde_json::from_str::<serde_json::Value>(&s).ok())})))?.collect::<Result<Vec<_>,_>>()?;
         let mut feedback = serde_json::Map::new();
         for label in ["helpful", "irrelevant", "incorrect", "outdated"] {
@@ -210,49 +287,18 @@ impl RunStore {
             )?;
             feedback.insert(label.into(), count.into());
         }
-        let pending:i64=db.query_row("SELECT count(*) FROM turn_commits t JOIN runs r ON r.id=t.run_id WHERE r.lifetime=?1 AND t.status='completed' AND NOT EXISTS(SELECT 1 FROM compact_run_links c WHERE c.run_id=t.run_id) AND NOT EXISTS(SELECT 1 FROM memory_ingests i WHERE i.run_id=t.run_id) AND NOT EXISTS(SELECT 1 FROM run_snapshots s WHERE s.run_id=t.run_id AND json_extract(s.snapshot_json,'$.context_read_only')=1)",params![lifetime.0],|r|r.get(0))?;
+        let pending:i64=db.query_row("SELECT count(*) FROM turn_commits t JOIN runs r ON r.id=t.run_id WHERE r.lifetime=?1 AND t.status='completed' AND NOT EXISTS(SELECT 1 FROM compact_run_links c WHERE c.run_id=t.run_id) AND NOT EXISTS(SELECT 1 FROM memory_ingests i WHERE i.run_id=t.run_id) AND NOT EXISTS(SELECT 1 FROM run_snapshots s WHERE s.run_id=t.run_id AND CASE WHEN length(CAST(s.snapshot_json AS BLOB))<=1048576 AND json_valid(s.snapshot_json) THEN json_extract(s.snapshot_json,'$.context_read_only')=1 ELSE 0 END)",params![lifetime.0],|r|r.get(0))?;
         let exhausted:i64=db.query_row("SELECT count(*) FROM memory_ingest_retries b JOIN runs r ON r.id=b.run_id WHERE r.lifetime=?1 AND b.attempts>=3 AND NOT EXISTS(SELECT 1 FROM memory_ingests i WHERE i.run_id=b.run_id)",params![lifetime.0],|r|r.get(0))?;
         Ok(
             serde_json::json!({"lifetime":lifetime,"exposure_count":exposure_count,"assessed_memory_count":assessment_count,"feedback":feedback,"pending_ingests":pending,"retry_exhausted":exhausted,"exposures":rows,"has_more":exposure_count>100,"sample_limit":100,"signal_note":"曝光是请求材料准备记录，不证明模型采用；运行成功不等于记忆有用。评价仅用于本会话 lifetime，未改变事实或作用域。"}),
         )
-    }
-
-    pub fn recover_memory_ingests(&self, limit: usize) -> Result<usize, RuntimeError> {
-        let runs = {
-            let db = self.lock_connection()?;
-            let mut q=db.prepare("SELECT t.run_id FROM turn_commits t JOIN runs r ON r.id=t.run_id JOIN session_heads h ON h.lifetime=r.lifetime AND h.deleted=0 WHERE t.status='completed' AND NOT EXISTS(SELECT 1 FROM compact_run_links c WHERE c.run_id=t.run_id) AND NOT EXISTS(SELECT 1 FROM memory_ingests i WHERE i.run_id=t.run_id) AND NOT EXISTS(SELECT 1 FROM run_snapshots s WHERE s.run_id=t.run_id AND json_extract(s.snapshot_json,'$.context_read_only')=1) AND NOT EXISTS(SELECT 1 FROM memory_ingest_retries b WHERE b.run_id=t.run_id AND (b.attempts>=3 OR b.retry_at_ms>?1)) ORDER BY t.rowid LIMIT ?2")?;
-            q.query_map(params![super::now_ms(), limit.min(32) as i64], |r| {
-                r.get::<_, String>(0)
-            })?
-            .collect::<Result<Vec<_>, _>>()?
-        };
-        let mut completed = 0;
-        for run in runs {
-            let owner = self.run_owner(&RunId(run.clone()))?;
-            match self.ingest_committed_turn(&owner) {
-                Ok(()) => {
-                    self.record_maintenance(&owner, "memory_ingest", "completed")?;
-                    completed += 1;
-                }
-                Err(error) => {
-                    tracing::warn!(run_id=%run,error=%error,"记忆恢复维护失败");
-                    let db = self.lock_connection()?;
-                    // 竞争 clear/delete 后不再写旧 lifetime；其他故障有界退避。
-                    if super::sessions::fence_in(&db, &owner).is_ok() {
-                        db.execute("INSERT INTO memory_ingest_retries VALUES(?1,1,?2) ON CONFLICT(run_id) DO UPDATE SET attempts=attempts+1,retry_at_ms=excluded.retry_at_ms",params![run,super::now_ms()+60_000])?;
-                        drop(db);
-                        self.record_maintenance(&owner, "memory_ingest", "failed")?;
-                    }
-                }
-            }
-        }
-        Ok(completed)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::MaintenanceRepository;
     use crate::SessionLifecycle;
     use sha2::{Digest, Sha256};
     static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -496,6 +542,10 @@ mod tests {
         let owner = start(&store, "a", 2);
         let item = memory(&store, &owner, "readonly");
         let snapshot = RunSnapshot {
+            workflow: None,
+            installed_generation:None,
+            billing_policy: None,
+            artifact_store_id: None,
             entry_channel: agent_core::HookChannel::DaemonRpc,
             route: None,
             tools: vec![],
@@ -586,7 +636,7 @@ mod tests {
             store.flywheel_report(&owner.session_lifetime_id).unwrap()["exposure_count"],
             0
         );
-        assert_eq!(store.health_report().unwrap()["schema_version"], 20);
+        assert_eq!(store.health_report().unwrap()["schema_version"], 27);
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }

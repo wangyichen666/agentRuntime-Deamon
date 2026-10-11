@@ -145,7 +145,7 @@ async fn run_serve_command(workspace: &Path, bind: SocketAddr) -> Result<()> {
     let bearer_token = std::env::var("MY_AGENT_API_TOKEN")
         .ok()
         .filter(|value| !value.trim().is_empty());
-    if !bind.ip().is_loopback() && bearer_token.is_none() {
+    if !bind.ip().is_loopback() && bearer_token.is_none() && std::env::var_os("AGENT_OIDC_CONFIG").is_none() {
         anyhow::bail!("非回环地址 {bind} 必须设置 MY_AGENT_API_TOKEN；建议默认使用 127.0.0.1:8787");
     }
     let client = if config::check_environment().is_empty() {

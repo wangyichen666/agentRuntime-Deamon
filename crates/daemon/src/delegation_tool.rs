@@ -34,13 +34,19 @@ impl DelegationTool {
             .context("委派 daemon 尚未就绪")?;
         let (parent_run_id, call_id) =
             current_tool_owner().context("委派工具只能在持久 run 中调用")?;
+        let envelope = agent_runtime::loop_engine::current_execution_envelope()
+            .context("委派工具缺固定准入proof")?;
+        if envelope.owner.run_id != parent_run_id {
+            bail!("委派工具parent proof不匹配");
+        }
         if self.name == "list_subagents" {
             let root = daemon
-                .run_store
-                .delegation(&parent_run_id)?
+                .delegation_store
+                .read_delegation_record(&envelope.scope, &parent_run_id)
+                .await?
                 .map(|child| child.root_run_id)
                 .unwrap_or(parent_run_id);
-            return Ok(json!({"children": daemon.run_store.list_delegations(&root)?}).to_string());
+            return Ok(json!({"children": daemon.delegation_store.read_delegation_list(&envelope.scope,&root).await?}).to_string());
         }
         if self.name == "wait_subagents" {
             let ids = args
@@ -143,8 +149,9 @@ impl DelegationTool {
                     bail!("父 run 已取消；委派子树由 daemon 收敛");
                 }
                 let record = daemon
-                    .run_store
-                    .delegation(&child_run_id)?
+                    .delegation_store
+                    .read_scoped_delegation(&envelope.scope, &envelope.owner.run_id, &child_run_id)
+                    .await?
                     .context("子 Agent 记录消失")?;
                 if record.status.terminal() {
                     results.push(json!({"task": task, "child_run_id": child_run_id,

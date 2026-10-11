@@ -1,0 +1,28 @@
+   Compiling agent-core v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/core)
+   Compiling agent-daemon-protocol v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-protocol)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 27.08s
+     Running unittests src/lib.rs (target/debug/deps/agent_daemon_protocol-be79584bb7aafb2f)
+
+running 1 test
+test tests::null_success_preserves_presence_and_strict_response_shape ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+     Running tests/compatibility.rs (target/debug/deps/compatibility-1b24ea6f5fd36c64)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/connection.rs (target/debug/deps/connection-9556c8e3b35fe405)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/versioned.rs (target/debug/deps/versioned-4b1a88382e05cca6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+

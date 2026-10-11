@@ -1,0 +1,24 @@
+PostgreSQL 18.6 (Postgres.app) on aarch64-apple-darwin23.6.0, compiled by Apple clang version 15.0.0 (clang-1500.3.9.4), 64-bit
+CREATE DATABASE
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.09s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.16s
+     Running tests/publication_contract.rs (target/debug/deps/publication_contract-aeb0e7f91586a409)
+
+running 1 test
+
+thread 'postgres_pending_delivery_keys_reject_oversized_saved_identity' panicked at tests/publication_contract.rs:996:9:
+assertion `left == right` failed: 超预算保存元数据 session_key
+  left: Ok(1)
+ right: Err(Corrupt)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test postgres_pending_delivery_keys_reject_oversized_saved_identity ... FAILED
+
+failures:
+
+failures:
+    postgres_pending_delivery_keys_reject_oversized_saved_identity
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.08s
+
+error: test failed, to rerun pass `--test publication_contract`
+DROP DATABASE

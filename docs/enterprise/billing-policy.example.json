@@ -1,0 +1,56 @@
+{
+  "version": "prices-example-1",
+  "currency": "USD",
+  "window_start_ms": 0,
+  "window_end_ms": 9223372036854775807,
+  "models": {
+    "example-model": {
+      "input_per_million": 2000000,
+      "output_per_million": 8000000,
+      "cache_read_per_million": 200000,
+      "cache_creation_per_million": 2500000
+    }
+  },
+  "tool_call_micros": 100,
+  "sandbox_per_million_ms": 10000,
+  "limits": {
+    "max_rounds": 8,
+    "max_provider_attempts": 16,
+    "max_input_tokens": 1000000,
+    "max_output_tokens_per_attempt": 4096,
+    "max_tool_calls": 32,
+    "max_sandbox_wall_ms": 120000,
+    "max_sandbox_wall_ms_per_resource": 30000
+  },
+  "budgets": [
+    {
+      "dimension": {
+        "kind": "tenant"
+      },
+      "hard_micros": 100000000,
+      "soft_micros": 80000000
+    },
+    {
+      "dimension": {
+        "kind": "project"
+      },
+      "hard_micros": 100000000,
+      "soft_micros": 80000000
+    },
+    {
+      "dimension": {
+        "kind": "agent"
+      },
+      "hard_micros": 100000000,
+      "soft_micros": 80000000
+    },
+    {
+      "dimension": {
+        "kind": "model",
+        "model": "example-model"
+      },
+      "hard_micros": 100000000,
+      "soft_micros": 80000000
+    }
+  ]
+}

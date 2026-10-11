@@ -1,0 +1,13 @@
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+error[E0599]: no variant named `Clear` found for enum `agent_core::SessionCommand`
+   --> tests/hook_observation_contract.rs:292:30
+    |
+292 |             &SessionCommand::Clear {
+    |                              ^^^^^ variant not found in `agent_core::SessionCommand`
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `my-agent` (test "hook_observation_contract") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

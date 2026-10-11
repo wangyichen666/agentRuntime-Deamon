@@ -1,0 +1,25 @@
+   Compiling hyper-rustls v0.27.9
+   Compiling security-framework-sys v2.17.0
+   Compiling crc-catalog v2.5.0
+   Compiling base64 v0.23.1
+   Compiling spin v0.10.1
+   Compiling itertools v0.15.0
+   Compiling quick-xml v0.41.0
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling crc v3.3.0
+   Compiling security-framework v3.7.0
+   Compiling crc-fast v1.9.0
+   Compiling reqwest v0.12.28
+   Compiling rustls-platform-verifier v0.7.1
+   Compiling keyring v3.6.3
+   Compiling reqwest v0.13.5
+   Compiling agent-entry-support v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/entry-support)
+   Compiling agent-gateway v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/gateway)
+   Compiling agent-acp v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/acp)
+   Compiling agent-cli v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/cli)
+   Compiling object_store v0.14.2
+   Compiling agent-artifact v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/artifact)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `release` profile [optimized] target(s) in 44.89s

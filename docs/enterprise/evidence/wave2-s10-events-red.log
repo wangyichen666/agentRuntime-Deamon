@@ -1,0 +1,29 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.17s
+     Running tests/run_event_contract.rs (target/debug/deps/run_event_contract-cef54f166b2d0127)
+
+running 2 tests
+test event_readback_denies_foreign_and_absent_runs_before_reading_payloads ... FAILED
+test event_readback_limits_serialized_bytes_in_addition_to_row_count ... FAILED
+
+failures:
+
+---- event_readback_denies_foreign_and_absent_runs_before_reading_payloads stdout ----
+
+thread 'event_readback_denies_foreign_and_absent_runs_before_reading_payloads' panicked at tests/run_event_contract.rs:34:9:
+越域与不存在同一错误，不能返回私密事件或空成功：Ok([StoredEvent { run_id: RunId("run-1"), seq: EventSeq(1), event: "user_message", data: Object {"content": String("私密输入"), "_my_agent_view": Object {"schema_version": Number(1), "session_key": String("event-session"), "session_lifetime_id": String("c14baa360c719d28834a83767d0a07ef"), "snapshot_revision": Number(9), "metadata_revision": Number(1), "transcript_revision": Number(0), "projection_generation": Number(0), "owner": Object {"session_key": String("event-session"), "session_lifetime_id": String("c14baa360c719d28834a83767d0a07ef"), "run_id": String("run-1"), "run_generation": Number(1), "turn_id": String("turn-1")}, "event_seq": Number(1), "previous_visible_seq": Number(0), "terminal": Bool(false), "interaction": Null}} }])
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- event_readback_limits_serialized_bytes_in_addition_to_row_count stdout ----
+
+thread 'event_readback_limits_serialized_bytes_in_addition_to_row_count' panicked at tests/run_event_contract.rs:47:5:
+合法的有限行仍可能生成无限字节响应；必须分页，当前 1436235 bytes
+
+
+failures:
+    event_readback_denies_foreign_and_absent_runs_before_reading_payloads
+    event_readback_limits_serialized_bytes_in_addition_to_row_count
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
+
+error: test failed, to rerun pass `--test run_event_contract`

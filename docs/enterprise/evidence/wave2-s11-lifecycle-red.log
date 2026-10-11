@@ -1,0 +1,29 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.68s
+     Running tests/lifecycle_port_contract.rs (target/debug/deps/lifecycle_port_contract-2364692b193835bd)
+
+running 2 tests
+test lifecycle_mutation_never_closes_a_foreign_session_or_creates_its_receipt ... FAILED
+test lifecycle_replay_and_close_receipt_check_scope_before_returning_historical_result ... FAILED
+
+failures:
+
+---- lifecycle_mutation_never_closes_a_foreign_session_or_creates_its_receipt stdout ----
+
+thread 'lifecycle_mutation_never_closes_a_foreign_session_or_creates_its_receipt' panicked at tests/lifecycle_port_contract.rs:37:5:
+不能提交越域会话和 Hook/receipt：Ok(SessionMetadata { key: SessionKey("lifecycle"), lifetime: SessionLifetimeId("c26425bfc009674e381f91db12b0909b"), deleted: false, legacy_imported: true, revision: TranscriptSeq(0), updated_at_ms: 1791425725601 })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- lifecycle_replay_and_close_receipt_check_scope_before_returning_historical_result stdout ----
+
+thread 'lifecycle_replay_and_close_receipt_check_scope_before_returning_historical_result' panicked at tests/lifecycle_port_contract.rs:49:9:
+已有 operation 不能绕过资源 scope：Ok(Some(SessionMetadata { key: SessionKey("lifecycle"), lifetime: SessionLifetimeId("0d817231b98fde04128996f33f6c0055"), deleted: false, legacy_imported: true, revision: TranscriptSeq(0), updated_at_ms: 1791425725601 }))
+
+
+failures:
+    lifecycle_mutation_never_closes_a_foreign_session_or_creates_its_receipt
+    lifecycle_replay_and_close_receipt_check_scope_before_returning_historical_result
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+error: test failed, to rerun pass `--test lifecycle_port_contract`

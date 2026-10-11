@@ -1,0 +1,23 @@
+# Wave2-S25 原 Hook 观察事实异步端口
+
+状态：已实施，14项观察存储合同局部通过；storage库87项与新增实际daemon合同均通过，Clippy全workspace/alltargets/allfeatures/-Dwarnings预检通过；完整九项门禁全exit0，真实TLS S3四组通过；S25最后PG回归按用户开发优先要求未执行。SQLite schema27不变，没有新依赖、事实表或执行状态副本。完整Wave2–10仍未完成，enterprise_ready=false。
+
+原HookRepository的hook_readback、hook_publications、acknowledge_hook_publication保留薄兼容入口，统一进入同Connection领域helper；HookObservationRepository三个async端口使用原四permit适配。daemon hooks.readback RPC、/hooks、启动积压排空、lifecycle dispatch查询与ACK已接真实await。claim/settle/Hook进程执行仍是原同步存储链路，未声称整个Hook领域async闭合；continuation、interaction/frozen快照及受管取消/join继续待办。
+
+原路径七合同实际执行，六项有效功能RED（wave2-s25-hook-observation-functional-red.log）：外域读回先解析坏JSON而非Forbidden；外域pending publication被交付；外域ACK成功；保存SQL operation与JSON不同仍交付；保存owner generation与canonical run不同仍交付；超过1MiB的合法HookEffect仍成功返回。第七项只读revision合同原路径已经通过，不算RED。原views::commit没有无条件推进clock，先前预审与 commentary 的推断已纠正；不能称本批修复了一个已证明的只读版本写入问题。
+
+读回在同只读事务内先SQL核完整org/tenant/project/agent/session与永久lifetime归属，再按原rowid顺序交付。额外一行只读cursor判断has_more，不加载或解码下一页JSON；cursor只到本页最后交付记录，保留原limit.clamp(1,32)。SQL原页累计operation+outcome字节≤1MiB−16KiB，单outcome≤48KiB、operation≤256字节，逐行解码。原payload16KiB/状态/effect检查保留，body operation/session/life与原SQL行相同；若有owner，以SQL同时比较run/session/life/generation/turn，不读取另一个run的私有字段。历史只核永久身份，不重新申请writer或要求当前head；退休读、合法ownerless lifecycle/notification与原UnknownAfterRestart语义保留。
+
+原hook_publications仅有operation/payload/dispatched，JSON就是原唯一session/lifetime身份来源。本批没有另添一份身份账本或迁移：SQL CASE先核TEXT、16KiB原JSON字节与json_valid，再用有界身份JOIN原session_scopes/tenants，完整范围过滤在LIMIT64前，避免外域前64行挤占本域队列。保存operation必须等于原SQL键，永久life必须属于原session。16KiB容纳合法1024字节键的JSON转义；不能按未转义字符串预算错误拒绝原键。无法证明任何原session归属的损坏publication使查询Corrupt失败，不静默跳过或修复；这是单Local存储观察端口，不能代替全业务多租户键与原PGfacts迁移。
+
+ACK携带实际已交付publication；先核输入scope/session/permanentlife，再读取有界原身份头并比对，最后decode和原writer fence/同TX dispatched更新。输入event与合法保存记录不同是Conflict；保存operation不同是Corrupt；外域先Forbidden。仅operation的旧维护入口也先SQL有界头、Local范围，随后相同原helper。ACK幂等、历史SessionStart/End及未知不重播事实保持原行为。保存预算只证明SQL抑制字段与实际拒绝合同，未进行独立内存测量，也未声明所有载体的整帧预算闭合。
+
+14项GREEN：wave2-s25-hook-observation-retirement-corrected-green.log。覆盖六RED、只读版本、四域typed错误、分页/下一页坏JSON、退休life、历史ACK幂等、外域70行不饿死本域、累计合法大effect页、保存坏/过大publication零ACK，以及合法转义session键。扩展首轮使用不存在的SessionCommand::Clear导致编译失败，后续两退休夹具误把End(delete=false)当作删除（它实际轮换head）被原session已存在检查拒绝；日志expanded-green / corrected-green全保留。这些夹具错误不计功能RED、不通过放宽原断言/超时/线程配置处理。
+
+新增storage current_thread合同逐个受控占用真实Connection，25ms timer应正常触发；awaiter取消后worker仍占一个permit，真实SQL完成才恢复四permit，ACK仅提交一次原dispatched，无Hook进程副作用。共享预算耗尽时三个端口应均为StorageUnavailable。实际daemon合同使用受信真实observer进程的文件计数，检查RPC与/hooks外域先拒绝、超大保存JSONCorrupt、零隐私泄漏/修复以及重启不重执行observer和Provider；已在S25实际daemon日志通过。
+
+未提交、推送或部署；本地验收不等于CI或生产验收。全业务PG/PGwriter/完整租户唯一键、audit/quota及离线迁移，剩余Hook/MCP/memory/resource/delegation/interaction/管理async链路仍欠。
+
+局部进程与库证据：wave2-s25-storage-reviewed-green.log（87项）；wave2-s25-daemon-observation-reviewed-green.log（实际observer合同1项）；wave2-s25-reviewed-preflight-clippy.log（exit0，无lint例外）。S25验收wave2-s25-reviewed-final九项全部exit0：656 Rust/36 Web/49实际daemon、45执行体、14外部ignored。S25真实S3回归四组通过，PG最后回归未执行。后续S26–S28已开发，尚未编译或测试；S25结果不能覆盖后续当前树。
+
+后续工作按用户最新要求先开发、后集中验证；本报告只记录S25已验源。

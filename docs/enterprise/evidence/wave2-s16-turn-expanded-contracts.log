@@ -1,0 +1,24 @@
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+error[E0716]: temporary value dropped while borrowed
+   --> tests/run_turn_contract.rs:462:39
+    |
+460 |       let (result, elapsed) = tokio::join!(
+    |  _____________________________-
+461 | |         f.store
+462 | |             .stage_run_assistant(&e, &Message::text(Role::Assistant, "result")),
+    | |                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ creates a temporary value which is freed while still in use
+463 | |         async {
+...   |
+467 | |     );
+    | |     -
+    | |     |
+    | |_____temporary value is freed at the end of this statement
+    |       borrow later used here
+    |
+    = note: consider using a `let` binding to create a longer lived value
+
+For more information about this error, try `rustc --explain E0716`.
+error: could not compile `my-agent` (test "run_turn_contract") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

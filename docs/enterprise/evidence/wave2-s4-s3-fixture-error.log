@@ -1,0 +1,19 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.45s
+     Running tests/runtime_contract.rs (target/debug/deps/runtime_contract-00ff273398f4a1c6)
+
+running 1 test
+
+thread 'object_artifacts_use_original_tool_receipt_and_restart_without_provider_replay' panicked at tests/runtime_contract.rs:3129:53:
+called `Option::unwrap()` on a `None` value
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test object_artifacts_use_original_tool_receipt_and_restart_without_provider_replay ... FAILED
+
+failures:
+
+failures:
+    object_artifacts_use_original_tool_receipt_and_restart_without_provider_replay
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 34 filtered out; finished in 1.31s
+
+error: test failed, to rerun pass `--test runtime_contract`

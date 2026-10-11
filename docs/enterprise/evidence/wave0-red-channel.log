@@ -1,0 +1,25 @@
+   Compiling agent-gateway v0.1.0 (/private/var/folders/kz/d16_93b90sv94mfdrvr3_7xc0000gn/T/agent-enterprise-red-0ld9dhnx/repo/crates/gateway)
+   Compiling my-agent v0.1.0 (/private/var/folders/kz/d16_93b90sv94mfdrvr3_7xc0000gn/T/agent-enterprise-red-0ld9dhnx/repo)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.86s
+     Running tests/architecture_contract.rs (/Users/pilot/Documents/myproject/agent-rust/target/debug/deps/architecture_contract-099f64080a5785ad)
+
+running 1 test
+test enterprise_channels_only_allow_exact_documented_legacy_sites_and_no_new_unbounded ... FAILED
+
+failures:
+
+---- enterprise_channels_only_allow_exact_documented_legacy_sites_and_no_new_unbounded stdout ----
+
+thread 'enterprise_channels_only_allow_exact_documented_legacy_sites_and_no_new_unbounded' panicked at tests/architecture_contract.rs:1215:5:
+assertion `left == right` failed: 新无界通道、例外重复或已删除未收口都必须失败
+  left: {"crates/daemon-client/src/lib.rs::request_raw_with_id": 1, "crates/daemon/src/handlers.rs::handle_chat_send_inner": 1, "crates/gateway/src/serve.rs::enterprise_red_unbounded": 1, "crates/gateway/src/serve.rs::handle_websocket": 1, "crates/runtime/src/loop_engine.rs::request_model_once": 1, "crates/runtime/src/tool_calls.rs::collect_response": 1}
+ right: {"crates/daemon-client/src/lib.rs::request_raw_with_id": 1, "crates/daemon/src/handlers.rs::handle_chat_send_inner": 1, "crates/gateway/src/serve.rs::handle_websocket": 1, "crates/runtime/src/loop_engine.rs::request_model_once": 1, "crates/runtime/src/tool_calls.rs::collect_response": 1}
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    enterprise_channels_only_allow_exact_documented_legacy_sites_and_no_new_unbounded
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.62s
+
+error: test failed, to rerun pass `--test architecture_contract`

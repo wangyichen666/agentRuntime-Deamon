@@ -1,0 +1,73 @@
+    Checking agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+    Checking agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+    Checking agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+error[E0433]: failed to resolve: use of undeclared type `TenantContext`
+    --> crates/daemon/src/handlers.rs:1043:29
+     |
+1043 |             .read_run_fact(&TenantContext::local(), &child.parent_run_id)
+     |                             ^^^^^^^^^^^^^ use of undeclared type `TenantContext`
+     |
+help: consider importing this struct
+     |
+1    + use agent_core::TenantContext;
+     |
+
+error[E0433]: failed to resolve: use of undeclared type `TenantContext`
+    --> crates/daemon/src/handlers.rs:1063:18
+     |
+1063 |                 &TenantContext::local(),
+     |                  ^^^^^^^^^^^^^ use of undeclared type `TenantContext`
+     |
+help: consider importing this struct
+     |
+1    + use agent_core::TenantContext;
+     |
+
+error[E0433]: failed to resolve: use of undeclared type `TenantContext`
+    --> crates/daemon/src/handlers.rs:4142:35
+     |
+4142 |             .read_run_view_event(&TenantContext::local(), run, "terminal", None)
+     |                                   ^^^^^^^^^^^^^ use of undeclared type `TenantContext`
+     |
+help: consider importing this struct
+     |
+1    + use agent_core::TenantContext;
+     |
+
+error[E0433]: failed to resolve: use of undeclared type `TenantContext`
+    --> crates/daemon/src/handlers.rs:4224:30
+     |
+4224 | ...                   &TenantContext::local(),
+     |                        ^^^^^^^^^^^^^ use of undeclared type `TenantContext`
+     |
+help: consider importing this struct
+     |
+1    + use agent_core::TenantContext;
+     |
+
+error[E0433]: failed to resolve: use of undeclared type `CoordinationError`
+    --> crates/daemon/src/handlers.rs:4235:40
+     |
+4235 | ...                   .ok_or(CoordinationError::Corrupt)
+     |                              ^^^^^^^^^^^^^^^^^ use of undeclared type `CoordinationError`
+     |
+help: consider importing this enum
+     |
+1    + use agent_core::CoordinationError;
+     |
+
+error[E0433]: failed to resolve: use of undeclared type `TenantContext`
+    --> crates/daemon/src/handlers.rs:4314:35
+     |
+4314 |             .read_run_view_event(&TenantContext::local(), &active, "assistant_content", None)
+     |                                   ^^^^^^^^^^^^^ use of undeclared type `TenantContext`
+     |
+help: consider importing this struct
+     |
+1    + use agent_core::TenantContext;
+     |
+
+For more information about this error, try `rustc --explain E0433`.
+error: could not compile `agent-daemon` (lib) due to 6 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `agent-daemon` (lib test) due to 6 previous errors

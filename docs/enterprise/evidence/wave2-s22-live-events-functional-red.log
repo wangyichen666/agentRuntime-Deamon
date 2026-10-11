@@ -1,0 +1,24 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.29s
+     Running tests/run_event_contract.rs (target/debug/deps/run_event_contract-d9c9a20dddd5294c)
+
+running 2 tests
+
+thread 'live_event_callback_cannot_promote_captured_owner_to_new_generation' panicked at tests/run_event_contract.rs:840:5:
+原callback固定准入owner不可重取新generation，实际为 Ok(EventSeq(2))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'live_event_append_denies_foreign_legacy_run_before_any_mutation' panicked at tests/run_event_contract.rs:826:5:
+原live写入必须先scope，实际为 Ok(EventSeq(2))
+test live_event_callback_cannot_promote_captured_owner_to_new_generation ... FAILED
+test live_event_append_denies_foreign_legacy_run_before_any_mutation ... FAILED
+
+failures:
+
+failures:
+    live_event_append_denies_foreign_legacy_run_before_any_mutation
+    live_event_callback_cannot_promote_captured_owner_to_new_generation
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.06s
+
+error: test failed, to rerun pass `--test run_event_contract`

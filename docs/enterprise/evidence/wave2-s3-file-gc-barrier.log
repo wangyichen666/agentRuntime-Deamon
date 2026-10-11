@@ -1,0 +1,21 @@
+    Blocking waiting for file lock on build directory
+   Compiling agent-core v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/core)
+   Compiling agent-storage-ports v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-ports)
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+error[E0599]: no method named `read_run_artifact` found for struct `Arc<RunStore>` in the current scope
+   --> crates/storage/src/artifact_publication.rs:107:18
+    |
+106 | /             store
+107 | |                 .read_run_artifact(&owner, &reference, 0, 16384)
+    | |                 -^^^^^^^^^^^^^^^^^ method not found in `Arc<RunStore>`
+    | |_________________|
+    |
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `ArtifactRepository` which provides `read_run_artifact` is implemented but not in scope; perhaps you want to import it
+    |
+29  +     use crate::ports::ArtifactRepository;
+    |
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `agent-storage` (lib test) due to 1 previous error

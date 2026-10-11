@@ -1,0 +1,13 @@
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling agent-cli v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/cli)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 26.91s
+     Running tests/runtime_contract.rs (target/debug/deps/runtime_contract-ef559da8ec38e611)
+
+running 1 test
+test scoped_async_session_readback_is_consistent_across_six_entries_and_restart ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 40 filtered out; finished in 4.60s
+

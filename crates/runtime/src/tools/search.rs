@@ -42,7 +42,7 @@ impl SearchCatalog {
         query: ToolSearchQuery,
         cancellation: &dyn ToolCancellation,
     ) -> Result<ToolOutput> {
-        let (repository, owner) = crate::loop_engine::current_session_repository()
+        let owner = crate::loop_engine::current_execution_owner()
             .ok_or_else(|| anyhow::anyhow!("工具发现缺少 canonical owner"))?;
         let (_, call_id) = crate::loop_engine::current_tool_owner()
             .ok_or_else(|| anyhow::anyhow!("工具发现缺少执行身份"))?;
@@ -67,7 +67,7 @@ impl SearchCatalog {
             query,
             result,
         };
-        let saved = repository.publish_discovery(&receipt)?;
+        let saved = crate::loop_engine::publish_current_discovery(&receipt).await?;
         Ok(ToolOutput::text(serde_json::to_string(&saved.result)?))
     }
 }
@@ -107,8 +107,16 @@ mod tests {
     use serde_json::json;
     #[tokio::test(flavor = "multi_thread")]
     async fn cancelled_blocking_worker_cannot_publish_a_discovery_after_return() {
+        cancelled_search_worker(false).await;
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn native_cancelled_search_worker_cannot_publish_discovery_after_return() {
+        cancelled_search_worker(true).await;
+    }
+    async fn cancelled_search_worker(native: bool) {
         use agent_core::*;
         use agent_storage::{DiscoveryRepository, RunStore, SessionLifecycle, SessionQuery};
+        use agent_storage_ports::RunDiscoveryRepository;
         let store = Arc::new(RunStore::open(std::path::Path::new(":memory:")).unwrap());
         let meta = store
             .create_session(&SessionKey("cancel-search".into()))
@@ -125,6 +133,7 @@ mod tests {
         let Admission::New(run) = store
             .admit_run(
                 &RunAdmission {
+                    workflow_node: None,
                     session_key: meta.key,
                     expected_lifetime: Some(meta.lifetime),
                     request_id: RequestId::Number(1),
@@ -171,25 +180,47 @@ mod tests {
         let worker_catalog = catalog.clone();
         let signal = cancellation.clone();
         let run_id = run.run_id.clone();
+        let envelope = EnterpriseOwnerEnvelope {
+            scope: TenantContext::local(),
+            owner: owner.clone(),
+        };
+        let worker_envelope = envelope.clone();
         let task = tokio::spawn(async move {
-            crate::loop_engine::with_tool_audit(
-                worker_store,
-                run_id,
-                crate::loop_engine::with_test_tool_identity(
-                    "cancel-search-call".into(),
-                    worker_catalog.execute(
-                        ToolSearchQuery {
-                            query: "list".into(),
-                            limit: None,
-                        },
-                        &*signal,
-                    ),
+            let future = crate::loop_engine::with_test_tool_identity(
+                "cancel-search-call".into(),
+                worker_catalog.execute(
+                    ToolSearchQuery {
+                        query: "list".into(),
+                        limit: None,
+                    },
+                    &*signal,
                 ),
-            )
-            .await
+            );
+            if native {
+                crate::loop_engine::with_tool_audit_execution(
+                    worker_store.clone(),
+                    worker_envelope,
+                    crate::loop_engine::NativeExecutionPorts {
+                        attempts: worker_store.clone(),
+                        tools: worker_store.clone(),
+                        turns: worker_store.clone(),
+                        requests: worker_store.clone(),
+                        discoveries: worker_store.clone(),
+                        memories: worker_store,
+                    },
+                    future,
+                )
+                .await
+            } else {
+                crate::loop_engine::with_tool_audit(worker_store, run_id, future).await
+            }
         });
         cancellation.waiting.notified().await;
-        store.request_cancellation(&owner).unwrap();
+        if native {
+            store.request_run_cancellation(&envelope).await.unwrap();
+        } else {
+            store.request_cancellation(&owner).unwrap();
+        }
         cancellation.token.cancel();
         let result = tokio::time::timeout(std::time::Duration::from_secs(2), task)
             .await

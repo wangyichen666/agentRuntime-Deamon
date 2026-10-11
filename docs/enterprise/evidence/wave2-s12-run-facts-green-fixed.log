@@ -1,0 +1,16 @@
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling agent-cli v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/cli)
+   Compiling agent-gateway v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/gateway)
+   Compiling agent-acp v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/acp)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 34.20s
+     Running tests/run_fact_contract.rs (target/debug/deps/run_fact_contract-4c047fc82807f7a0)
+
+running 2 tests
+test provider_history_does_not_trust_inner_json_owner_fields ... ok
+test run_fact_readback_never_reveals_foreign_content ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+

@@ -1,0 +1,33 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+warning: unused import: `agent_storage::RunRepository`
+   --> tests/run_turn_contract.rs:700:9
+    |
+700 |     use agent_storage::RunRepository;
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` on by default
+
+warning: `my-agent` (test "run_turn_contract") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.40s
+     Running tests/run_turn_contract.rs (target/debug/deps/run_turn_contract-f4d8aa1774b2031e)
+
+running 1 test
+test native_plan_execution_validates_original_decision_receipt_identity_before_transition ... FAILED
+
+failures:
+
+---- native_plan_execution_validates_original_decision_receipt_identity_before_transition stdout ----
+
+thread 'native_plan_execution_validates_original_decision_receipt_identity_before_transition' panicked at tests/run_turn_contract.rs:756:9:
+assertion `left == right` failed: 字段 run_id
+  left: Ok(())
+ right: Err(Coordination(Corrupt))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    native_plan_execution_validates_original_decision_receipt_identity_before_transition
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.05s
+
+error: test failed, to rerun pass `--test run_turn_contract`

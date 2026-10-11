@@ -1,0 +1,20 @@
+PostgreSQL 18.6 (Postgres.app) on aarch64-apple-darwin23.6.0, compiled by Apple clang version 15.0.0 (clang-1500.3.9.4), 64-bit
+CREATE DATABASE
+   Compiling agent-core v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/core)
+   Compiling agent-storage-ports v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-ports)
+   Compiling agent-storage-postgres v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-postgres)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 26.50s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.39s
+     Running tests/publication_contract.rs (target/debug/deps/publication_contract-e8e473e589cc2af5)
+
+running 6 tests
+test postgres_two_connections_have_one_winner_without_sleep ... ok
+test postgres_equal_public_session_and_run_keys_remain_isolated_by_full_scope ... ok
+test postgres_reconnect_after_inbox_commit_uses_same_ids_and_no_duplicate_receipt ... ok
+test postgres_shared_publication_contract ... ok
+test postgres_immutable_payload_corruption_future_schema_and_disconnect_fail_closed ... ok
+test postgres_expired_epoch_and_crash_before_ack_are_recovered_by_real_worker ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.81s
+
+DROP DATABASE

@@ -1,0 +1,80 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.28s
+     Running tests/runtime_contract.rs (target/debug/deps/runtime_contract-b79d5cf341cb953c)
+
+running 50 tests
+test child_read_permission_stays_frozen_after_parent_mode_changes ... ok
+test acp_v2_stdio_negotiates_strict_connection_before_shared_readback ... ok
+test acp_slow_stdio_detaches_without_settling_native_run ... ok
+test acp_v2_long_prompt_and_native_compact_allow_exact_control_without_private_terminal ... FAILED
+test acp_v1_permission_rejects_v2_identity_before_approval_and_v2_can_recover ... ok
+test concurrent_children_finish_and_remain_addressable_by_stable_ids ... ok
+test central_async_authorization_storage_fault_preserves_typed_error_and_zero_admission ... ok
+test daemon_queue_is_durable_and_exact_cancel_does_not_hit_running_run ... ok
+test committed_terminal_survives_real_daemon_restart_and_uncertain_run_is_not_replayed ... ok
+test acp_v2_plan_controls_and_v1_reject_metadata_share_canonical_decisions ... ok
+test acp_v2_pending_interaction_reconnect_does_not_cancel_or_replay_provider ... ok
+test automatic_compact_hooks_follow_real_intents_and_settlements ... ok
+test bounded_scoped_run_events_share_six_entries_and_restart_without_replay ... ok
+test foreground_terminal_keeps_admitted_generation_and_restart_never_replays_unknown_provider ... ok
+test compact_memory_receipts_survive_restart_and_all_three_entries ... ok
+test governed_session_hooks_follow_publication_once_and_survive_restart ... ok
+test durable_subagent_spawn_wait_restart_and_scoped_cancel ... FAILED
+test deferred_tools_reject_direct_unfound_fuzzy_and_invalid_nested_schema_without_execution ... ok
+test lifecycle_ports_reject_foreign_and_absent_commands_and_survive_fault_and_restart ... ok
+test native_writer_cron_s3_preserves_original_receipt_and_never_falls_back_to_file ... ignored, 需要独立真实 TLS MinIO，验证原生后台 writer 和冻结对象 backend
+test memory_maintenance_drains_multiple_batches_before_idle_exit ... ok
+test memory_flywheel_learns_from_user_feedback_across_restart_and_purges_on_forget ... ok
+test object_artifacts_use_original_tool_receipt_and_restart_without_provider_replay ... ignored, 需要独立真实 TLS MinIO lane
+test model_spawn_tool_uses_durable_delegation_and_receipt ... ok
+test deferred_tool_search_roundtrip_freezes_catalog_and_refills_same_dispatcher ... ok
+test governed_tool_approval_error_and_terminal_hooks_use_durable_owners_and_redacted_payloads ... ok
+test file_artifact_shared_readback_restart_and_link_denial_preserve_native_tool_receipt ... ok
+test paged_run_events_subscription_keeps_last_delivered_cursor_and_never_replays_provider ... ok
+test provider_request_accepted_then_cancelled_is_unknown_without_retry_or_restart_replay ... ok
+test provider_request_accepted_then_connection_lost_is_unknown_without_retry_or_restart_replay ... ok
+test revision_reducer_rejects_delayed_readback_and_retired_lifetime_over_socket ... ok
+test enterprise_identity_is_canonical_and_survives_daemon_restart ... ok
+test native_writer_cron_uses_daemons_canonical_repository_and_proof ... ok
+test native_writer_health_six_projections_and_graceful_restart_share_database_facts ... ok
+test running_subagent_becomes_unknown_after_daemon_crash_without_replay ... ok
+test provider_context_readback_rebuilds_captured_request_without_replay_or_writes ... ok
+test second_live_daemon_cannot_recover_the_first_daemons_native_running_session ... ok
+test restarted_pending_plan_can_be_discarded_by_exact_identity_and_release_its_queue ... ok
+test shared_client_resyncs_real_dropped_frame_and_duplicate_without_provider_replay ... ok
+test session_delete_recreate_and_fork_survive_restart_without_old_history_or_dual_write ... ok
+test scoped_async_session_readback_is_consistent_across_six_entries_and_restart ... ok
+test manual_compact_has_immediate_native_started_exact_cancel_and_unknown_restart ... ok
+test stop_continuation_crash_preserves_unknown_child_without_replaying_hook_or_provider ... ok
+test stop_continuation_has_a_new_native_run_and_exact_cancel_preserves_parent_terminal ... ok
+test manual_compact_hooks_publish_no_gain_rejection_and_summary_failure_after_settlement ... ok
+test provider_request_accepted_then_silent_timeout_is_unknown_without_retry_or_restart_replay ... ok
+test transactional_outbox_is_durable_before_publication_and_shared_after_restart ... ok
+test scoped_run_facts_tools_and_provider_share_six_entries_and_restart_without_replay ... ok
+test scheduled_native_cron_renews_and_recovers_without_provider_replay ... ok
+test versioned_plan_readback_execute_discard_and_restart_share_daemon_facts ... ok
+
+failures:
+
+---- acp_v2_long_prompt_and_native_compact_allow_exact_control_without_private_terminal stdout ----
+
+thread 'acp_v2_long_prompt_and_native_compact_allow_exact_control_without_private_terminal' panicked at tests/runtime_contract.rs:476:224:
+assertion `left == right` failed
+  left: String("unknown_after_restart")
+ right: "cancelled"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- durable_subagent_spawn_wait_restart_and_scoped_cancel stdout ----
+
+thread 'durable_subagent_spawn_wait_restart_and_scoped_cancel' panicked at tests/runtime_contract.rs:2711:9:
+assertion `left == right` failed
+  left: String("unknown_after_restart")
+ right: "cancelled"
+
+
+failures:
+    acp_v2_long_prompt_and_native_compact_allow_exact_control_without_private_terminal
+    durable_subagent_spawn_wait_restart_and_scoped_cancel
+
+test result: FAILED. 46 passed; 2 failed; 2 ignored; 0 measured; 0 filtered out; finished in 35.10s
+
+error: test failed, to rerun pass `--test runtime_contract`

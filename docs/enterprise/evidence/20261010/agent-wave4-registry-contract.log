@@ -1,0 +1,75 @@
+   Compiling agent-core v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/core)
+   Compiling signature v2.2.0
+   Compiling curve25519-dalek v4.1.3
+   Compiling ed25519 v2.2.3
+   Compiling agent-daemon-protocol v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-protocol)
+   Compiling agent-identity v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/identity)
+   Compiling agent-plugin v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/plugin)
+   Compiling agent-storage-ports v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-ports)
+   Compiling agent-context v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/context)
+   Compiling agent-memory v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/memory)
+   Compiling agent-sandbox v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/sandbox)
+   Compiling agent-policy v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/policy)
+   Compiling ed25519-dalek v2.2.0
+   Compiling agent-artifact v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/artifact)
+   Compiling agent-daemon-client v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-client)
+   Compiling agent-pack v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/pack)
+   Compiling agent-entry-support v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/entry-support)
+   Compiling agent-registry v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/registry)
+   Compiling agent-acp v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/acp)
+   Compiling agent-cli v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/cli)
+   Compiling agent-gateway v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/gateway)
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling agent-storage-postgres v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-postgres)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+warning: fields `run_store` and `maintenance_store` are never read
+  --> crates/daemon/src/lib.rs:53:16
+   |
+40 | pub struct DaemonState {
+   |            ----------- fields in this struct
+...
+53 |     pub(crate) run_store: Option<Arc<dyn ControlRepository>>,
+   |                ^^^^^^^^^
+...
+58 |     pub(crate) maintenance_store: Option<Arc<dyn MaintenanceRepository>>,
+   |                ^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: methods `legacy_run_store` and `legacy_maintenance_store` are never used
+   --> crates/daemon/src/lib.rs:954:8
+    |
+953 | impl DaemonState {
+    | ---------------- methods in this implementation
+954 |     fn legacy_run_store(&self) -> &Arc<dyn ControlRepository> {
+    |        ^^^^^^^^^^^^^^^^
+...
+957 |     fn legacy_maintenance_store(&self) -> &Arc<dyn MaintenanceRepository> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `stop_resource`, `start_background`, and `wait_resource` are never used
+   --> crates/daemon/src/resources.rs:186:25
+    |
+36  | impl DaemonState {
+    | ---------------- methods in this implementation
+...
+186 |     pub(crate) async fn stop_resource(
+    |                         ^^^^^^^^^^^^^
+...
+227 |     pub(crate) async fn start_background(
+    |                         ^^^^^^^^^^^^^^^^
+...
+242 |     pub(crate) async fn wait_resource(
+    |                         ^^^^^^^^^^^^^
+
+warning: `agent-daemon` (lib) generated 3 warnings
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 26s
+     Running tests/registry_contract.rs (target/debug/deps/registry_contract-3d6fbc9749269998)
+
+running 1 test
+test sqlite_registry_signed_generation ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.08s
+

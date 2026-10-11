@@ -1,0 +1,15 @@
+# Wave2-S21 即时事件投影异步化
+
+状态：implemented / locally verified，完整九项门禁及真实环境回归通过。schema27不变，完整Wave2–10未完成，enterprise_ready=false。
+
+原events与event_view_stamps/outbox是唯一事实。RunEventRepository新增实际read_run_view_event，daemon终态、订阅终态、完成通知、委派通知真实await；发布后的精确seq读取使用原有read_run_events端口。压缩与队列取消的终态查询移到active mutex外。原views.latest_view_event仅薄委托同scope只读事务，原events.decode_event_in负责唯一JSON/stamp解码，未复制业务SQL或创建新账本。
+
+同读事务先SQL判定organization/tenant/project/agent/run/session，再核永久lifetime归属。按原event/child精确读取最新一条，避免扫描分页历史拼latest；child只是已授权parent的事件过滤器，不授予child资源权限。SQL CASE在装入Rust前核payload字节，编码事件含封存stamp仍需小于1MiB减1KiB；缺失或损坏native stamp不能降legacy。读取零clock/outbox/writer变化，退休lifetime按原永久归属读回，不重取epoch。所有新方法共用四permit，错误仅core协调分类。
+
+两项真实旧路径RED：wave2-s21-latest-event-functional-red.log。foreign helper真实返回私密terminal与原stamp；合法2MiB事件成功返回。首次17项合同16过，退休life后的错误夹具试改events被原stale fact owner拒绝，未到decoder；已改为合法stamp JSON保留旧digest验证SHA，不称events payload具备该stamp摘要。现覆盖四scope维度/absent统一Forbidden、精确child与原事件/stamp逐字段相同、退休历史零lease/clock、合法stamp错digest拒绝。新增current_thread真实Connection占有合同验证25ms timer不阻塞、取消后四permit最终回收；该锁合同及child原SQL预算合同已纳入最终storage84/event18与完整门禁。
+
+初始编译失败为Err.into闭包类型推断及daemon显式imports遗漏，另一次错误字段readback_store修为原run_fact_store；日志保留，不放宽lint/架构，不计业务RED。
+
+本切片仍保留原append_event mutation及interaction/delegation等未迁移调用，不能声称所有事件写入或全业务PG已异步。回滚无schema降级步骤，但旧binary缺本批scope与预算保护；应先停止准入、join工作并保留校验备份。真实商业Provider/IdP/生产Kubernetes未验证；未提交、推送或部署。
+
+2026-10-09 S20/S21 implemented / locally verified：wave2-s20-s21-reviewed-final 九项全部exit0，614 Rust /36 Web /48实测daemon，43测试执行体、10外部环境项明确ignored；runtime136/storage84/context19/event18全部通过。独立真实TLS S3四组业务及PostgreSQL发布协调六项全部exit0（wave2-s20-s21-reviewed-regression-s3.json / postgres.json），自己的MinIO容器与PG隔离DB已清理。第10项有效compact来源身份RED已修，同原事务核JSON lifetime/起点/结果generation，正常revision和摘要失败返回Conflict，损坏Corrupt。首次九门禁tests101/ACP初始化EOF保留；独立与原并发daemon复核、最终完整门禁均未复现，根因未定位，64KiB有界诊断并持续drain保留，未修改超时/栈/并行度。schema27，无新第三方包。全企业Wave2、Wave3–10仍未完成，enterprise_ready=false；未提交推送部署。继续S22实际Live事件mutation，再S23发现端口，统一本批验收。

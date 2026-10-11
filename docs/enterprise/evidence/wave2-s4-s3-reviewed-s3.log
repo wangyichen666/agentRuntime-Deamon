@@ -1,0 +1,67 @@
+sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+......+.........+.......+++++++++++++++++++++++++++++++++++++++*...+..+...+...+......+...................+..+....+......+........+.+...+..+.+...+.....+......+...+.+.........+..+....+.....+....+........+...+.+.....+.+...............+...+..+....+.....+...+...+....+...+...............+...+..+++++++++++++++++++++++++++++++++++++++*..+.+.........+......+.....+........................+..................+....+.....+....+.................+............+..........+...+..+...+....+....................+.+..+.............+............+......+..+.........+...+.+..++++++
+....+.....+...+....+......+..+.......+........+++++++++++++++++++++++++++++++++++++++*..+.+...+..+.+..+.......+...+++++++++++++++++++++++++++++++++++++++*...........+....+......+...+..+......+....+.....+......+...+.......+..+.+..+.......+..+...+.+......+..............+.+..............+...............+.+...+...........+.+.........+.........+......+..+.........+...+.......+...+......+.....+.+......+.........+........+...+.........+...+...+....+...+...+............+..+...+................+............+..+...+...+......+...+..................+....+.....+......+....+.........+..+.......+..+.+.........+.........+.....+.+...........+.......+..+....+......+.....................+..+............+....+.....+................+...+.....+......+............+...+.+...+.....+......+.+...........++++++
+-----
+...+++++++++++++++++++++++++++++++++++++++*........+..........+.....+.....................+...+++++++++++++++++++++++++++++++++++++++*..+.....+....+..+....+.........+.....+......+...+......+.+.....+...+......+............+....+......+...+.........++++++
+..+.........+......+...+.+.....+++++++++++++++++++++++++++++++++++++++*..+...+..+..........+......+...+............+..+......+.+.....+...+...+...+.+...+..+...+.......+...+........+.......+...+..................+.....+....+......+.........+...+..+.+...............+++++++++++++++++++++++++++++++++++++++*..+........+.............+..+...+..........+...+............+..+............+...+.+.....+....+.....+.+.....+.......+.........+........+.+..+...+......+...+............+....+.........+..+......+....+.....................+..+......+.+...+...+........+.....................+.+..+......+.+....................+......+.........+...+......+....+........+...+...............+.......+..+...+...+.+...+.....+......+......+.+...+..+..........+...+......+........+..........+.....+.......+.........+.....................+.....+.+..+...+..................+......+.+...+..+....+...+...........+.+...+......+.....+....+..+.+..+.+............+.....+...+....+..+.........+....+..+....+...........+...+......................+...+......+.....+.+........+......+.........+.......+...............+...+...+.....+.........+..........+.........+..+...+.+........+.+..+.......+..+.+...+.....+.......+..+.......+.....+..........+......+........+......+...+................+......+......+..+...+...+....+............+........+...+...+....+..+......+....+...+..+.+...+..+...+....+............+...+........+..........+...+............+...+......+.....+...+......+....+........+...+......+.+.....+...+.........................+......+.........+..+....+...+...........+...............+.+...+...+..............+......+.......+..+...+.+..+.......+..+....+.....+....+...+..+......+.........+......+.+......+..+...+.......+...+..+...+....+...+.................+......+............+.+......+.........+......+........+............+.+.........+...+............+...+...+.................+...+............+......+.+......+...+......+...+.................+.+...+..+.......+...+........+.+.....+.+...+..+.........+.+.........+.....+...+.+.........+.....+...+...+........................+.......+...+.....+......+.+...+...+.....+.......+...+...+...........+....+.....+....+...............+..+.++++++
+-----
+Certificate request self-signature ok
+subject=CN=localhost
+7861e924f0bfe4a130cb746f53fe6227eea6d0a5d0e35cc64ed3502d05f36009
+   Compiling futures-io v0.3.34
+   Compiling tokio v1.53.1
+   Compiling security-framework v3.7.0
+   Compiling chrono v0.4.45
+   Compiling rand v0.9.5
+   Compiling agent-core v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/core)
+   Compiling md-5 v0.10.6
+   Compiling quick-xml v0.38.4
+   Compiling futures-util v0.3.34
+   Compiling rustls-native-certs v0.8.4
+   Compiling tokio-util v0.7.19
+   Compiling tokio-rustls v0.26.4
+   Compiling tower v0.5.3
+   Compiling futures-executor v0.3.34
+   Compiling agent-storage-ports v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-ports)
+   Compiling h2 v0.4.20
+   Compiling futures v0.3.34
+   Compiling tower-http v0.6.11
+   Compiling hyper v1.11.1
+   Compiling hyper-util v0.1.20
+   Compiling hyper-rustls v0.27.9
+   Compiling reqwest v0.12.28
+   Compiling object_store v0.12.4
+   Compiling agent-artifact v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/artifact)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 15.09s
+     Running unittests src/lib.rs (target/debug/deps/agent_artifact-d4cac87e633552d3)
+
+running 1 test
+test s3::tests::s3_actual_bytes_scope_isolation_tamper_and_certificate_failure ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.79s
+
+   Compiling agent-artifact v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/artifact)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+error[E0599]: no method named `health_report` found for struct `RunStore` in the current scope
+   --> tests/object_artifact_contract.rs:428:25
+    |
+428 |     assert_eq!(upgraded.health_report().unwrap()["schema_version"], 23);
+    |                         ^^^^^^^^^^^^^ method not found in `RunStore`
+    |
+   ::: /Users/pilot/Documents/myproject/agent-rust/crates/storage/src/ports.rs:493:8
+    |
+493 |     fn health_report(&self) -> Result<Value, RuntimeError>;
+    |        ------------- the method is available for `RunStore` here
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `MaintenanceRepository` which provides `health_report` is implemented but not in scope; perhaps you want to import it
+    |
+2   + use agent_storage::MaintenanceRepository;
+    |
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `my-agent` (test "object_artifact_contract") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+codex-agent-s3-a50aca87a06d44b29d3c

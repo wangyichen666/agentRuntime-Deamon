@@ -1,0 +1,7 @@
+{
+  "migration_id": "offline_local_1",
+  "tables": 68,
+  "rows": 52,
+  "artifacts": 0,
+  "validation": "本机真实PG18.6；完整迁移故障矩阵和artifact大对象待验收"
+}

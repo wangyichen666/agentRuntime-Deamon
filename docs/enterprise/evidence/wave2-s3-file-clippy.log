@@ -1,0 +1,41 @@
+    Checking agent-core v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/core)
+    Checking agent-daemon-protocol v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-protocol)
+    Checking agent-storage-ports v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-ports)
+    Checking agent-context v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/context)
+    Checking agent-memory v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/memory)
+    Checking agent-sandbox v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/sandbox)
+    Checking agent-policy v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/policy)
+    Checking agent-identity v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/identity)
+    Checking agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+    Checking agent-storage-postgres v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-postgres)
+    Checking agent-daemon-client v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-client)
+    Checking agent-entry-support v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/entry-support)
+error: items after a test module
+   --> crates/storage/src/artifact_publication.rs:28:1
+    |
+28  |   mod tests {
+    |   ^^^^^^^^^
+...
+116 | / pub(crate) fn finish_in(
+117 | |     db: &Connection,
+118 | |     run_id: &RunId,
+119 | |     round: usize,
+...   |
+123 | |     receipt: &Value,
+124 | | ) -> Result<(), RuntimeError> {
+    | |_____________________________^
+...
+131 |   impl RunStore {
+    |   ^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#items_after_test_module
+    = note: `-D clippy::items-after-test-module` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::items_after_test_module)]`
+    = help: move the items to before the test module was defined
+
+    Checking agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+    Checking agent-acp v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/acp)
+    Checking agent-gateway v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/gateway)
+    Checking agent-cli v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/cli)
+error: could not compile `agent-storage` (lib test) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

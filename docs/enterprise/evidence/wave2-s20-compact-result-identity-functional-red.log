@@ -1,0 +1,21 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.87s
+     Running tests/run_context_contract.rs (target/debug/deps/run_context_contract-ee6fecea6942ef36)
+
+running 1 test
+
+thread 'compact_result_rejects_saved_source_json_lifetime_mismatch_before_returning_generation' panicked at tests/run_context_contract.rs:867:5:
+assertion `left == right` failed: 源JSON必须核lifetime而非只SQL筛选，实际为 Ok(Some(ProjectionGeneration(0)))
+  left: Ok(Some(ProjectionGeneration(0)))
+ right: Err(Coordination(Corrupt))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test compact_result_rejects_saved_source_json_lifetime_mismatch_before_returning_generation ... FAILED
+
+failures:
+
+failures:
+    compact_result_rejects_saved_source_json_lifetime_mismatch_before_returning_generation
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.05s
+
+error: test failed, to rerun pass `--test run_context_contract`

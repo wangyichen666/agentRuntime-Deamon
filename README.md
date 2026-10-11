@@ -42,6 +42,8 @@
 
 Agent Runtime 已有统一 daemon client、SQLite canonical transcript/lifetime、原子 TurnCommit、持久 compact projection 和作用域 MemoryEngine。连接能力协商、单事务恢复快照和 lifetime CAS 保持；升级前校验备份，原始 transcript 保留。版本化计划支持稳定定义摘要、精确 execute/discard、重启待明确继续与同源 Markdown；16 类 hooks、持久审计和有界 Stop continuation 需显式启用。当前 SQLite v20 接通独立手动 compact run、持久 Started、后台摘要、精确取消和 unknown 重启读回；旧 unary 等待同一 native receipt。generation-scoped tool_search 已实现按需发现、完整 schema 回填与原安全链嵌套调用；共享 revision reducer 已接通所有入口，旧读回/退休 lifetime 不覆盖新视图，缺口先读事务基线再补 durable cursor；完整 Provider 请求只读重建已复用实际发送的纯 assembler，默认摘要、显式本地脱敏诊断；opt-in ACP v2 已接通真实 SDK 协商、标准投影和有界 stdio；2026-10-07 已完成八波实现与门禁，根源码仅保留启动组合；物理边界见 [crate 文档](./docs/runtime-crates.md)。协议见 [计划 API](./docs/plan-control-api.md)、[Hook API](./docs/hooks-api.md) 、[Compact API](./docs/compact-control-api.md) 、[工具发现 API](./docs/tool-discovery-api.md) 、[请求上下文 API](./docs/provider-context-api.md) 和 [ACP v2 API](./docs/acp-v2-api.md)，本次 379 项 Rust 验收见 [最终报告](./docs/changes/governed-runtime-final-report.md)，逐波 RED/GREEN 与门禁见 [实施记录](./docs/changes/governed-runtime-controls.md)。较早恢复合同见 [ADR 0002](./docs/adr/0002-readback-and-lifecycle-fences.md) 与 [恢复实施记录](./docs/changes/runtime-readback-fences.md)，历史阶段见 [架构实施记录](./docs/changes/runtime-architecture.md)。
 
+企业平台升级已完成 **Wave 0 基线审计与架构门禁**：见 [架构不变量](./ARCHITECTURE.md)、[源码证据表](./docs/enterprise/baseline.md)、[71 项需求映射](./docs/enterprise/traceability.md) 和 [本波交付报告](./docs/enterprise/wave0-report.md)。本机 387 项 Rust、36 项 Web 及九项指定门禁通过。身份/租户、PostgreSQL、OIDC、注册表、工作流、远程 worker 和 Kubernetes 等 Wave 1–10 仍待实现；当前产品继续为 Local 模式，四处生产无界队列债有精确例外，不能称企业部署已就绪。
+
 ## 终端体验
 
 <p align="center">
@@ -438,3 +440,40 @@ daemon 启动后的维护 tick 及此后每 60 秒按批恢复缺摄入回执的
 [父子任务交接研究](docs/research/codex-delegation-context.md)：`spawn_subagent` RPC/模型工具及兼容 `sub_agent` 增加可选 `context_source_ids`，例如 `["parent_input"]` 显式选择父run准入输入，或选择最多4条父run自身的 `lifetime:seq` 来源。默认空；每条最多1024字符、捕获包最多8KiB并受子预算约束。包在委派事务内核实来源并冻结于child snapshot，正常及overflow请求都计入检索分区；相同spawn_key改选来源拒绝。交接过滤常见凭据、只复制role/文本，孙任务不隐式继承祖先包；子工具仍只有read_file。该包是显式转交后的独立快照，父记忆遗忘不会追溯修改已交接运行快照。
 
 [历史原文覆盖研究](docs/research/codex-retention-coverage.md)：历史锚点v2携带 `inputs`、`text_complete`、`omitted`（已知省略下限），兼容读取旧数组。完整性仅针对历史非空、去重后的用户文字，不能证明对话、图片或授权完整；checkpoint/legacy摘要始终不证明原始完整。零锚点预算仍在摘要宿主JSON记录省略下限，重压缩不将缺失状态变回完整。`flywheel evaluate` 当前包含17项检索、21项上下文结构评测。
+
+企业 [Wave1-S1 身份授权切片](docs/enterprise/wave1-s1-report.md)新增 Local 可信主体、纯 RBAC/条件与 SQLite v21 准入授权快照，`my-agent identity`、`/identity`、ACP v2/HTTP/WS 共享读回。完整租户隔离和双人审批仍在实施，Enterprise 远程模式未开放。
+
+企业 Wave2-S1 已接入原事件事务 outbox、发布 epoch、持久收据和双后端协调合同；可用 `my-agent outbox` / `/outbox` 读回。详见 [实现边界与证据](docs/enterprise/wave2-s1-report.md)。完整 PostgreSQL 业务事实迁移与 Wave3–10 尚未完成；当前继续使用 Local，enterprise_ready=false。
+
+File artifact 已完成 no-follow/目录身份/摘要硬化，并在原工具收据事务中发布引用；`my-agent artifact`、`/artifact`、ACP v2 与 HTTP/WS 共用分页读回。[File 路径验收](docs/enterprise/wave2-s2-file-report.md)、[两阶段发布与故障证据](docs/enterprise/wave2-s3-file-report.md)、[API 和限制](docs/enterprise/artifact-api.md)。S3-compatible 后端已接入原工具收据发布与共享读回，配置、恢复与真实 TLS MinIO 证据见 [S3 切片报告](docs/enterprise/wave2-s4-s3-report.md)。完整 Wave2–10 尚未完成，SQLite native writer 租约已接线，诊断、配置和真实竞争证据见 [writer 切片报告](docs/enterprise/wave2-s5-writer-report.md)；后台 Cron 已复用原事实源、writer 与对象后端，冻结 Provider 并拒绝未知结果自动重试，见 [后台切片报告](docs/enterprise/wave2-s6-cron-report.md)。已接线异步端口的 SQLite 阻塞隔离与有界预算见 [适配器报告](docs/enterprise/wave2-s7-adapter-report.md)。全业务 PostgreSQL、PG native writer 与离线迁移仍未实现。
+
+会话 canonical 读回与列表已接入显式 scope 的异步端口，SQLite v25 永久绑定退休 lifetime；新增只读 `my-agent session-read <key>` 和 `POST /api/sessions/read`。迁移、错误投影、隔离与六入口证据见 [S8 报告](docs/enterprise/wave2-s8-readback-report.md)。完整业务 PostgreSQL 与 Wave2–10 仍在实施。
+
+中心身份/冻结授权读回已使用同一SQLite有界异步adapter；原准入事务继续最终核验policy与owner，SQL错误不进入入口投影。见 [S9报告](docs/enterprise/wave2-s9-identity-report.md)。
+
+原 canonical run 事件读回已接入异步隔离端口与字节/行数分页：`my-agent run-events <run_id> --after <seq> --limit <n>`、`POST /api/runs/events`、ACP1 `/events`、ACP2 `_my_agent/run/events` 与原 WS/RPC。见 [S10 报告](docs/enterprise/wave2-s10-events-report.md)，完整九门禁和真实 S3/PG 发布回归已通过；完整 Wave2–10 尚未完成。
+
+原会话 create/close/end/fork 已接异步生命周期端口，同事务先核验 scope，再读 operation receipt；历史结果核验 key/lifetime 永久归属。见 [S11 报告](docs/enterprise/wave2-s11-lifecycle-report.md)，489 Rust/36 Web、完整九门禁和真实 S3/PG 发布回归通过。完整 Wave2–10 尚未完成。
+
+原 run fact/tools/provider 读回已接入同事务 scope 隔离异步端口，CLI `run-read --view`、原 `/run` 显式视图、ACP2 与 HTTP/WS 共用原事实。[S12 报告](docs/enterprise/wave2-s12-run-facts-report.md)：498 Rust/36 Web，完整九门禁及独立真实 S3/PG 发布回归通过。完整 Wave2–10 尚未完成。
+
+原前台准入、排队启动/取消及终态提交已接异步执行端口，owner 从原准入事务捕获并贯穿工具审计、Hook 和终态，未知结果继续由原事务收口。见 [S13 报告](docs/enterprise/wave2-s13-execution-report.md)：511 Rust/36 Web/45真实daemon、九门禁及真实S3/PG发布回归通过。完整Wave2–10尚未完成。
+
+原Provider attempt、usage和路由事件已接异步端口；已到达上游但断连/取消/超时的不确定请求持久化未知结果并停止重试，重启不重放。见 [S14报告](docs/enterprise/wave2-s14-attempt-report.md)：526Rust/36Web、九门禁和真实TLS S3/PG发布协调回归通过。全企业Wave2–10仍未完成。
+
+原工具六项端口已异步接入前台执行，固定准入 owner，未知工具结果持久化后停止后续波次。见 [S15报告](docs/enterprise/wave2-s15-tool-report.md)：540 Rust / 36 Web、九项门禁和真实 TLS S3/PG 发布协调回归通过；[完整进度](docs/enterprise/current-progress.md)仍为 Wave2 进行中、Wave3–10 pending。
+
+原turn/transcript/执行计划六项异步端口已接前台，完整scope/fixed owner/CAS及收据身份在原事务复核。见 [S16报告](docs/enterprise/wave2-s16-turn-report.md)：556 Rust / 36 Web、九项门禁和真实 TLS S3/PG 发布协调回归通过。完整 Wave2–10仍未完成。
+
+原请求捕获与摘要已接异步端口，native事件不能因缺stamp降legacy，Cron复用固定准入owner和独立Local workload主体。见 [S17–S19验收](docs/enterprise/wave2-s19-cron-report.md)：588 Rust / 36 Web、九项门禁和真实TLS S3/PG发布协调回归通过，当前schema27。完整Wave2–10仍在实施。
+
+原上下文/compact与即时事件投影已接固定scope/owner异步端口，614 Rust /36 Web、完整九项门禁与真实TLS S3/PG发布协调回归通过。见[S20报告](docs/enterprise/wave2-s20-context-report.md)和[S21报告](docs/enterprise/wave2-s21-event-projection-report.md)。完整Wave2–10未完成。
+
+原实时事件、工具发现许可与取消已接固定准入owner异步端口，636 Rust/36 Web、完整九项门禁和真实TLS S3/PG发布协调回归通过。见[S22报告](docs/enterprise/wave2-s22-live-events-report.md)和[S23报告](docs/enterprise/wave2-s23-discovery-report.md)。完整Wave2–10仍未完成。
+
+2026-10-09 S24已实现并本地验收：wave2-s24-reviewed-final九项全exit0，640 Rust/36 Web/48实测daemon，44执行体、14外部ignored；SQLite12与真实PG10项发布合同通过。真实TLS S3四组业务与PG发布10项回归全部通过（wave2-s24-reviewed-regression-s3.json / postgres.json），自己的容器与独立DB已清理。原完整key先SQL、保存列与唯一JSON decoder绑定、字段预算已接实际两adapter，无新schema/deps。全业务PG/其余async与完整Wave2–10仍欠，enterprise_ready=false；未提交推送部署。继续S25原Hook观察读回/待发布/ACK实际合同，执行actor取消仍单独欠账。
+
+
+### 本机 Postgres 开发启动（2026-10-09）
+
+默认仍用 SQLite。显式设置 `AGENT_STORAGE_BACKEND=postgres-local` 及 `AGENT_PUBLICATION_DB/USER/SCHEMA` 后，daemon 使用同一 PG adapter 的 26 个领域端口并启用 writer 租约；可设置 `AGENT_ARTIFACT_BACKEND=file-v1`。仅本机 Unix socket / Local 兼容身份，canonical schema2；不是全量 SQLite 迁移或企业远程入口。配置错误不回退 SQLite。实现、局部验证及剩余工作见 [本批报告](docs/enterprise/wave2-native-runtime-report.md)和[当前进度](docs/enterprise/current-progress.md)，完整 Wave2–10 尚未完成。

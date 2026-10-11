@@ -1,0 +1,31 @@
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+error[E0599]: no method named `sessions_read` found for struct `RunStore` in the current scope
+   --> tests/artifact_contract.rs:383:23
+    |
+383 |     let clock = store.sessions_read(None, 64).unwrap().business_clock;
+    |                       ^^^^^^^^^^^^^
+    |
+help: there is a method `session_readback` with a similar name
+    |
+383 -     let clock = store.sessions_read(None, 64).unwrap().business_clock;
+383 +     let clock = store.session_readback(None, 64).unwrap().business_clock;
+    |
+
+error[E0599]: no method named `sessions_read` found for struct `RunStore` in the current scope
+   --> tests/artifact_contract.rs:396:22
+    |
+396 |     assert_eq!(store.sessions_read(None, 64).unwrap().business_clock, clock);
+    |                      ^^^^^^^^^^^^^
+    |
+help: there is a method `session_readback` with a similar name
+    |
+396 -     assert_eq!(store.sessions_read(None, 64).unwrap().business_clock, clock);
+396 +     assert_eq!(store.session_readback(None, 64).unwrap().business_clock, clock);
+    |
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `my-agent` (test "artifact_contract") due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...

@@ -1,0 +1,25 @@
+   Compiling agent-storage-ports v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-ports)
+   Compiling agent-artifact v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/artifact)
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling agent-storage-postgres v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-postgres)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 44.35s
+     Running tests/run_event_contract.rs (target/debug/deps/run_event_contract-d9c9a20dddd5294c)
+
+running 1 test
+
+thread 'live_event_callback_cannot_promote_captured_owner_to_new_generation' panicked at tests/run_event_contract.rs:882:5:
+原callback固定准入owner不可重取新generation，实际为 Ok(EventSeq(3))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test live_event_callback_cannot_promote_captured_owner_to_new_generation ... FAILED
+
+failures:
+
+failures:
+    live_event_callback_cannot_promote_captured_owner_to_new_generation
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 22 filtered out; finished in 0.04s
+
+error: test failed, to rerun pass `--test run_event_contract`

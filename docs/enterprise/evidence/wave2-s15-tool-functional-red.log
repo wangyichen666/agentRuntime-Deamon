@@ -1,0 +1,43 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.37s
+     Running tests/run_tool_contract.rs (target/debug/deps/run_tool_contract-57359113ac38f83a)
+
+running 4 tests
+test tool_batch_completion_cannot_publish_into_foreign_scope ... FAILED
+test tool_started_cannot_adopt_later_generation_before_external_dispatch ... FAILED
+test tool_batch_completion_cannot_manufacture_missing_batch_fact ... FAILED
+test tool_started_cannot_write_foreign_legacy_run_without_frozen_authorization ... FAILED
+
+failures:
+
+---- tool_batch_completion_cannot_publish_into_foreign_scope stdout ----
+
+thread 'tool_batch_completion_cannot_publish_into_foreign_scope' panicked at tests/run_tool_contract.rs:134:5:
+scope检查先于missingbatch结果
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tool_started_cannot_adopt_later_generation_before_external_dispatch stdout ----
+
+thread 'tool_started_cannot_adopt_later_generation_before_external_dispatch' panicked at tests/run_tool_contract.rs:87:5:
+旧caller不能重读后来owner启动副作用
+
+---- tool_batch_completion_cannot_manufacture_missing_batch_fact stdout ----
+
+thread 'tool_batch_completion_cannot_manufacture_missing_batch_fact' panicked at tests/run_tool_contract.rs:120:5:
+不存在的batch不能产生完成事件
+
+---- tool_started_cannot_write_foreign_legacy_run_without_frozen_authorization stdout ----
+
+thread 'tool_started_cannot_write_foreign_legacy_run_without_frozen_authorization' panicked at tests/run_tool_contract.rs:107:5:
+无授权legacy run也需原scope核验
+
+
+failures:
+    tool_batch_completion_cannot_manufacture_missing_batch_fact
+    tool_batch_completion_cannot_publish_into_foreign_scope
+    tool_started_cannot_adopt_later_generation_before_external_dispatch
+    tool_started_cannot_write_foreign_legacy_run_without_frozen_authorization
+
+test result: FAILED. 0 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+error: test failed, to rerun pass `--test run_tool_contract`

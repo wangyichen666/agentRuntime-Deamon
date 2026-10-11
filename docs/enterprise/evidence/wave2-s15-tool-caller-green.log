@@ -1,0 +1,11 @@
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 26.69s
+     Running tests/runtime_contract.rs (target/debug/deps/runtime_contract-b79d5cf341cb953c)
+
+running 1 test
+test deferred_tool_search_roundtrip_freezes_catalog_and_refills_same_dispatcher ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 49 filtered out; finished in 5.82s
+

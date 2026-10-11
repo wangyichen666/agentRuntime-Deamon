@@ -1,0 +1,28 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+error[E0283]: type annotations needed
+   --> tests/run_tool_contract.rs:343:46
+    |
+343 |         Message::tool_result(&call, "result".into()),
+    |         --------------------                 ^^^^
+    |         |
+    |         required by a bound introduced by this call
+    |
+    = note: cannot satisfy `_: Into<std::string::String>`
+note: required by a bound in `agent_core::Message::tool_result`
+   --> /Users/pilot/Documents/myproject/agent-rust/crates/core/src/message.rs:55:55
+    |
+55  |     pub fn tool_result(call: &ToolCall, content: impl Into<String>) -> Self {
+    |                                                       ^^^^^^^^^^^^ required by this bound in `Message::tool_result`
+help: try using a fully qualified path to specify the expected types
+    |
+343 -         Message::tool_result(&call, "result".into()),
+343 +         Message::tool_result(&call, <&str as Into<T>>::into("result")),
+    |
+help: consider removing this method call, as the receiver has type `&'static str` and `&'static str: Into<std::string::String>` trivially holds
+    |
+343 -         Message::tool_result(&call, "result".into()),
+343 +         Message::tool_result(&call, "result"),
+    |
+
+For more information about this error, try `rustc --explain E0283`.
+error: could not compile `my-agent` (test "run_tool_contract") due to 1 previous error

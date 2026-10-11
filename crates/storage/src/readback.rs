@@ -1,5 +1,5 @@
 //! 单事务恢复读取：不构造执行对象，不兼容导入，不写入业务事实。
-use crate::sessions::{metadata_in, owner_in, snapshot_in};
+use crate::sessions::{lifetime_owner_in, owner_in, scoped_metadata_in, snapshot_in};
 use crate::{RunStore, RuntimeError, read_interaction_in, read_run_in};
 use agent_core::*;
 use rusqlite::{OptionalExtension, params};
@@ -11,199 +11,298 @@ impl RunStore {
         key: &SessionKey,
         mode: HistoryReadMode,
     ) -> Result<SessionReadback, RuntimeError> {
+        self.readback_scoped(&TenantContext::local(), key, mode)
+    }
+    pub(crate) fn readback_scoped(
+        &self,
+        scope: &TenantContext,
+        key: &SessionKey,
+        mode: HistoryReadMode,
+    ) -> Result<SessionReadback, RuntimeError> {
         let mut db = self.lock_connection()?;
         let tx = db.transaction()?;
-        let meta = metadata_in(&tx, key)?
-            .filter(|m| !m.deleted)
-            .ok_or_else(|| RuntimeError::Protocol("session 已删除或不存在".into()))?;
-        let revision = SnapshotRevision(tx.query_row(
-            "SELECT revision FROM snapshot_clock WHERE id=1",
-            [],
-            |r| r.get(0),
-        )?);
-        let (metadata_revision, generation): (u64, u64) = tx.query_row(
-            "SELECT metadata_revision,projection_generation FROM session_heads WHERE session_id=?1",
-            params![key.0],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        let mut omitted = Vec::new();
-        let (messages, batch_ranges) = match mode {
-            HistoryReadMode::Omitted => {
-                omitted.push("messages".into());
-                omitted.push("batch_ranges".into());
-                (Vec::new(), Vec::new())
-            }
-            HistoryReadMode::Canonical => {
-                let snapshot = snapshot_in(&tx, key)?;
-                (snapshot.messages, snapshot.batch_ranges)
-            }
-            HistoryReadMode::Model => {
-                let snapshot = snapshot_in(&tx, key)?;
-                let projection = crate::context_projection::projection_in(&tx, &snapshot)?;
-                omitted.extend(
-                    ["stable_prefix", "retrieved_context", "turn_overlay"].map(String::from),
-                );
-                omitted.push("canonical_messages".into());
-                omitted.push("batch_ranges".into());
-                (projection.messages, Vec::new())
-            }
-        };
-        let mut query = tx.prepare("SELECT id FROM runs WHERE lifetime=?1 AND status IN ('queued','running','waiting_interaction') ORDER BY generation LIMIT 66")?;
-        let ids = query
-            .query_map(params![meta.lifetime.0], |r| r.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        drop(query);
-        if ids.len() > 65 {
-            return Err(RuntimeError::Protocol(
-                "active readback 超过 session 预算".into(),
-            ));
-        }
-        let active_runs = ids
-            .iter()
-            .map(|id| {
-                read_run_in(&tx, id)?
-                    .ok_or_else(|| RuntimeError::Protocol("active run 消失".into()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let running = active_runs
-            .iter()
-            .filter(|r| matches!(r.status, RunStatus::Running | RunStatus::WaitingInteraction))
-            .collect::<Vec<_>>();
-        if running.len() > 1 {
-            return Err(RuntimeError::Protocol("session 存在多个 writer".into()));
-        }
-        let active_owner = running
-            .first()
-            .map(|run| owner_in(&tx, &run.run_id))
-            .transpose()?;
-        let mut query = tx.prepare("SELECT q.id,q.run_id,q.message,q.status FROM queued_messages q JOIN runs r ON r.id=q.run_id WHERE r.lifetime=?1 AND q.status='queued' ORDER BY q.id LIMIT 65")?;
-        let queue_rows = query
-            .query_map(params![meta.lifetime.0], |r| {
-                Ok(QueuedMessage {
-                    id: r.get(0)?,
-                    position: 0,
-                    session_id: key.clone(),
-                    run_id: RunId(r.get(1)?),
-                    message: r.get(2)?,
-                    status: r.get(3)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        drop(query);
-        if queue_rows.len() > 64 {
-            return Err(RuntimeError::Protocol(
-                "queue readback 超过 session 预算".into(),
-            ));
-        }
-        let queue_rows = queue_rows
-            .into_iter()
-            .enumerate()
-            .map(|(i, mut row)| {
-                row.position = (i + 1) as i64;
-                row
-            })
-            .collect::<Vec<_>>();
-        let mut query = tx.prepare("SELECT i.id FROM interactions i JOIN runs r ON r.id=i.run_id WHERE r.lifetime=?1 AND i.status='pending' ORDER BY i.rowid LIMIT 257")?;
-        let ids = query
-            .query_map(params![meta.lifetime.0], |r| r.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        drop(query);
-        if ids.len() > 256 {
-            return Err(RuntimeError::Protocol(
-                "interaction readback 超过预算，请分页查询".into(),
-            ));
-        }
-        let pending_interactions = ids
-            .iter()
-            .map(|id| {
-                read_interaction_in(&tx, id)?
-                    .ok_or_else(|| RuntimeError::Protocol("interaction 消失".into()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let last: Option<String> = tx.query_row("SELECT r.id FROM runs r JOIN events e ON e.run_id=r.id WHERE r.lifetime=?1 AND r.status IN ('completed','failed','cancelled','unknown_after_restart') AND e.event='terminal' ORDER BY e.rowid DESC LIMIT 1", params![meta.lifetime.0], |r| r.get(0)).optional()?;
-        let last_durable_terminal = last.map(|id| read_run_in(&tx, &id)).transpose()?.flatten();
-        let plan: Option<(u64, String)> = tx
-            .query_row(
-                "SELECT revision,data_json FROM session_plans WHERE lifetime=?1",
-                params![meta.lifetime.0],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        let current_plan = plan
-            .map(|(revision, raw)| {
-                Ok::<_, RuntimeError>(PlanSnapshot {
-                    revision,
-                    value: serde_json::from_str(&raw)
-                        .map_err(|e| RuntimeError::Protocol(e.to_string()))?,
-                })
-            })
-            .transpose()?;
-        let versioned = current_plan
-            .as_ref()
-            .is_some_and(|p| p.value.get("plan_id").is_some());
-        let plan_digest = current_plan
-            .as_ref()
-            .map(|plan| {
-                if versioned {
-                    let document: PlanDocument = serde_json::from_value(plan.value.clone())
-                        .map_err(|e| RuntimeError::Protocol(e.to_string()))?;
-                    crate::plans::validate_document(&document)?;
-                    Ok(document.content_digest)
-                } else {
-                    crate::plans::validate_legacy_plan(&plan.value)?;
-                    serde_json::to_vec(&plan.value)
-                        .map(|bytes| format!("{:x}", Sha256::digest(bytes)))
-                        .map_err(|e| RuntimeError::Protocol(e.to_string()))
-                }
-            })
-            .transpose()?;
-        if !versioned {
-            omitted.push("plan_execution_identity".into());
-        }
-        let ledger: Option<String> = tx.query_row("SELECT l.envelope_json FROM context_ledgers l JOIN runs r ON r.id=l.run_id WHERE r.lifetime=?1 AND json_extract(l.envelope_json,'$.source.generation')=?2 ORDER BY r.generation DESC,l.round DESC LIMIT 1", params![meta.lifetime.0,generation], |r| r.get(0)).optional()?;
-        let context_usage = ledger
-            .map(|raw| {
-                serde_json::from_str(&raw).map_err(|e| RuntimeError::Protocol(e.to_string()))
-            })
-            .transpose()?;
-        let run_owners = active_runs
-            .iter()
-            .chain(last_durable_terminal.iter())
-            .map(|run| owner_in(&tx, &run.run_id))
-            .collect::<Result<Vec<_>, _>>()?;
-        let message_ids = if mode == HistoryReadMode::Canonical {
-            canonical_message_ids(&tx, key, &meta.lifetime, &messages)?
-        } else {
-            Vec::new()
-        };
-        let result = SessionReadback {
-            schema_version: 1,
-            session_id: key.clone(),
-            session_lifetime_id: meta.lifetime.clone(),
-            metadata: meta.clone(),
-            snapshot_revision: revision,
-            metadata_revision: SnapshotRevision(metadata_revision),
-            transcript_revision: meta.revision,
-            projection_generation: ProjectionGeneration(generation),
-            history_mode: mode,
-            omitted,
-            messages,
-            message_ids,
-            batch_ranges,
-            active_owner,
-            run_owners,
-            active_runs,
-            queue_cursor: queue_rows.last().map(|r| r.id),
-            queue_rows,
-            pending_interactions,
-            last_durable_terminal,
-            current_plan,
-            plan_digest,
-            context_usage,
-        };
+        let result = readback_in(&tx, scope, key, mode)?;
         tx.commit()?;
         Ok(result)
     }
+}
+
+pub(crate) fn read_error(error: RuntimeError) -> CoordinationError {
+    match error {
+        RuntimeError::Authorization(_) => CoordinationError::Forbidden,
+        RuntimeError::Coordination(error) => error,
+        RuntimeError::Persistence(_) | RuntimeError::Internal(_) => {
+            CoordinationError::StorageUnavailable
+        }
+        _ => CoordinationError::Corrupt,
+    }
+}
+
+#[async_trait::async_trait]
+impl agent_storage_ports::SessionReadRepository for RunStore {
+    async fn read_session(
+        &self,
+        scope: &TenantContext,
+        key: &SessionKey,
+        mode: HistoryReadMode,
+    ) -> Result<SessionReadback, CoordinationError> {
+        if key.0.is_empty() || key.0.len() > 1024 {
+            return Err(CoordinationError::InvalidRequest);
+        }
+        let (scope, key) = (scope.clone(), key.clone());
+        self.sqlite_blocking(CoordinationError::StorageUnavailable, move |store| {
+            store
+                .readback_scoped(&scope, &key, mode)
+                .map_err(read_error)
+        })
+        .await
+    }
+
+    async fn list_sessions(
+        &self,
+        scope: &TenantContext,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<SessionListEntry>, CoordinationError> {
+        if !(1..=1001).contains(&limit) || after.is_some_and(|v| v.len() > 1024) {
+            return Err(CoordinationError::InvalidRequest);
+        }
+        let scope = scope.clone();
+        let after = after.map(String::from);
+        self.sqlite_blocking(CoordinationError::StorageUnavailable, move |store| {
+            store
+                .session_entries(&scope, after.as_deref(), limit)
+                .map_err(read_error)
+        })
+        .await
+    }
+}
+
+impl RunStore {
+    fn session_entries(
+        &self,
+        scope: &TenantContext,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<SessionListEntry>, RuntimeError> {
+        let mut db = self.lock_connection()?;
+        let tx = db.transaction()?;
+        let mut entries = Vec::new();
+        for meta in crate::sessions::metadata_page_in(&tx, scope, after, limit as usize, false)? {
+            lifetime_owner_in(&tx, &meta.key, &meta.lifetime)?;
+            let active: u64 = tx.query_row("SELECT count(*) FROM (SELECT id FROM runs WHERE session_id=?1 AND lifetime=?2 AND status IN ('queued','running','waiting_interaction') LIMIT 66)",params![meta.key.0,meta.lifetime.0],|r|r.get(0))?;
+            if active > 65 {
+                return Err(CoordinationError::Corrupt.into());
+            }
+            let waiting: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM interactions i JOIN runs r ON r.id=i.run_id WHERE r.session_id=?1 AND r.lifetime=?2 AND i.lifetime=r.lifetime AND i.generation=r.generation AND i.status='pending')",params![meta.key.0,meta.lifetime.0],|r|r.get(0))?;
+            entries.push(SessionListEntry {
+                preview: crate::sessions::preview_in(&tx, &meta.key, &meta.lifetime)?,
+                status: if waiting {
+                    SessionStatus::Waiting
+                } else if active > 0 {
+                    SessionStatus::Running
+                } else {
+                    SessionStatus::Idle
+                },
+                active_requests: active as usize,
+                metadata: meta,
+            });
+        }
+        tx.commit()?;
+        Ok(entries)
+    }
+}
+
+fn readback_in(
+    tx: &rusqlite::Connection,
+    scope: &TenantContext,
+    key: &SessionKey,
+    mode: HistoryReadMode,
+) -> Result<SessionReadback, RuntimeError> {
+    let meta = scoped_metadata_in(tx, scope, key)?;
+    lifetime_owner_in(tx, key, &meta.lifetime)?;
+    let revision = SnapshotRevision(tx.query_row(
+        "SELECT revision FROM snapshot_clock WHERE id=1",
+        [],
+        |r| r.get(0),
+    )?);
+    let (metadata_revision, generation): (u64, u64) = tx.query_row(
+        "SELECT metadata_revision,projection_generation FROM session_heads WHERE session_id=?1",
+        params![key.0],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let mut omitted = Vec::new();
+    let (messages, batch_ranges) = match mode {
+        HistoryReadMode::Omitted => {
+            omitted.push("messages".into());
+            omitted.push("batch_ranges".into());
+            (Vec::new(), Vec::new())
+        }
+        HistoryReadMode::Canonical => {
+            let snapshot = snapshot_in(tx, key)?;
+            (snapshot.messages, snapshot.batch_ranges)
+        }
+        HistoryReadMode::Model => {
+            let snapshot = snapshot_in(tx, key)?;
+            let projection = crate::context_projection::projection_in(tx, &snapshot)?;
+            omitted
+                .extend(["stable_prefix", "retrieved_context", "turn_overlay"].map(String::from));
+            omitted.push("canonical_messages".into());
+            omitted.push("batch_ranges".into());
+            (projection.messages, Vec::new())
+        }
+    };
+    let mut query = tx.prepare("SELECT id FROM runs WHERE lifetime=?1 AND session_id=?2 AND status IN ('queued','running','waiting_interaction') ORDER BY generation LIMIT 66")?;
+    let ids = query
+        .query_map(params![meta.lifetime.0, key.0], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(query);
+    if ids.len() > 65 {
+        return Err(RuntimeError::Protocol(
+            "active readback 超过 session 预算".into(),
+        ));
+    }
+    let active_runs = ids
+        .iter()
+        .map(|id| {
+            read_run_in(tx, id)?.ok_or_else(|| RuntimeError::Protocol("active run 消失".into()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let running = active_runs
+        .iter()
+        .filter(|r| matches!(r.status, RunStatus::Running | RunStatus::WaitingInteraction))
+        .collect::<Vec<_>>();
+    if running.len() > 1 {
+        return Err(RuntimeError::Protocol("session 存在多个 writer".into()));
+    }
+    let active_owner = running
+        .first()
+        .map(|run| owner_in(tx, &run.run_id))
+        .transpose()?;
+    let mut query = tx.prepare("SELECT q.id,q.run_id,q.message,q.status FROM queued_messages q JOIN runs r ON r.id=q.run_id WHERE r.lifetime=?1 AND r.session_id=?2 AND q.session_id=r.session_id AND q.status='queued' ORDER BY q.id LIMIT 65")?;
+    let queue_rows = query
+        .query_map(params![meta.lifetime.0, key.0], |r| {
+            Ok(QueuedMessage {
+                id: r.get(0)?,
+                position: 0,
+                session_id: key.clone(),
+                run_id: RunId(r.get(1)?),
+                message: r.get(2)?,
+                status: r.get(3)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(query);
+    if queue_rows.len() > 64 {
+        return Err(RuntimeError::Protocol(
+            "queue readback 超过 session 预算".into(),
+        ));
+    }
+    let queue_rows = queue_rows
+        .into_iter()
+        .enumerate()
+        .map(|(i, mut row)| {
+            row.position = (i + 1) as i64;
+            row
+        })
+        .collect::<Vec<_>>();
+    let mut query = tx.prepare("SELECT i.id FROM interactions i JOIN runs r ON r.id=i.run_id WHERE r.lifetime=?1 AND r.session_id=?2 AND i.lifetime=r.lifetime AND i.generation=r.generation AND i.status='pending' ORDER BY i.rowid LIMIT 257")?;
+    let ids = query
+        .query_map(params![meta.lifetime.0, key.0], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(query);
+    if ids.len() > 256 {
+        return Err(RuntimeError::Protocol(
+            "interaction readback 超过预算，请分页查询".into(),
+        ));
+    }
+    let pending_interactions = ids
+        .iter()
+        .map(|id| {
+            read_interaction_in(tx, id)?
+                .ok_or_else(|| RuntimeError::Protocol("interaction 消失".into()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let last: Option<String> = tx.query_row("SELECT r.id FROM runs r JOIN events e ON e.run_id=r.id WHERE r.lifetime=?1 AND r.session_id=?2 AND r.status IN ('completed','failed','cancelled','unknown_after_restart') AND e.event='terminal' ORDER BY e.rowid DESC LIMIT 1", params![meta.lifetime.0,key.0], |r| r.get(0)).optional()?;
+    let last_durable_terminal = last.map(|id| read_run_in(tx, &id)).transpose()?.flatten();
+    let plan: Option<(u64, String)> = tx
+            .query_row(
+                "SELECT p.revision,p.data_json FROM session_plans p JOIN session_lifetime_owners o ON o.lifetime=p.lifetime WHERE p.lifetime=?1 AND o.session_id=?2",
+                params![meta.lifetime.0,key.0],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+    let current_plan = plan
+        .map(|(revision, raw)| {
+            Ok::<_, RuntimeError>(PlanSnapshot {
+                revision,
+                value: serde_json::from_str(&raw)
+                    .map_err(|e| RuntimeError::Protocol(e.to_string()))?,
+            })
+        })
+        .transpose()?;
+    let versioned = current_plan
+        .as_ref()
+        .is_some_and(|p| p.value.get("plan_id").is_some());
+    let plan_digest = current_plan
+        .as_ref()
+        .map(|plan| {
+            if versioned {
+                let document: PlanDocument = serde_json::from_value(plan.value.clone())
+                    .map_err(|e| RuntimeError::Protocol(e.to_string()))?;
+                crate::plans::validate_document(&document)?;
+                Ok(document.content_digest)
+            } else {
+                crate::plans::validate_legacy_plan(&plan.value)?;
+                serde_json::to_vec(&plan.value)
+                    .map(|bytes| format!("{:x}", Sha256::digest(bytes)))
+                    .map_err(|e| RuntimeError::Protocol(e.to_string()))
+            }
+        })
+        .transpose()?;
+    if !versioned {
+        omitted.push("plan_execution_identity".into());
+    }
+    let ledger: Option<String> = tx.query_row("SELECT l.envelope_json FROM context_ledgers l JOIN runs r ON r.id=l.run_id WHERE r.lifetime=?1 AND r.session_id=?2 AND json_extract(l.envelope_json,'$.source.generation')=?3 ORDER BY r.generation DESC,l.round DESC LIMIT 1", params![meta.lifetime.0,key.0,generation], |r| r.get(0)).optional()?;
+    let context_usage = ledger
+        .map(|raw| serde_json::from_str(&raw).map_err(|e| RuntimeError::Protocol(e.to_string())))
+        .transpose()?;
+    let run_owners = active_runs
+        .iter()
+        .chain(last_durable_terminal.iter())
+        .map(|run| owner_in(tx, &run.run_id))
+        .collect::<Result<Vec<_>, _>>()?;
+    let message_ids = if mode == HistoryReadMode::Canonical {
+        canonical_message_ids(tx, key, &meta.lifetime, &messages)?
+    } else {
+        Vec::new()
+    };
+    let result = SessionReadback {
+        schema_version: 1,
+        session_id: key.clone(),
+        session_lifetime_id: meta.lifetime.clone(),
+        metadata: meta.clone(),
+        snapshot_revision: revision,
+        metadata_revision: SnapshotRevision(metadata_revision),
+        transcript_revision: meta.revision,
+        projection_generation: ProjectionGeneration(generation),
+        history_mode: mode,
+        omitted,
+        messages,
+        message_ids,
+        batch_ranges,
+        active_owner,
+        run_owners,
+        active_runs,
+        queue_cursor: queue_rows.last().map(|r| r.id),
+        queue_rows,
+        pending_interactions,
+        last_durable_terminal,
+        current_plan,
+        plan_digest,
+        context_usage,
+    };
+    Ok(result)
 }
 
 /// 同一已校验 snapshot 的批次 provenance；最后 assistant 与 live turn identity 一致。
@@ -213,9 +312,9 @@ fn canonical_message_ids(
     life: &SessionLifetimeId,
     messages: &[Message],
 ) -> Result<Vec<String>, RuntimeError> {
-    let mut query=db.prepare("SELECT b.start_seq,b.end_seq,t.id,b.run_id,r.lifetime,r.session_id FROM transcript_batches b LEFT JOIN runs r ON r.id=b.run_id LEFT JOIN turns t ON t.run_id=b.run_id WHERE b.lifetime=?1 ORDER BY b.start_seq,b.rowid")?;
+    let mut query=db.prepare("SELECT b.start_seq,b.end_seq,t.id,b.run_id,r.lifetime,r.session_id FROM transcript_batches b LEFT JOIN runs r ON r.id=b.run_id LEFT JOIN turns t ON t.run_id=b.run_id JOIN session_lifetime_owners o ON o.lifetime=b.lifetime WHERE b.lifetime=?1 AND o.session_id=?2 ORDER BY b.start_seq,b.rowid")?;
     let ranges = query
-        .query_map(params![life.0], |row| {
+        .query_map(params![life.0, key.0], |row| {
             Ok((
                 row.get::<_, u64>(0)?,
                 row.get::<_, u64>(1)?,
@@ -244,31 +343,20 @@ fn canonical_message_ids(
             "canonical message identity 范围损坏".into(),
         ));
     }
-    let mut last_assistant = std::collections::BTreeMap::new();
-    for (index, (message, turn)) in messages.iter().zip(&turns).enumerate() {
-        if message.role == Role::Assistant
-            && let Some(turn) = turn
-        {
-            last_assistant.insert(turn.clone(), index);
-        }
-    }
-    Ok(turns
-        .into_iter()
-        .enumerate()
-        .map(|(index, turn)| {
-            if let Some(turn) = turn
-                && last_assistant.get(&turn) == Some(&index)
-            {
-                format!("{turn}:assistant")
-            } else {
-                format!("{}:canonical:{index}", life.0)
-            }
-        })
-        .collect())
+    agent_core::canonical_message_identities(
+        life,
+        messages,
+        &turns
+            .into_iter()
+            .map(|turn| turn.map(TurnId))
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|_| RuntimeError::Protocol("canonical message identity 范围损坏".into()))
 }
 
 #[cfg(test)]
 pub(crate) fn remove_v14_for_fixture(db: &rusqlite::Connection) {
+    crate::enterprise::remove_v21_for_fixture(db);
     let mut query = db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND (name LIKE 'snapshot_%' OR name='session_metadata_revision')").unwrap();
     let names = query
         .query_map([], |r| r.get::<_, String>(0))

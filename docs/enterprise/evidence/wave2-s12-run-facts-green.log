@@ -1,0 +1,60 @@
+   Compiling agent-core v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/core)
+   Compiling agent-daemon-protocol v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-protocol)
+   Compiling agent-storage-ports v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-ports)
+   Compiling agent-memory v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/memory)
+   Compiling agent-sandbox v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/sandbox)
+   Compiling agent-context v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/context)
+   Compiling agent-policy v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/policy)
+   Compiling agent-identity v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/identity)
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling agent-artifact v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/artifact)
+   Compiling agent-storage-postgres v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-postgres)
+   Compiling agent-daemon-client v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-client)
+error[E0433]: failed to resolve: use of undeclared type `CoordinationError`
+    --> crates/storage/src/lib.rs:1414:89
+     |
+1414 | ...:to_value(attempt.status).map_err(|_|CoordinationError::Corrupt)?.as_str().ok_or(CoordinationError::Corrupt)?, data])?;
+     |                                         ^^^^^^^^^^^^^^^^^ use of undeclared type `CoordinationError`
+     |
+help: consider importing this enum
+     |
+14   + use agent_core::CoordinationError;
+     |
+
+error[E0433]: failed to resolve: use of undeclared type `CoordinationError`
+    --> crates/storage/src/lib.rs:1414:133
+     |
+1414 | ...ationError::Corrupt)?.as_str().ok_or(CoordinationError::Corrupt)?, data])?;
+     |                                         ^^^^^^^^^^^^^^^^^ use of undeclared type `CoordinationError`
+     |
+help: consider importing this enum
+     |
+14   + use agent_core::CoordinationError;
+     |
+
+error[E0433]: failed to resolve: use of undeclared type `CoordinationError`
+    --> crates/storage/src/lib.rs:1820:52
+     |
+1820 |             serde_json::from_str(&raw).map_err(|_| CoordinationError::Corrupt)?;
+     |                                                    ^^^^^^^^^^^^^^^^^ use of undeclared type `CoordinationError`
+     |
+help: consider importing this enum
+     |
+14   + use agent_core::CoordinationError;
+     |
+
+error[E0433]: failed to resolve: use of undeclared type `CoordinationError`
+    --> crates/storage/src/lib.rs:1837:24
+     |
+1837 |             return Err(CoordinationError::Corrupt.into());
+     |                        ^^^^^^^^^^^^^^^^^ use of undeclared type `CoordinationError`
+     |
+help: consider importing this enum
+     |
+14   + use agent_core::CoordinationError;
+     |
+
+   Compiling agent-entry-support v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/entry-support)
+For more information about this error, try `rustc --explain E0433`.
+error: could not compile `agent-storage` (lib) due to 4 previous errors
+warning: build failed, waiting for other jobs to finish...

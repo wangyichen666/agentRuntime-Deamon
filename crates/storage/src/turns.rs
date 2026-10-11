@@ -54,9 +54,8 @@ impl TurnRepository for RunStore {
         self.begin_plan_execution(owner)
     }
     fn read_plan(&self, owner: &ExactOwner) -> Result<PlanSnapshot, RuntimeError> {
-        let db = self.lock_connection()?;
-        fence_in(&db, owner)?;
-        read_plan_in(&db, owner)
+        self.read_plan_scoped(owner, None)
+            .map(|readback| readback.snapshot)
     }
     fn stage_plan(
         &self,
@@ -64,31 +63,7 @@ impl TurnRepository for RunStore {
         expected: u64,
         value: &serde_json::Value,
     ) -> Result<PlanSnapshot, RuntimeError> {
-        let mut db = self.lock_connection()?;
-        let tx = db.transaction()?;
-        execution_fence_in(&tx, owner)?;
-        let current = read_plan_in(&tx, owner)?;
-        if current.revision != expected {
-            return Err(RuntimeError::Protocol("plan revision CAS 冲突".into()));
-        }
-        let document = super::plans::stage_document(owner, &current, value)?;
-        let next = document.revision;
-        let value =
-            serde_json::to_value(&document).map_err(|e| RuntimeError::Protocol(e.to_string()))?;
-        let base: u64 = tx
-            .query_row(
-                "SELECT revision FROM session_plans WHERE lifetime=?1",
-                params![owner.session_lifetime_id.0],
-                |r| r.get(0),
-            )
-            .optional()?
-            .unwrap_or(0);
-        tx.execute("INSERT INTO turn_plan_stages VALUES (?1,?2,?3,?4) ON CONFLICT(run_id) DO UPDATE SET revision=excluded.revision,data_json=excluded.data_json",params![owner.run_id.0,base,next,value.to_string()])?;
-        super::views::commit(tx)?;
-        Ok(PlanSnapshot {
-            revision: next,
-            value,
-        })
+        self.stage_plan_scoped(owner, expected, value, None)
     }
     fn reject_tool_batch(
         &self,
@@ -97,53 +72,10 @@ impl TurnRepository for RunStore {
         calls: &[ToolCall],
         reason: &str,
     ) -> Result<Vec<Message>, RuntimeError> {
-        let mut db = self.lock_connection()?;
-        let tx = db.transaction()?;
-        execution_fence_in(&tx, owner)?;
-        let calls_json =
-            serde_json::to_string(calls).map_err(|e| RuntimeError::Protocol(e.to_string()))?;
-        tx.execute(
-            "INSERT INTO tool_batches(run_id,round,calls_json,state) VALUES(?1,?2,?3,'closed')",
-            params![owner.run_id.0, round as i64, calls_json],
-        )?;
-        let mut messages = vec![Message::assistant_tool_calls(calls.to_vec())];
-        for call in calls {
-            let output =
-                serde_json::json!({"outcome":"not_executed","reason":reason,"batch_rejected":true})
-                    .to_string();
-            tx.execute("INSERT INTO tool_executions(run_id,round,call_id,name,status,effect,argument_digest,prepared_at_ms,finished_at_ms,outcome,receipt_json) VALUES(?1,?2,?3,?4,'terminal','not_executed','',?5,?5,'not_executed',?6)",params![owner.run_id.0,round as i64,call.id,call.name,super::now_ms(),serde_json::json!({"output":output,"success":false,"batch_rejected":true}).to_string()])?;
-            messages.push(Message::tool_result(call, output));
-        }
-        validate_exchange(&messages)?;
-        insert_batch(
-            &tx,
-            &owner.session_key,
-            &owner.session_lifetime_id,
-            &format!("tool-batch:{round}"),
-            Some(&owner.run_id),
-            &messages,
-        )?;
-        insert_event(
-            &tx,
-            &owner.run_id,
-            "tool_batch_rejected",
-            &serde_json::json!({"round":round,"reason":reason}),
-        )?;
-        super::views::commit(tx)?;
-        Ok(messages)
+        self.reject_tool_batch_scoped(owner, round, calls, reason, None)
     }
     fn stage_assistant(&self, owner: &ExactOwner, message: &Message) -> Result<(), RuntimeError> {
-        let mut db = self.lock_connection()?;
-        let tx = db.transaction()?;
-        execution_fence_in(&tx, owner)?;
-        if message.role != Role::Assistant || !message.tool_calls.is_empty() {
-            return Err(RuntimeError::Protocol("终态输出必须为助手文本".into()));
-        }
-        let payload =
-            serde_json::to_string(message).map_err(|e| RuntimeError::Protocol(e.to_string()))?;
-        tx.execute("INSERT INTO turn_outputs VALUES(?1,?2) ON CONFLICT(run_id) DO UPDATE SET message_json=excluded.message_json",params![owner.run_id.0,payload])?;
-        super::views::commit(tx)?;
-        Ok(())
+        self.stage_assistant_scoped(owner, message, None)
     }
     fn commit_turn(&self, command: &TurnCommit) -> Result<RunRecord, RuntimeError> {
         self.finish_owned(
@@ -162,8 +94,29 @@ impl TurnRepository for RunStore {
         round: usize,
         messages: &[Message],
     ) -> Result<(), RuntimeError> {
+        self.close_tool_exchange_scoped(owner, round, messages, None)
+    }
+    fn run_snapshot(&self, run: &RunId) -> Result<Option<RunSnapshot>, RuntimeError> {
+        run_snapshot_in(&*self.lock_connection()?, run)
+    }
+}
+impl RunStore {
+    pub(crate) fn close_tool_exchange_scoped(
+        &self,
+        owner: &ExactOwner,
+        round: usize,
+        messages: &[Message],
+        envelope: Option<&agent_core::EnterpriseOwnerEnvelope>,
+    ) -> Result<(), RuntimeError> {
         let mut db = self.lock_connection()?;
-        let tx = db.transaction()?;
+        let tx = db.transaction_with_behavior(if envelope.is_some() {
+            rusqlite::TransactionBehavior::Immediate
+        } else {
+            rusqlite::TransactionBehavior::Deferred
+        })?;
+        if let Some(envelope) = envelope {
+            crate::execution::check_execution_in(&tx, envelope)?;
+        }
         execution_fence_in(&tx, owner)?;
         validate_exchange(messages)?;
         let calls_json: String = tx.query_row(
@@ -203,20 +156,21 @@ impl TurnRepository for RunStore {
         super::views::commit(tx)?;
         Ok(())
     }
-    fn run_snapshot(&self, run: &RunId) -> Result<Option<RunSnapshot>, RuntimeError> {
-        self.lock_connection()?
-            .query_row(
-                "SELECT snapshot_json FROM run_snapshots WHERE run_id=?1",
-                params![run.0],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()?
-            .map(|raw| {
-                serde_json::from_str(&raw).map_err(|e| RuntimeError::Protocol(e.to_string()))
-            })
-            .transpose()
-    }
 }
+pub(crate) fn run_snapshot_in(
+    db: &Connection,
+    run: &RunId,
+) -> Result<Option<RunSnapshot>, RuntimeError> {
+    db.query_row(
+        "SELECT snapshot_json FROM run_snapshots WHERE run_id=?1",
+        params![run.0],
+        |r| r.get::<_, String>(0),
+    )
+    .optional()?
+    .map(|raw| serde_json::from_str(&raw).map_err(|e| RuntimeError::Protocol(e.to_string())))
+    .transpose()
+}
+
 fn validate_exchange(messages: &[Message]) -> Result<(), RuntimeError> {
     let first = messages
         .first()
@@ -438,11 +392,7 @@ fn execution_fence_in(db: &Connection, owner: &ExactOwner) -> Result<(), Runtime
 
 impl RunStore {
     pub fn legacy_plan_imported(&self, source: &str) -> Result<bool, RuntimeError> {
-        Ok(self.lock_connection()?.query_row(
-            "SELECT count(*) FROM legacy_plan_imports WHERE source=?1",
-            params![source],
-            |r| r.get::<_, i64>(0),
-        )? != 0)
+        self.legacy_plan_import_scoped(&TenantContext::local(), source)
     }
     pub fn import_legacy_plan(
         &self,
@@ -451,8 +401,32 @@ impl RunStore {
         key: &SessionKey,
         value: &serde_json::Value,
     ) -> Result<(), RuntimeError> {
+        self.import_plan_file_scoped(&TenantContext::local(), source, digest, key, None, value)
+    }
+    pub(crate) fn import_plan_file_scoped(
+        &self,
+        scope: &TenantContext,
+        source: &str,
+        digest: &str,
+        key: &SessionKey,
+        expected: Option<&SessionLifetimeId>,
+        value: &serde_json::Value,
+    ) -> Result<(), RuntimeError> {
         let mut db = self.lock_connection()?;
-        let tx = db.transaction()?;
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if scope != &TenantContext::local() {
+            return Err(AuthorizationError::Forbidden.into());
+        }
+        super::enterprise::check_session_scope_in(&tx, scope, key)?;
+        let meta = super::sessions::metadata_in(&tx, key)?
+            .filter(|m| !m.deleted)
+            .ok_or(AuthorizationError::StaleOwner)?;
+        if expected.is_some_and(|life| life != &meta.lifetime) {
+            return Err(AuthorizationError::StaleOwner.into());
+        }
+        super::sessions::lifetime_owner_in(&tx, key, &meta.lifetime)?;
+        super::writer::acquire_in(&tx, key, &meta.lifetime)?;
+        super::writer::fence_in(&tx, key, &meta.lifetime)?;
         let exists: i64 = tx.query_row(
             "SELECT count(*) FROM legacy_plan_imports WHERE source=?1",
             params![source],
@@ -473,6 +447,231 @@ impl RunStore {
                 params![source, digest, meta.lifetime.0],
             )?;
         }
+        super::views::commit(tx)?;
+        Ok(())
+    }
+}
+
+pub(crate) fn plan_bytes_in(db: &Connection, owner: &ExactOwner) -> Result<(), RuntimeError> {
+    let too_large: bool=db.query_row("SELECT EXISTS(SELECT 1 FROM turn_plan_stages WHERE run_id=?1 AND length(CAST(data_json AS BLOB))>1048576) OR EXISTS(SELECT 1 FROM session_plans WHERE lifetime=?2 AND length(CAST(data_json AS BLOB))>1048576)", params![owner.run_id.0,owner.session_lifetime_id.0], |row|row.get(0))?;
+    if too_large {
+        return Err(CoordinationError::Corrupt.into());
+    }
+    Ok(())
+}
+impl RunStore {
+    pub(crate) fn read_plan_scoped(
+        &self,
+        owner: &ExactOwner,
+        envelope: Option<&EnterpriseOwnerEnvelope>,
+    ) -> Result<RunPlanReadback, RuntimeError> {
+        let mut db = self.lock_connection()?;
+        let tx = db.transaction()?;
+        if let Some(envelope) = envelope {
+            crate::execution::check_execution_in(&tx, envelope)?;
+            plan_bytes_in(&tx, owner)?;
+        }
+        fence_in(&tx, owner)?;
+        let snapshot = read_plan_in(&tx, owner).map_err(|error| {
+            if envelope.is_some() && matches!(error, RuntimeError::Protocol(_)) {
+                CoordinationError::Corrupt.into()
+            } else {
+                error
+            }
+        })?;
+        let raw: Option<String> = tx
+            .query_row(
+                "SELECT data_json FROM session_plans WHERE lifetime=?1",
+                [&owner.session_lifetime_id.0],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let has_legacy_plan = match raw {
+            Some(raw) => {
+                let value: serde_json::Value =
+                    serde_json::from_str(&raw).map_err(|_| CoordinationError::Corrupt)?;
+                if value.get("plan_id").is_none() {
+                    super::plans::validate_legacy_plan(&value)
+                        .map_err(|_| CoordinationError::Corrupt)?;
+                    true
+                } else {
+                    false
+                }
+            }
+            None => false,
+        };
+        tx.commit()?;
+        Ok(RunPlanReadback {
+            snapshot,
+            has_legacy_plan,
+        })
+    }
+    pub(crate) fn stage_plan_scoped(
+        &self,
+        owner: &ExactOwner,
+        expected: u64,
+        value: &serde_json::Value,
+        envelope: Option<&EnterpriseOwnerEnvelope>,
+    ) -> Result<PlanSnapshot, RuntimeError> {
+        let mut db = self.lock_connection()?;
+        let tx = db.transaction_with_behavior(if envelope.is_some() {
+            rusqlite::TransactionBehavior::Immediate
+        } else {
+            rusqlite::TransactionBehavior::Deferred
+        })?;
+        if let Some(envelope) = envelope {
+            crate::execution::check_execution_in(&tx, envelope)?;
+        }
+        execution_fence_in(&tx, owner)?;
+        if envelope.is_some() {
+            plan_bytes_in(&tx, owner)?;
+        }
+        let current = read_plan_in(&tx, owner).map_err(|error| {
+            if envelope.is_some() && matches!(error, RuntimeError::Protocol(_)) {
+                CoordinationError::Corrupt.into()
+            } else {
+                error
+            }
+        })?;
+        if current.revision != expected {
+            return Err(RuntimeError::Protocol("plan revision CAS 冲突".into()));
+        }
+        let document = super::plans::stage_document(owner, &current, value)?;
+        let next = document.revision;
+        let value =
+            serde_json::to_value(&document).map_err(|e| RuntimeError::Protocol(e.to_string()))?;
+        if envelope.is_some() && current.value == value {
+            return Ok(current);
+        }
+        let base: u64 = tx
+            .query_row(
+                "SELECT revision FROM session_plans WHERE lifetime=?1",
+                params![owner.session_lifetime_id.0],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        tx.execute("INSERT INTO turn_plan_stages VALUES (?1,?2,?3,?4) ON CONFLICT(run_id) DO UPDATE SET revision=excluded.revision,data_json=excluded.data_json",params![owner.run_id.0,base,next,value.to_string()])?;
+        super::views::commit(tx)?;
+        Ok(PlanSnapshot {
+            revision: next,
+            value,
+        })
+    }
+    pub(crate) fn reject_tool_batch_scoped(
+        &self,
+        owner: &ExactOwner,
+        round: usize,
+        calls: &[ToolCall],
+        reason: &str,
+        envelope: Option<&EnterpriseOwnerEnvelope>,
+    ) -> Result<Vec<Message>, RuntimeError> {
+        let mut db = self.lock_connection()?;
+        let tx = db.transaction_with_behavior(if envelope.is_some() {
+            rusqlite::TransactionBehavior::Immediate
+        } else {
+            rusqlite::TransactionBehavior::Deferred
+        })?;
+        if let Some(envelope) = envelope {
+            crate::execution::check_execution_in(&tx, envelope)?;
+        }
+        execution_fence_in(&tx, owner)?;
+        if envelope.is_some() {
+            let existing: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM tool_batches WHERE run_id=?1 AND round=?2)",
+                params![owner.run_id.0, round as i64],
+                |row| row.get(0),
+            )?;
+            if existing {
+                return Err(CoordinationError::Conflict.into());
+            }
+        }
+        let calls_json =
+            serde_json::to_string(calls).map_err(|e| RuntimeError::Protocol(e.to_string()))?;
+        tx.execute(
+            "INSERT INTO tool_batches(run_id,round,calls_json,state) VALUES(?1,?2,?3,'closed')",
+            params![owner.run_id.0, round as i64, calls_json],
+        )?;
+        let mut messages = vec![Message::assistant_tool_calls(calls.to_vec())];
+        for call in calls {
+            let output =
+                serde_json::json!({"outcome":"not_executed","reason":reason,"batch_rejected":true})
+                    .to_string();
+            tx.execute("INSERT INTO tool_executions(run_id,round,call_id,name,status,effect,argument_digest,prepared_at_ms,finished_at_ms,outcome,receipt_json) VALUES(?1,?2,?3,?4,'terminal','not_executed','',?5,?5,'not_executed',?6)",params![owner.run_id.0,round as i64,call.id,call.name,super::now_ms(),serde_json::json!({"output":output,"success":false,"batch_rejected":true}).to_string()])?;
+            messages.push(Message::tool_result(call, output));
+        }
+        validate_exchange(&messages)?;
+        insert_batch(
+            &tx,
+            &owner.session_key,
+            &owner.session_lifetime_id,
+            &format!("tool-batch:{round}"),
+            Some(&owner.run_id),
+            &messages,
+        )?;
+        insert_event(
+            &tx,
+            &owner.run_id,
+            "tool_batch_rejected",
+            &serde_json::json!({"round":round,"reason":reason}),
+        )?;
+        super::views::commit(tx)?;
+        Ok(messages)
+    }
+    pub(crate) fn stage_assistant_scoped(
+        &self,
+        owner: &ExactOwner,
+        message: &Message,
+        envelope: Option<&EnterpriseOwnerEnvelope>,
+    ) -> Result<(), RuntimeError> {
+        let mut db = self.lock_connection()?;
+        let tx = db.transaction_with_behavior(if envelope.is_some() {
+            rusqlite::TransactionBehavior::Immediate
+        } else {
+            rusqlite::TransactionBehavior::Deferred
+        })?;
+        if let Some(envelope) = envelope {
+            crate::execution::check_execution_in(&tx, envelope)?;
+        }
+        execution_fence_in(&tx, owner)?;
+        if message.role != Role::Assistant || !message.tool_calls.is_empty() {
+            return Err(RuntimeError::Protocol("终态输出必须为助手文本".into()));
+        }
+        let payload =
+            serde_json::to_string(message).map_err(|e| RuntimeError::Protocol(e.to_string()))?;
+        if envelope.is_some() {
+            let prior_bytes: Option<u64> = tx
+                .query_row(
+                    "SELECT length(CAST(message_json AS BLOB)) FROM turn_outputs WHERE run_id=?1",
+                    [&owner.run_id.0],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if prior_bytes.is_some_and(|bytes| bytes > 4 * 1024 * 1024 - 8192) {
+                return Err(CoordinationError::Corrupt.into());
+            }
+            let prior: Option<String> = tx
+                .query_row(
+                    "SELECT message_json FROM turn_outputs WHERE run_id=?1",
+                    [&owner.run_id.0],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(prior) = prior {
+                let saved: Message =
+                    serde_json::from_str(&prior).map_err(|_| CoordinationError::Corrupt)?;
+                if saved.role != Role::Assistant
+                    || !saved.tool_calls.is_empty()
+                    || saved.tool_call_id.is_some()
+                {
+                    return Err(CoordinationError::Corrupt.into());
+                }
+                if saved == *message {
+                    return Ok(());
+                }
+            }
+        }
+        tx.execute("INSERT INTO turn_outputs VALUES(?1,?2) ON CONFLICT(run_id) DO UPDATE SET message_json=excluded.message_json",params![owner.run_id.0,payload])?;
         super::views::commit(tx)?;
         Ok(())
     }

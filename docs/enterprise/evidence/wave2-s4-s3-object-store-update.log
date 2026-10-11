@@ -1,0 +1,19 @@
+    Updating `rsproxy-sparse` index
+ Downloading crates ...
+  Downloaded object_store v0.14.2 (registry `rsproxy-sparse`)
+object_store #object #storage #cloud
+A generic object store interface for uniformly interacting with AWS S3, Google Cloud Storage, Azure Blob Storage and local files.
+version: 0.14.2
+license: MIT/Apache-2.0
+rust-version: 1.85
+documentation: https://docs.rs/object_store/0.14.2
+repository: https://github.com/apache/arrow-rs-object-store
+crates.io: https://crates.io/crates/object_store/0.14.2
+features:
+ +default          = [fs]
+  fs               = [walkdir, tokio, nix, windows-sys]
+  nix              = [dep:nix]
+  tokio            = [dep:tokio, dep:tracing]
+  walkdir          = [dep:walkdir]
+  windows-sys      = [dep:windows-sys]
+  26 deactivated features

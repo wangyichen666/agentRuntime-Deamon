@@ -15,6 +15,7 @@ allow = [
 exceptions = [
     { crate = "borrow-or-share@0.2.4", allow = ["MIT-0"] },
     { crate = "webpki-roots@1.0.9", allow = ["CDLA-Permissive-2.0"] },
+    { crate = "webpki-root-certs@1.0.9", allow = ["CDLA-Permissive-2.0"] },
 ]
 
 [licenses.private]

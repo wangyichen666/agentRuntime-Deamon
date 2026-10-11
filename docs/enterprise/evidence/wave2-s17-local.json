@@ -1,0 +1,17 @@
+[
+  {
+    "name": "libraries",
+    "exit_code": 101,
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "-p",
+      "agent-storage",
+      "-p",
+      "agent-runtime",
+      "--lib",
+      "--all-features"
+    ]
+  }
+]

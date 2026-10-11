@@ -1,0 +1,21 @@
+   Compiling agent-core v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/core)
+   Compiling agent-storage-ports v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-ports)
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 27.50s
+     Running unittests src/lib.rs (target/debug/deps/agent_storage-f4d26138d89f611c)
+
+running 1 test
+
+thread 'enterprise::async_contract::identity_async_port_yields_while_original_connection_is_occupied' panicked at crates/storage/src/enterprise.rs:349:9:
+中心身份查询必须让 Tokio 调度 timeout，而不是占用线程直到原连接释放：Ok(Ok(IdentityReadback { scope: TenantContext { organization_id: OrganizationId("local-organization"), tenant_id: TenantId("local-tenant"), project_id: ProjectId("local-project"), agent_uid: AgentUid("local-agent") }, principal: AuthenticatedPrincipal { subject_id: SubjectId("local-subject"), kind: Human, revocation_epoch: 0 }, roles: [TenantAdmin], policy: PolicyDocument { version: PolicyVersion("local-policy-1"), hard_denies: [], conditions: PolicyConditions { tenant_id: None, project_id: None, agent_uid: None, workspace: None, entry_channels: None, tool_effects: None, not_before_ms: None, expires_at_ms: None, networks: None } }, policy_digest: "a3f7ac18e01e8ac5d5e571374212fb55f9c8a967d253d841e584ec3364eb3691", enterprise_ready: false }))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test enterprise::async_contract::identity_async_port_yields_while_original_connection_is_occupied ... FAILED
+
+failures:
+
+failures:
+    enterprise::async_contract::identity_async_port_yields_while_original_connection_is_occupied
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 76 filtered out; finished in 0.56s
+
+error: test failed, to rerun pass `-p agent-storage --lib`

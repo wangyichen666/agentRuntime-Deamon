@@ -53,49 +53,9 @@ fn protocol(error: serde_json::Error) -> RuntimeError {
     RuntimeError::Protocol(error.to_string())
 }
 
-fn validate_outcome(outcome: &HookOutcome) -> Result<(), RuntimeError> {
-    let payload = &outcome.payload;
-    let owner_valid = payload.owner.as_ref().map_or_else(
-        || {
-            matches!(
-                payload.event,
-                HookEvent::SessionStart | HookEvent::SessionEnd | HookEvent::Notification
-            )
-        },
-        |owner| {
-            owner.session_key == payload.session_key
-                && owner.session_lifetime_id == payload.session_lifetime_id
-        },
-    );
-    let state_valid = match outcome.status {
-        HookStatus::Running => outcome.effect.is_none() && outcome.failure.is_none(),
-        HookStatus::Succeeded => {
-            outcome.failure.is_none()
-                && outcome
-                    .effect
-                    .as_ref()
-                    .is_some_and(|effect| payload.event.permits(effect))
-        }
-        HookStatus::Failed => {
-            outcome.effect.is_none()
-                && outcome
-                    .failure
-                    .is_some_and(|failure| failure != HookFailure::UnknownAfterRestart)
-        }
-        HookStatus::UnknownAfterRestart => {
-            outcome.effect.is_none() && outcome.failure == Some(HookFailure::UnknownAfterRestart)
-        }
-    };
-    if payload.schema_version != 1
-        || payload.operation_id.is_empty()
-        || payload.operation_id.len() > 256
-        || serde_json::to_vec(payload).map_err(protocol)?.len() > 16384
-        || !owner_valid
-        || !state_valid
-    {
-        return Err(RuntimeError::Protocol("hook 持久记录身份或状态损坏".into()));
-    }
-    Ok(())
+pub(crate) fn validate_outcome(outcome: &HookOutcome) -> Result<(), RuntimeError> {
+    agent_core::validate_hook_outcome(outcome)
+        .map_err(|_| RuntimeError::Protocol("hook 持久记录身份或状态损坏".into()))
 }
 
 impl HookRepository for RunStore {
@@ -106,47 +66,52 @@ impl HookRepository for RunStore {
         prompt: &str,
         snapshot: &RunSnapshot,
     ) -> Result<Admission, RuntimeError> {
-        let mut snapshot = snapshot.clone();
-        snapshot.entry_channel = HookChannel::Continuation;
-        let admission = RunAdmission {
-            plan_execution: None,
-            session_key: parent.session_key.clone(),
-            expected_lifetime: Some(parent.session_lifetime_id.clone()),
-            request_id: crate::RequestId::String(format!("continuation:{}", parent.run_id.0)),
-            input: prompt.into(),
-            mode: AdmissionMode::Queue,
-        };
-        self.admit_run_inner(
-            &admission,
-            snapshot.route.as_ref(),
-            Some(&snapshot),
-            Some((parent, operation)),
-            None,
-        )
+        self.admit_hook_continuation_scoped(parent, operation, prompt, snapshot, None)
     }
     fn hook_continuation_parent(&self, run: &RunId) -> Result<Option<RunId>, RuntimeError> {
-        Ok(self
-            .lock_connection()?
-            .query_row(
-                "SELECT parent_run_id FROM hook_continuations WHERE child_run_id=?1",
-                params![run.0],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()?
-            .map(RunId))
+        self.hook_relation_scoped(&TenantContext::local(), run, true)
     }
     fn hook_continuation_child(&self, run: &RunId) -> Result<Option<RunId>, RuntimeError> {
-        Ok(self
-            .lock_connection()?
-            .query_row(
-                "SELECT child_run_id FROM hook_continuations WHERE parent_run_id=?1",
-                params![run.0],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()?
-            .map(RunId))
+        self.hook_relation_scoped(&TenantContext::local(), run, false)
     }
     fn claim_hook(&self, payload: &HookPayload) -> Result<HookClaim, RuntimeError> {
+        self.claim_hook_scoped(payload, &TenantContext::local(), None)
+    }
+    fn settle_hook(&self, outcome: &HookOutcome) -> Result<HookOutcome, RuntimeError> {
+        self.settle_hook_scoped(outcome, &TenantContext::local(), None, false)
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    fn hook_outcomes(
+        &self,
+        key: &SessionKey,
+        lifetime: &SessionLifetimeId,
+    ) -> Result<Vec<HookOutcome>, RuntimeError> {
+        Ok(self.hook_readback(key, lifetime, 0, 32)?.outcomes)
+    }
+    fn hook_readback(
+        &self,
+        key: &SessionKey,
+        lifetime: &SessionLifetimeId,
+        after: u64,
+        limit: usize,
+    ) -> Result<HookReadback, RuntimeError> {
+        self.hook_readback_scoped(&TenantContext::local(), key, lifetime, after, limit)
+    }
+    fn hook_publications(&self) -> Result<Vec<HookPublication>, RuntimeError> {
+        self.hook_publications_scoped(&TenantContext::local())
+    }
+    fn acknowledge_hook_publication(&self, operation: &str) -> Result<(), RuntimeError> {
+        self.acknowledge_hook_publication_scoped(&TenantContext::local(), operation, None)
+    }
+}
+
+impl RunStore {
+    pub(crate) fn claim_hook_scoped(
+        &self,
+        payload: &HookPayload,
+        scope: &TenantContext,
+        envelope: Option<&EnterpriseOwnerEnvelope>,
+    ) -> Result<HookClaim, RuntimeError> {
         if payload.schema_version != 1
             || payload.operation_id.is_empty()
             || payload.operation_id.len() > 256
@@ -157,7 +122,9 @@ impl HookRepository for RunStore {
             ));
         }
         let mut db = self.lock_connection()?;
-        let tx = db.transaction()?;
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        crate::hook_execution::check_hook_proof_in(&tx, payload, scope, envelope)?;
+        super::writer::fence_current_in(&tx, &payload.session_key)?;
         if payload.owner.is_none()
             && !matches!(
                 payload.event,
@@ -166,22 +133,25 @@ impl HookRepository for RunStore {
         {
             return Err(RuntimeError::Protocol("run hook 缺 exact owner".into()));
         }
-        let previous: Option<String> = tx
-            .query_row(
-                "SELECT outcome_json FROM hook_outcomes WHERE operation_id=?1",
-                params![payload.operation_id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(previous) = previous {
-            let outcome: HookOutcome = serde_json::from_str(&previous).map_err(protocol)?;
-            validate_outcome(&outcome)?;
+        let previous = crate::hook_execution::saved_outcome_in(
+            &tx,
+            &payload.session_key,
+            &payload.session_lifetime_id,
+            &payload.operation_id,
+        )?;
+        if let Some(outcome) = previous {
             if outcome.payload != *payload {
-                return Err(RuntimeError::Protocol(
-                    "hook operation 身份或输入冲突".into(),
-                ));
+                return Err(CoordinationError::Conflict.into());
             }
             return Ok(HookClaim::Existing(Box::new(outcome)));
+        }
+        let collision: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM hook_outcomes WHERE operation_id=?1)",
+            [&payload.operation_id],
+            |r| r.get(0),
+        )?;
+        if collision {
+            return Err(CoordinationError::Conflict.into());
         }
         if let Some(owner) = &payload.owner {
             if owner.session_key != payload.session_key
@@ -197,15 +167,20 @@ impl HookRepository for RunStore {
                 params![payload.session_lifetime_id.0, payload.session_key.0],
                 |r| r.get(0),
             )?;
-            let historical_publication: Option<String> = tx
+            let historical_publication: Option<Option<String>> = tx
                 .query_row(
-                    "SELECT payload_json FROM hook_publications WHERE operation_id=?1",
-                    params![payload.operation_id],
+                    "SELECT CASE WHEN typeof(payload_json)='text' AND length(CAST(payload_json AS BLOB)) BETWEEN 1 AND 16384 THEN CASE WHEN json_valid(payload_json) THEN CASE WHEN json_extract(payload_json,'$.session_key')=?2 AND json_extract(payload_json,'$.session_lifetime_id')=?3 THEN payload_json END END END FROM hook_publications WHERE operation_id=?1",
+                    params![payload.operation_id,payload.session_key.0,payload.session_lifetime_id.0],
                     |r| r.get(0),
                 )
                 .optional()?;
             let historical_start = if let Some(raw) = historical_publication {
-                let publication: HookPublication = serde_json::from_str(&raw).map_err(protocol)?;
+                let raw = raw.ok_or(CoordinationError::Corrupt)?;
+                let publication: HookPublication =
+                    serde_json::from_str(&raw).map_err(|_| CoordinationError::Corrupt)?;
+                if publication.operation_id != payload.operation_id {
+                    return Err(CoordinationError::Corrupt.into());
+                }
                 publication.event == HookEvent::SessionStart
                     && payload.event == HookEvent::SessionStart
                     && publication.session_key == payload.session_key
@@ -227,15 +202,22 @@ impl HookRepository for RunStore {
         };
         tx.execute("INSERT INTO hook_outcomes(operation_id,session_id,lifetime,outcome_json) VALUES(?1,?2,?3,?4)",params![payload.operation_id,payload.session_key.0,payload.session_lifetime_id.0,serde_json::to_string(&outcome).map_err(protocol)?])?;
         tx.execute(
-            "UPDATE hook_publications SET dispatched=1 WHERE operation_id=?1",
-            params![payload.operation_id],
+            "UPDATE hook_publications SET dispatched=1 WHERE operation_id=?1 AND CASE WHEN length(CAST(payload_json AS BLOB))<=16384 AND json_valid(payload_json) THEN json_extract(payload_json,'$.session_key')=?2 AND json_extract(payload_json,'$.session_lifetime_id')=?3 ELSE 0 END",
+            params![payload.operation_id,payload.session_key.0,payload.session_lifetime_id.0],
         )?;
         super::views::commit(tx)?;
         Ok(HookClaim::New)
     }
-    fn settle_hook(&self, outcome: &HookOutcome) -> Result<HookOutcome, RuntimeError> {
+    pub(crate) fn settle_hook_scoped(
+        &self,
+        outcome: &HookOutcome,
+        scope: &TenantContext,
+        envelope: Option<&EnterpriseOwnerEnvelope>,
+        allow_unknown: bool,
+    ) -> Result<HookOutcome, RuntimeError> {
         validate_outcome(outcome)?;
-        if !matches!(outcome.status, HookStatus::Succeeded | HookStatus::Failed)
+        if !(matches!(outcome.status, HookStatus::Succeeded | HookStatus::Failed)
+            || allow_unknown && outcome.status == HookStatus::UnknownAfterRestart)
             || (outcome.status == HookStatus::Succeeded
                 && (outcome.failure.is_some()
                     || outcome
@@ -248,14 +230,16 @@ impl HookRepository for RunStore {
             return Err(RuntimeError::Protocol("hook outcome/effect 非法".into()));
         }
         let mut db = self.lock_connection()?;
-        let tx = db.transaction()?;
-        let raw: String = tx.query_row(
-            "SELECT outcome_json FROM hook_outcomes WHERE operation_id=?1",
-            params![outcome.payload.operation_id],
-            |r| r.get(0),
-        )?;
-        let old: HookOutcome = serde_json::from_str(&raw).map_err(protocol)?;
-        validate_outcome(&old)?;
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        crate::hook_execution::check_hook_proof_in(&tx, &outcome.payload, scope, envelope)?;
+        super::writer::fence_current_in(&tx, &outcome.payload.session_key)?;
+        let old = crate::hook_execution::saved_outcome_in(
+            &tx,
+            &outcome.payload.session_key,
+            &outcome.payload.session_lifetime_id,
+            &outcome.payload.operation_id,
+        )?
+        .ok_or(CoordinationError::Conflict)?;
         if old.payload != outcome.payload {
             return Err(RuntimeError::Protocol("hook settle 身份冲突".into()));
         }
@@ -266,127 +250,88 @@ impl HookRepository for RunStore {
             return Err(RuntimeError::Protocol("hook 已结算".into()));
         }
         tx.execute(
-            "UPDATE hook_outcomes SET outcome_json=?2 WHERE operation_id=?1",
+            "UPDATE hook_outcomes SET outcome_json=?2 WHERE operation_id=?1 AND session_id=?3 AND lifetime=?4",
             params![
                 outcome.payload.operation_id,
-                serde_json::to_string(outcome).map_err(protocol)?
+                serde_json::to_string(outcome).map_err(protocol)?,outcome.payload.session_key.0,outcome.payload.session_lifetime_id.0
             ],
         )?;
         super::views::commit(tx)?;
         Ok(outcome.clone())
     }
-    #[cfg(any(test, feature = "test-support"))]
-    fn hook_outcomes(
-        &self,
-        key: &SessionKey,
-        lifetime: &SessionLifetimeId,
-    ) -> Result<Vec<HookOutcome>, RuntimeError> {
-        Ok(self.hook_readback(key, lifetime, 0, 32)?.outcomes)
-    }
-    fn hook_readback(
-        &self,
-        key: &SessionKey,
-        lifetime: &SessionLifetimeId,
-        after: u64,
-        limit: usize,
-    ) -> Result<HookReadback, RuntimeError> {
-        let mut db = self.lock_connection()?;
-        let tx = db.transaction()?;
-        let db = &tx;
-        let valid: i64 = db.query_row(
-            "SELECT count(*) FROM session_heads WHERE session_id=?1 AND lifetime=?2",
-            params![key.0, lifetime.0],
-            |r| r.get(0),
-        )?;
-        let ended: i64 = db.query_row(
-            "SELECT count(*) FROM session_tombstones WHERE session_id=?1 AND lifetime=?2",
-            params![key.0, lifetime.0],
-            |r| r.get(0),
-        )?;
-        if valid == 0 && ended == 0 {
-            return Err(RuntimeError::Protocol(
-                "hook readback lifetime 不存在".into(),
-            ));
-        }
-        let snapshot_revision = SnapshotRevision(db.query_row(
-            "SELECT revision FROM snapshot_clock WHERE id=1",
-            [],
-            |r| r.get(0),
-        )?);
-        let mut q=db.prepare("SELECT rowid,operation_id,outcome_json FROM hook_outcomes WHERE session_id=?1 AND lifetime=?2 AND rowid>?3 ORDER BY rowid LIMIT ?4")?;
-        let raws = q
-            .query_map(
-                params![
-                    key.0,
-                    lifetime.0,
-                    i64::try_from(after)
-                        .map_err(|_| RuntimeError::Protocol("hook cursor 超限".into()))?,
-                    limit.clamp(1, 32) + 1
-                ],
-                |r| {
-                    Ok((
-                        r.get::<_, u64>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                    ))
-                },
-            )?
-            .collect::<Result<Vec<_>, _>>()?;
-        let has_more = raws.len() > limit.clamp(1, 32);
-        let page = raws
-            .into_iter()
-            .take(limit.clamp(1, 32))
-            .collect::<Vec<_>>();
-        let cursor = page.last().map_or(after, |(cursor, _, _)| *cursor);
-        let outcomes = page
-            .into_iter()
-            .map(|(_, operation, raw)| {
-                let outcome: HookOutcome = serde_json::from_str(&raw).map_err(protocol)?;
-                validate_outcome(&outcome)?;
-                if outcome.payload.session_key != *key
-                    || outcome.payload.session_lifetime_id != *lifetime
-                    || outcome.payload.operation_id != operation
-                {
-                    return Err(RuntimeError::Protocol("hook readback 行身份损坏".into()));
-                }
-                Ok(outcome)
-            })
-            .collect::<Result<_, _>>()?;
-        drop(q);
-        super::views::commit(tx)?;
-        Ok(HookReadback {
-            schema_version: 1,
-            session_key: key.clone(),
-            session_lifetime_id: lifetime.clone(),
-            snapshot_revision,
-            outcomes,
-            cursor,
-            has_more,
-        })
-    }
-    fn hook_publications(&self) -> Result<Vec<HookPublication>, RuntimeError> {
-        let db = self.lock_connection()?;
-        let mut q = db.prepare(
-            "SELECT payload_json FROM hook_publications WHERE dispatched=0 ORDER BY rowid LIMIT 64",
-        )?;
-        let raws = q
-            .query_map([], |r| r.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        raws.into_iter()
-            .map(|raw| serde_json::from_str(&raw).map_err(protocol))
-            .collect()
-    }
-    fn acknowledge_hook_publication(&self, operation: &str) -> Result<(), RuntimeError> {
-        self.lock_connection()?.execute(
-            "UPDATE hook_publications SET dispatched=1 WHERE operation_id=?1",
-            params![operation],
-        )?;
-        Ok(())
-    }
 }
 
-pub(crate) fn recover_in(db: &Connection) -> Result<(), RuntimeError> {
-    db.execute("UPDATE hook_outcomes SET outcome_json=json_set(outcome_json,'$.status','unknown_after_restart','$.failure','unknown_after_restart') WHERE json_extract(outcome_json,'$.status')='running'",[])?;
+pub(crate) fn recover_in(
+    db: &Connection,
+    scope: &agent_core::TenantContext,
+) -> Result<(), RuntimeError> {
+    use agent_core::CoordinationError;
+    let visible = "SELECT h.rowid FROM hook_outcomes h JOIN session_scopes s ON s.session_id=h.session_id JOIN tenants t ON t.id=s.tenant_id WHERE t.organization_id=?1 AND s.tenant_id=?2 AND s.project_id=?3 AND s.agent_uid=?4";
+    let invalid:bool=db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM hook_outcomes WHERE rowid IN ({visible}) AND (typeof(outcome_json)<>'text' OR length(CAST(outcome_json AS BLOB))>49152 OR NOT json_valid(outcome_json)))"),params![scope.organization_id.as_str(),scope.tenant_id.as_str(),scope.project_id.as_str(),scope.agent_uid.as_str()],|r|r.get(0))?;
+    if invalid {
+        return Err(CoordinationError::Corrupt.into());
+    }
+    let mut query=db.prepare(&format!("SELECT CASE WHEN length(CAST(operation_id AS BLOB)) BETWEEN 1 AND 1024 THEN operation_id END,CASE WHEN length(CAST(session_id AS BLOB)) BETWEEN 1 AND 1024 THEN session_id END,CASE WHEN length(CAST(lifetime AS BLOB)) BETWEEN 1 AND 128 THEN lifetime END,CASE WHEN json_valid(outcome_json) AND length(CAST(outcome_json AS BLOB))<=49152 THEN outcome_json END FROM hook_outcomes WHERE rowid IN ({visible}) AND CASE WHEN json_valid(outcome_json) AND length(CAST(outcome_json AS BLOB))<=49152 THEN json_extract(outcome_json,'$.status') END='running' LIMIT 1025"))?;
+    let rows = query
+        .query_map(
+            params![
+                scope.organization_id.as_str(),
+                scope.tenant_id.as_str(),
+                scope.project_id.as_str(),
+                scope.agent_uid.as_str()
+            ],
+            |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                ))
+            },
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(query);
+    if rows.len() > 1024 {
+        return Err(CoordinationError::Corrupt.into());
+    }
+    for (operation, key, life, raw) in rows {
+        let operation = operation.ok_or(CoordinationError::Corrupt)?;
+        let key = key.ok_or(CoordinationError::Corrupt)?;
+        let life = life.ok_or(CoordinationError::Corrupt)?;
+        let mut outcome: HookOutcome =
+            serde_json::from_str(&raw.ok_or(CoordinationError::Corrupt)?)
+                .map_err(|_| CoordinationError::Corrupt)?;
+        validate_outcome(&outcome).map_err(|_| CoordinationError::Corrupt)?;
+        if outcome.payload.operation_id != operation
+            || outcome.payload.session_key.0 != key
+            || outcome.payload.session_lifetime_id.0 != life
+        {
+            return Err(CoordinationError::Corrupt.into());
+        }
+        super::enterprise::check_session_scope_in(db, scope, &outcome.payload.session_key)?;
+        super::sessions::lifetime_owner_in(
+            db,
+            &outcome.payload.session_key,
+            &outcome.payload.session_lifetime_id,
+        )?;
+        if let Some(owner) = &outcome.payload.owner {
+            super::enterprise::check_run_scope_in(db, scope, &owner.run_id)?;
+            let actual = super::sessions::owner_in(db, &owner.run_id)?;
+            if &actual != owner {
+                return Err(CoordinationError::Corrupt.into());
+            }
+        }
+        outcome.status = HookStatus::UnknownAfterRestart;
+        outcome.failure = Some(HookFailure::UnknownAfterRestart);
+        outcome.effect = None;
+        db.execute(
+            "UPDATE hook_outcomes SET outcome_json=?2 WHERE operation_id=?1",
+            params![
+                operation,
+                serde_json::to_string(&outcome).map_err(|_| CoordinationError::Corrupt)?
+            ],
+        )?;
+    }
     Ok(())
 }
 
@@ -398,13 +343,10 @@ pub(crate) fn validate_continuation_in(
     snapshot: Option<&RunSnapshot>,
 ) -> Result<(), RuntimeError> {
     super::sessions::fence_in(db, parent)?;
-    let raw: String = db.query_row(
-        "SELECT snapshot_json FROM run_snapshots WHERE run_id=?1",
-        params![parent.run_id.0],
-        |r| r.get(0),
-    )?;
-    let mut frozen: RunSnapshot = serde_json::from_str(&raw).map_err(protocol)?;
+    let mut frozen = crate::requests::frozen_in(db, &parent.run_id)?;
     frozen.entry_channel = HookChannel::Continuation;
+    // 执行指令仅属于原工作流节点，派生 run 保留冻结授权但不重复执行父节点。
+    frozen.workflow = None;
     if serde_json::to_value(&frozen).map_err(protocol)?
         != serde_json::to_value(
             snapshot
@@ -441,12 +383,18 @@ pub(crate) fn validate_continuation_in(
             "Stop continuation budget/parent status 不允许".into(),
         ));
     }
-    let raw: String = db.query_row(
-        "SELECT outcome_json FROM hook_outcomes WHERE operation_id=?1",
-        params![operation],
-        |r| r.get(0),
-    )?;
-    let outcome: HookOutcome = serde_json::from_str(&raw).map_err(protocol)?;
+    let saved:Option<Option<String>>=db.query_row("SELECT CASE WHEN typeof(outcome_json)='text' AND length(CAST(outcome_json AS BLOB)) BETWEEN 1 AND 49152 THEN outcome_json END FROM hook_outcomes WHERE operation_id=?1 AND session_id=?2 AND lifetime=?3",params![operation,parent.session_key.0,parent.session_lifetime_id.0],|r|r.get(0)).optional()?;
+    let raw = saved
+        .ok_or(CoordinationError::Conflict)?
+        .ok_or(CoordinationError::Corrupt)?;
+    let outcome: HookOutcome =
+        serde_json::from_str(&raw).map_err(|_| CoordinationError::Corrupt)?;
+    validate_outcome(&outcome).map_err(|_| CoordinationError::Corrupt)?;
+    if outcome.payload.operation_id != operation
+        || outcome.payload.data["continuation_allowed"] == false
+    {
+        return Err(CoordinationError::Corrupt.into());
+    }
     if outcome.payload.owner.as_ref() != Some(parent)
         || outcome.payload.event != HookEvent::Stop
         || outcome.status != HookStatus::Succeeded
@@ -460,6 +408,33 @@ pub(crate) fn validate_continuation_in(
         ));
     }
     Ok(())
+}
+
+pub(crate) fn continuation_parent_in(
+    db: &Connection,
+    run: &RunId,
+) -> Result<Option<RunId>, RuntimeError> {
+    Ok(db
+        .query_row(
+            "SELECT parent_run_id FROM hook_continuations WHERE child_run_id=?1",
+            params![run.0],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?
+        .map(RunId))
+}
+pub(crate) fn continuation_child_in(
+    db: &Connection,
+    run: &RunId,
+) -> Result<Option<RunId>, RuntimeError> {
+    Ok(db
+        .query_row(
+            "SELECT child_run_id FROM hook_continuations WHERE parent_run_id=?1",
+            params![run.0],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?
+        .map(RunId))
 }
 
 #[cfg(test)]
@@ -674,6 +649,10 @@ mod tests {
                 .create_session(&SessionKey("continuation".into()))
                 .unwrap();
             let snapshot = RunSnapshot {
+                workflow: None,
+                installed_generation:None,
+                billing_policy: None,
+            artifact_store_id: None,
                 entry_channel: HookChannel::Cli,
                 route: None,
                 tools: vec![],
@@ -694,6 +673,7 @@ mod tests {
                 config_generation: 0,
             };
             let admission = RunAdmission {
+                workflow_node: None,
                 plan_execution: None,
                 session_key: meta.key.clone(),
                 expected_lifetime: Some(meta.lifetime.clone()),
@@ -841,6 +821,7 @@ mod tests {
         let path = path();
         let store = RunStore::open(&path).unwrap();
         let meta = store.create_session(&SessionKey("legacy".into())).unwrap();
+        crate::enterprise::remove_v21_for_fixture(&store.lock_connection().unwrap());
         store.lock_connection().unwrap().execute_batch("DROP TABLE provider_requests; DROP TABLE event_view_stamps; DROP TABLE tool_discoveries; DROP TABLE compact_run_links; DROP TABLE hook_outcomes; DROP TABLE hook_publications; DROP TABLE hook_continuations; DELETE FROM schema_migrations WHERE version>=16; CREATE TRIGGER fault BEFORE INSERT ON schema_migrations WHEN NEW.version=16 BEGIN SELECT RAISE(ABORT,'hook migration fault'); END").unwrap();
         drop(store);
         assert!(RunStore::open(&path).is_err());
@@ -872,7 +853,7 @@ mod tests {
         store
             .lock_connection()
             .unwrap()
-            .execute("INSERT INTO schema_migrations VALUES(21,0)", [])
+            .execute("INSERT INTO schema_migrations VALUES(28,0)", [])
             .unwrap();
         drop(store);
         assert!(RunStore::open(&path).is_err());

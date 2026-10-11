@@ -1,0 +1,53 @@
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.76s
+     Running tests/writer_contract.rs (target/debug/deps/writer_contract-12f2878073cdb615)
+
+running 5 tests
+test native_writer_old_callback_terminal_transcript_and_recovery_are_fenced_after_takeover ... FAILED
+test native_writer_renewal_preserves_epoch_and_does_not_advance_business_event_clock ... FAILED
+test sqlite_writer_repository_uses_database_time_complete_scope_and_epoch_cas ... FAILED
+test writer_two_independent_connections_have_one_winner_with_controlled_barrier ... FAILED
+test native_writer_expired_process_cannot_self_reacquire_and_unconfigured_store_cannot_bypass ... FAILED
+
+failures:
+
+---- native_writer_old_callback_terminal_transcript_and_recovery_are_fenced_after_takeover stdout ----
+
+thread 'native_writer_old_callback_terminal_transcript_and_recovery_are_fenced_after_takeover' panicked at tests/writer_contract.rs:34:43:
+called `Result::unwrap()` on an `Err` value: Persistence(SqlInputError { error: Error { code: Unknown, extended_code: 1 }, msg: "no such column: organization_id", sql: "\nCREATE UNIQUE INDEX session_scope_writer_key ON session_scopes(organization_id,tenant_id,project_id,agent_uid,session_key);\nCREATE TABLE session_writer_leases (\n organization_id TEXT NOT NULL,tenant_id TEXT NOT NULL,project_id TEXT NOT NULL,agent_uid TEXT NOT NULL,\n session_key TEXT NOT NULL,lifetime TEXT NOT NULL,owner_id TEXT NOT NULL,\n epoch INTEGER NOT NULL CHECK(epoch>0),expires_at_ms INTEGER NOT NULL,\n PRIMARY KEY(organization_id,tenant_id,project_id,agent_uid,session_key,lifetime),\n FOREIGN KEY(organization_id,tenant_id,project_id,agent_uid,session_key) REFERENCES session_scopes(organization_id,tenant_id,project_id,agent_uid,session_key)\n);\nCREATE INDEX session_writer_expiry ON session_writer_leases(organization_id,tenant_id,project_id,agent_uid,expires_at_ms);\nINSERT INTO schema_migrations VALUES(24,CAST(strftime('%s','now') AS INTEGER)*1000);\nCOMMIT;\n", offset: 64 })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- native_writer_renewal_preserves_epoch_and_does_not_advance_business_event_clock stdout ----
+
+thread 'native_writer_renewal_preserves_epoch_and_does_not_advance_business_event_clock' panicked at tests/writer_contract.rs:34:43:
+called `Result::unwrap()` on an `Err` value: Persistence(SqlInputError { error: Error { code: Unknown, extended_code: 1 }, msg: "no such column: organization_id", sql: "\nCREATE UNIQUE INDEX session_scope_writer_key ON session_scopes(organization_id,tenant_id,project_id,agent_uid,session_key);\nCREATE TABLE session_writer_leases (\n organization_id TEXT NOT NULL,tenant_id TEXT NOT NULL,project_id TEXT NOT NULL,agent_uid TEXT NOT NULL,\n session_key TEXT NOT NULL,lifetime TEXT NOT NULL,owner_id TEXT NOT NULL,\n epoch INTEGER NOT NULL CHECK(epoch>0),expires_at_ms INTEGER NOT NULL,\n PRIMARY KEY(organization_id,tenant_id,project_id,agent_uid,session_key,lifetime),\n FOREIGN KEY(organization_id,tenant_id,project_id,agent_uid,session_key) REFERENCES session_scopes(organization_id,tenant_id,project_id,agent_uid,session_key)\n);\nCREATE INDEX session_writer_expiry ON session_writer_leases(organization_id,tenant_id,project_id,agent_uid,expires_at_ms);\nINSERT INTO schema_migrations VALUES(24,CAST(strftime('%s','now') AS INTEGER)*1000);\nCOMMIT;\n", offset: 64 })
+
+---- sqlite_writer_repository_uses_database_time_complete_scope_and_epoch_cas stdout ----
+
+thread 'sqlite_writer_repository_uses_database_time_complete_scope_and_epoch_cas' panicked at tests/writer_contract.rs:34:43:
+called `Result::unwrap()` on an `Err` value: Persistence(SqlInputError { error: Error { code: Unknown, extended_code: 1 }, msg: "no such column: organization_id", sql: "\nCREATE UNIQUE INDEX session_scope_writer_key ON session_scopes(organization_id,tenant_id,project_id,agent_uid,session_key);\nCREATE TABLE session_writer_leases (\n organization_id TEXT NOT NULL,tenant_id TEXT NOT NULL,project_id TEXT NOT NULL,agent_uid TEXT NOT NULL,\n session_key TEXT NOT NULL,lifetime TEXT NOT NULL,owner_id TEXT NOT NULL,\n epoch INTEGER NOT NULL CHECK(epoch>0),expires_at_ms INTEGER NOT NULL,\n PRIMARY KEY(organization_id,tenant_id,project_id,agent_uid,session_key,lifetime),\n FOREIGN KEY(organization_id,tenant_id,project_id,agent_uid,session_key) REFERENCES session_scopes(organization_id,tenant_id,project_id,agent_uid,session_key)\n);\nCREATE INDEX session_writer_expiry ON session_writer_leases(organization_id,tenant_id,project_id,agent_uid,expires_at_ms);\nINSERT INTO schema_migrations VALUES(24,CAST(strftime('%s','now') AS INTEGER)*1000);\nCOMMIT;\n", offset: 64 })
+
+---- writer_two_independent_connections_have_one_winner_with_controlled_barrier stdout ----
+
+thread 'writer_two_independent_connections_have_one_winner_with_controlled_barrier' panicked at tests/writer_contract.rs:34:43:
+called `Result::unwrap()` on an `Err` value: Persistence(SqlInputError { error: Error { code: Unknown, extended_code: 1 }, msg: "no such column: organization_id", sql: "\nCREATE UNIQUE INDEX session_scope_writer_key ON session_scopes(organization_id,tenant_id,project_id,agent_uid,session_key);\nCREATE TABLE session_writer_leases (\n organization_id TEXT NOT NULL,tenant_id TEXT NOT NULL,project_id TEXT NOT NULL,agent_uid TEXT NOT NULL,\n session_key TEXT NOT NULL,lifetime TEXT NOT NULL,owner_id TEXT NOT NULL,\n epoch INTEGER NOT NULL CHECK(epoch>0),expires_at_ms INTEGER NOT NULL,\n PRIMARY KEY(organization_id,tenant_id,project_id,agent_uid,session_key,lifetime),\n FOREIGN KEY(organization_id,tenant_id,project_id,agent_uid,session_key) REFERENCES session_scopes(organization_id,tenant_id,project_id,agent_uid,session_key)\n);\nCREATE INDEX session_writer_expiry ON session_writer_leases(organization_id,tenant_id,project_id,agent_uid,expires_at_ms);\nINSERT INTO schema_migrations VALUES(24,CAST(strftime('%s','now') AS INTEGER)*1000);\nCOMMIT;\n", offset: 64 })
+
+---- native_writer_expired_process_cannot_self_reacquire_and_unconfigured_store_cannot_bypass stdout ----
+
+thread 'native_writer_expired_process_cannot_self_reacquire_and_unconfigured_store_cannot_bypass' panicked at tests/writer_contract.rs:34:43:
+called `Result::unwrap()` on an `Err` value: Persistence(SqlInputError { error: Error { code: Unknown, extended_code: 1 }, msg: "no such column: organization_id", sql: "\nCREATE UNIQUE INDEX session_scope_writer_key ON session_scopes(organization_id,tenant_id,project_id,agent_uid,session_key);\nCREATE TABLE session_writer_leases (\n organization_id TEXT NOT NULL,tenant_id TEXT NOT NULL,project_id TEXT NOT NULL,agent_uid TEXT NOT NULL,\n session_key TEXT NOT NULL,lifetime TEXT NOT NULL,owner_id TEXT NOT NULL,\n epoch INTEGER NOT NULL CHECK(epoch>0),expires_at_ms INTEGER NOT NULL,\n PRIMARY KEY(organization_id,tenant_id,project_id,agent_uid,session_key,lifetime),\n FOREIGN KEY(organization_id,tenant_id,project_id,agent_uid,session_key) REFERENCES session_scopes(organization_id,tenant_id,project_id,agent_uid,session_key)\n);\nCREATE INDEX session_writer_expiry ON session_writer_leases(organization_id,tenant_id,project_id,agent_uid,expires_at_ms);\nINSERT INTO schema_migrations VALUES(24,CAST(strftime('%s','now') AS INTEGER)*1000);\nCOMMIT;\n", offset: 64 })
+
+
+failures:
+    native_writer_expired_process_cannot_self_reacquire_and_unconfigured_store_cannot_bypass
+    native_writer_old_callback_terminal_transcript_and_recovery_are_fenced_after_takeover
+    native_writer_renewal_preserves_epoch_and_does_not_advance_business_event_clock
+    sqlite_writer_repository_uses_database_time_complete_scope_and_epoch_cas
+    writer_two_independent_connections_have_one_winner_with_controlled_barrier
+
+test result: FAILED. 0 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+error: test failed, to rerun pass `--test writer_contract`

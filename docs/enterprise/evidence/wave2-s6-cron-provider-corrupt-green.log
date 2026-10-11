@@ -1,0 +1,25 @@
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 24.32s
+     Running tests/writer_contract.rs (target/debug/deps/writer_contract-12f2878073cdb615)
+
+running 14 tests
+test native_writer_expired_process_cannot_self_reacquire_and_unconfigured_store_cannot_bypass ... ok
+test corrupted_provider_receipt_cannot_redirect_unknown_to_another_attempt ... ok
+test native_writer_renewal_preserves_epoch_and_does_not_advance_business_event_clock ... ok
+test enabling_writer_does_not_take_over_an_unleased_live_legacy_run ... ok
+test native_writer_old_callback_terminal_transcript_and_recovery_are_fenced_after_takeover ... ok
+test native_lifecycle_fork_rotation_tombstone_and_graceful_release_preserve_writer_fence ... ok
+test lost_writer_cannot_settle_native_tools_provider_resource_or_ownerless_hook ... ok
+test expiry_in_native_commit_rolls_back_tool_receipt_turn_event_and_clock_together ... ok
+test expired_native_writer_cannot_publish_an_object_as_a_retryable_storage_failure ... ok
+test sqlite_writer_repository_uses_database_time_complete_scope_and_epoch_cas ... ok
+test protected_database_rejects_unconfigured_new_session_without_partial_facts ... ok
+test writer_two_independent_connections_have_one_winner_with_controlled_barrier ... ok
+test interrupted_provider_settlement_is_unknown_atomic_and_rejects_late_success ... ok
+test writer_schema_migration_backup_atomic_rollback_and_future_version_are_verified ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.61s
+

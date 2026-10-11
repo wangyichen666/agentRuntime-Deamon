@@ -1,0 +1,15 @@
+[package]
+name = "agent-workflow"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+[dependencies]
+agent-core = {version="=0.1.0",path="../core"}
+agent-pack = {version="=0.1.0",path="../pack"}
+serde_json = "1"
+semver = "=1.0.28"
+serde = {version="1",features=["derive"]}
+async-trait = "0.1"
+
+sha2 = "0.10"

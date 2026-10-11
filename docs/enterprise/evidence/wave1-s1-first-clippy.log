@@ -1,0 +1,36 @@
+    Checking agent-core v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/core)
+error[E0283]: type annotations needed
+   --> crates/core/src/enterprise.rs:267:45
+    |
+267 |             TenantId::try_from("tenant-001".into()).unwrap().as_str(),
+    |             --------                        ^^^^
+    |             |
+    |             type must be known at this point
+    |
+note: multiple `impl`s satisfying `enterprise::TenantId: std::convert::TryFrom<_>` found
+   --> crates/core/src/enterprise.rs:13:9
+    |
+13  |           impl TryFrom<String> for $name {
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+25  | / opaque_ids!(
+26  | |     OrganizationId,
+27  | |     TenantId,
+28  | |     ProjectId,
+...   |
+32  | |     PolicyVersion
+33  | | );
+    | |_- in this macro invocation
+    = note: and another `impl` found in the `core` crate:
+            - impl<T, U> std::convert::TryFrom<U> for T
+              where U: std::convert::Into<T>;
+    = note: this error originates in the macro `opaque_ids` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: try using a fully qualified path to specify the expected types
+    |
+267 -             TenantId::try_from("tenant-001".into()).unwrap().as_str(),
+267 +             TenantId::try_from(<&str as std::convert::Into<T>>::into("tenant-001")).unwrap().as_str(),
+    |
+
+For more information about this error, try `rustc --explain E0283`.
+error: could not compile `agent-core` (lib test) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

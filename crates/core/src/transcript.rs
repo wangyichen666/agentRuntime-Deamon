@@ -23,6 +23,16 @@ pub struct SessionMetadata {
     pub updated_at_ms: i64,
 }
 
+/// 单次 canonical 读事务产生的列表摘要；展示路径与本地 active 标签由 daemon 附加。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionListEntry {
+    pub metadata: SessionMetadata,
+    pub preview: Option<String>,
+    pub status: crate::SessionStatus,
+    pub active_requests: usize,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SessionCommand {
@@ -108,4 +118,35 @@ impl SessionReadback {
         .decision
             == crate::ViewDecision::Accepted
     }
+}
+/// 由已验证批次的turn归属派生message identity；Local与PG读回共用。
+pub fn canonical_message_identities(
+    life: &SessionLifetimeId,
+    messages: &[Message],
+    turns: &[Option<crate::TurnId>],
+) -> Result<Vec<String>, crate::CoordinationError> {
+    if turns.len() != messages.len() {
+        return Err(crate::CoordinationError::Corrupt);
+    }
+    let mut last_assistant = std::collections::BTreeMap::new();
+    for (index, (message, turn)) in messages.iter().zip(turns).enumerate() {
+        if message.role == crate::Role::Assistant
+            && let Some(turn) = turn
+        {
+            last_assistant.insert(turn.0.as_str(), index);
+        }
+    }
+    Ok(turns
+        .iter()
+        .enumerate()
+        .map(|(index, turn)| {
+            if let Some(turn) = turn
+                && last_assistant.get(turn.0.as_str()) == Some(&index)
+            {
+                format!("{}:assistant", turn.0)
+            } else {
+                format!("{}:canonical:{index}", life.0)
+            }
+        })
+        .collect())
 }

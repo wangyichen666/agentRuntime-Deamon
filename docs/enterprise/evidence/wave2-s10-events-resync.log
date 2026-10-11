@@ -1,0 +1,24 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.75s
+     Running tests/runtime_contract.rs (target/debug/deps/runtime_contract-ef559da8ec38e611)
+
+running 1 test
+test paged_run_events_subscription_keeps_last_delivered_cursor_and_never_replays_provider ... FAILED
+
+failures:
+
+---- paged_run_events_subscription_keeps_last_delivered_cursor_and_never_replays_provider stdout ----
+
+thread 'paged_run_events_subscription_keeps_last_delivered_cursor_and_never_replays_provider' panicked at tests/runtime_contract.rs:69:9:
+assertion `left == right` failed: {"frame":"response","jsonrpc":"2.0","id":"subscribe","error":{"code":-32601,"message":"未知 RPC 方法: request.subscribe"}}
+  left: Null
+ right: "resync_required"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    paged_run_events_subscription_keeps_last_delivered_cursor_and_never_replays_provider
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 43 filtered out; finished in 1.79s
+
+error: test failed, to rerun pass `--test runtime_contract`

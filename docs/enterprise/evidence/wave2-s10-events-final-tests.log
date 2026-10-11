@@ -1,0 +1,94 @@
+   Compiling agent-cli v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/cli)
+   Compiling agent-acp v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/acp)
+   Compiling agent-gateway v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/gateway)
+   Compiling agent-storage-postgres v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-postgres)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling agent-artifact v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/artifact)
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+   Compiling agent-entry-support v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/entry-support)
+   Compiling agent-daemon-client v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-client)
+   Compiling agent-sandbox v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/sandbox)
+   Compiling agent-daemon-protocol v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-protocol)
+   Compiling agent-storage-ports v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-ports)
+   Compiling agent-context v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/context)
+   Compiling agent-identity v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/identity)
+   Compiling agent-policy v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/policy)
+   Compiling agent-memory v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/memory)
+   Compiling agent-core v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 33.88s
+     Running unittests src/lib.rs (target/debug/deps/agent_acp-bdf3d9a9692945ad)
+
+running 5 tests
+test editor::tests::prompt_accepts_text_and_resource_links ... ok
+test editor::tests::prompt_rejects_unsupported_content ... ok
+test acp_transport::tests::slow_consumer_budget_is_bounded_and_draining_only_changes_transport_accounting ... ok
+test editor::tests::standard_acp_streams_updates_and_round_trips_permission ... ok
+test editor::tests::acp_load_session_recovers_a_disconnected_pending_turn ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
+
+     Running unittests src/lib.rs (target/debug/deps/agent_artifact-9fbe299e267ad1c7)
+
+running 1 test
+test s3::tests::s3_actual_bytes_scope_isolation_tamper_and_certificate_failure ... ignored, 真实隔离 TLS S3 lane
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/agent_cli-219ee018fa3821a9)
+
+running 30 tests
+test tui::keybindings::tests::resolves_default_and_pi_style_editor_aliases ... ok
+test tui::keybindings::tests::help_is_generated_from_action_definitions ... ok
+test command::main_tests::filters_numeric_and_string_request_ids_without_partial_matches ... ok
+test tui::input_editor::tests::deletes_combining_characters_and_zwj_emoji_as_graphemes ... ok
+test tui::input_editor::tests::insertion_that_joins_neighboring_emoji_keeps_cursor_on_a_grapheme_boundary ... ok
+test tui::input_editor::tests::edits_cjk_without_using_byte_offsets ... ok
+test tui::tests::converts_persisted_message_to_ui_message ... ok
+test tui::input_editor::tests::computes_wrapped_visual_cursor_for_wide_characters ... ok
+test tui::tests::quit_signal_is_independent_from_status_text ... ok
+test tui::tests::tracks_unread_messages_when_scrolled_away_from_bottom ... ok
+test tui::tests::derives_activity_from_all_turns_and_pending_approvals ... ok
+test tui::tests::unavailable_subscription_does_not_claim_turn_completed ... ok
+test tui::tests::shows_explicit_completion_marker_after_response ... ok
+test tui::tests::preserves_concurrent_turns_and_approval_queue ... ok
+test tui::view::tests::active_status_uses_an_animated_indeterminate_progress_bar ... ok
+test tui::view::tests::light_theme_has_distinct_semantic_status_colors ... ok
+test tui::tests::slash_menu_filters_selects_and_completes_commands ... FAILED
+test tui::view::tests::collapses_tool_runs_by_default_and_expands_details_on_toggle ... ok
+test tui::tests::compact_receipt_displays_no_gain_cancelled_and_unknown_without_chat_success ... ok
+test tui::view::tests::renders_help_overlay_with_shortcuts ... ok
+test tui::view::tests::short_transcript_starts_near_the_top_of_the_screen ... ok
+test tui::view::tests::expanding_tool_details_keeps_the_original_query_in_view ... ok
+test tui::view::tests::caches_wrapped_messages_by_content_version_and_width ... ok
+test tui::view::tests::terminal_theme_never_paints_a_fixed_background ... ok
+test tui::view::tests::dark_and_light_themes_paint_non_terminal_semantic_surfaces ... ok
+test tui::view::tests::wraps_chinese_by_display_width_and_scrolls_to_actual_last_line ... ok
+test tui::view::tests::renders_all_slash_commands_and_filters_them_by_prefix ... ok
+test tui::view::tests::render_wide_narrow_and_approval_preview ... ok
+test tui::tests::resume_command_lists_and_restores_selected_session ... ok
+已恢复 3 条历史消息：
+[你] 断线后恢复
+检测到 1 个仍在执行的请求，正在恢复输出。
+[恢复工具完成] tool_search · 17ms
+CLI 恢复完成
+test cli::tests::cli_reconnect_helper_recovers_active_turn_and_approval ... ok
+
+failures:
+
+---- tui::tests::slash_menu_filters_selects_and_completes_commands stdout ----
+
+thread 'tui::tests::slash_menu_filters_selects_and_completes_commands' panicked at crates/cli/src/tui.rs:1397:9:
+assertion `left == right` failed
+  left: "/help"
+ right: "/status"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tui::tests::slash_menu_filters_selects_and_completes_commands
+
+test result: FAILED. 29 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s
+
+error: test failed, to rerun pass `-p agent-cli --lib`

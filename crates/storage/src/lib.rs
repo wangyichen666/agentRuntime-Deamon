@@ -3,6 +3,22 @@
     not(test),
     deny(clippy::unwrap_used, clippy::expect_used, clippy::print_stdout)
 )]
+mod access;
+mod artifact_publication;
+mod blocking;
+mod credentials;
+mod billing;
+mod registry;
+mod workflow;
+mod enterprise;
+mod events;
+mod file_artifacts;
+mod identity_management;
+mod ledgers;
+mod object_artifacts;
+mod publication;
+mod writer;
+pub use enterprise::*;
 mod requests;
 pub use requests::*;
 mod views;
@@ -12,10 +28,22 @@ pub use compact_runs::*;
 mod discovery;
 pub use discovery::*;
 mod context_projection;
+mod daemon_maintenance;
 mod flywheel;
+mod hook_execution;
+mod hook_observations;
 mod hooks;
 mod memory;
+mod plan_controls;
 mod resources;
+mod run_continuations;
+mod run_delegations;
+mod run_interactions;
+mod run_memories;
+mod run_queues;
+mod run_resources;
+mod runtime_observations;
+mod session_controls;
 pub use hooks::*;
 pub use memory::*;
 pub use resources::*;
@@ -30,10 +58,9 @@ pub use turns::*;
 mod delegation;
 
 pub use delegation::{DelegationRecord, DelegationRequest};
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -42,12 +69,24 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use agent_core::RequestId;
-use agent_core::{AttemptStatus, ProviderAttempt, ProviderUsage, RouteSnapshot, ToolCall};
+use agent_core::{
+    Action, AttemptStatus, AuthorizationRequest, AuthorizationVerifier, CoordinationError,
+    ProviderAttempt, ProviderUsage, RouteSnapshot, ToolCall,
+};
+use agent_core::{AuthorizationError, EnterpriseOwnerEnvelope, SessionKey, TenantContext};
 
 pub use agent_core::{EventSeq, InteractionId, RunId, SessionKey as SessionId, TurnId};
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
+    #[error(transparent)]
+    Ledger(#[from] agent_core::LedgerError),
+    #[error("Artifact 错误: {0}")]
+    Artifact(#[from] agent_core::ArtifactError),
+    #[error("持久协调错误: {0}")]
+    Coordination(#[from] agent_core::CoordinationError),
+    #[error("授权错误: {0}")]
+    Authorization(#[from] agent_core::AuthorizationError),
     #[error("请求已取消")]
     Cancelled,
     #[error("请求超时")]
@@ -68,19 +107,47 @@ pub enum RuntimeError {
     Internal(String),
 }
 
+impl From<agent_core::RepositoryError> for RuntimeError {
+    fn from(error: agent_core::RepositoryError) -> Self {
+        match error {
+            agent_core::RepositoryError::Ledger(error) => Self::Ledger(error),
+            agent_core::RepositoryError::Artifact(error) => Self::Artifact(error),
+            agent_core::RepositoryError::Authorization(error) => Self::Authorization(error),
+            agent_core::RepositoryError::Coordination(error) => Self::Coordination(error),
+        }
+    }
+}
+
+impl RuntimeError {
+    pub fn repository_error(self) -> agent_core::RepositoryError {
+        use agent_core::{CoordinationError, RepositoryError};
+        match self {
+            Self::Ledger(error) => RepositoryError::Ledger(error),
+            Self::Artifact(error) => RepositoryError::Artifact(error),
+            Self::Authorization(error) => RepositoryError::Authorization(error),
+            Self::Coordination(error) => RepositoryError::Coordination(error),
+            Self::Persistence(_) | Self::Internal(_) => {
+                CoordinationError::StorageUnavailable.into()
+            }
+            _ => CoordinationError::Corrupt.into(),
+        }
+    }
+}
+
 pub use agent_core::RunStatus;
 
 pub use agent_core::{
     Admission, AdmissionMode, InteractionRecord, QueuedMessage, RunRecord, StoredEvent, ToolReceipt,
 };
 
+#[derive(Clone)]
 pub struct RunStore {
-    connection: Mutex<Connection>,
-    artifact_dir: PathBuf,
-    wait_ms: AtomicU64,
-    lock_count: AtomicU64,
+    connection: Arc<Mutex<Connection>>,
+    file_artifacts: Arc<file_artifacts::FileArtifactDirectory>,
+    wait_ms: Arc<AtomicU64>,
+    lock_count: Arc<AtomicU64>,
+    blocking_budget: Arc<tokio::sync::Semaphore>,
 }
-static NEXT_ARTIFACT: AtomicU64 = AtomicU64::new(0);
 impl RunStore {
     fn lock_connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>, RuntimeError> {
         let started = std::time::Instant::now();
@@ -99,6 +166,8 @@ impl RunStore {
             std::fs::create_dir_all(parent)
                 .map_err(|error| RuntimeError::Internal(error.to_string()))?;
         }
+        let file_artifacts =
+            file_artifacts::FileArtifactDirectory::new(path.with_extension("artifacts"))?;
         let connection = Connection::open(path)?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
@@ -111,12 +180,12 @@ impl RunStore {
             [],
             |row| row.get(0),
         )?;
-        if version > 20 {
+        if version > 36 {
             return Err(RuntimeError::Protocol(format!(
                 "SQLite schema 版本 {version} 比当前程序支持的版本新"
             )));
         }
-        if version > 0 && version < 20 {
+        if version > 0 && version < 36 {
             backup_database(&connection, path, version)?;
         }
         if version < 1 {
@@ -275,11 +344,55 @@ impl RunStore {
         if version < 20 {
             connection.execute_batch(include_str!("request_migration.sql"))?;
         }
+        if version < 21 {
+            connection.execute_batch(include_str!("identity_migration.sql"))?;
+        }
+        if version < 22 {
+            connection.execute_batch(include_str!("publication_migration.sql"))?;
+        }
+        if version < 23 {
+            connection.execute_batch(include_str!("object_artifact_migration.sql"))?;
+        }
+        if version < 24 {
+            connection.execute_batch(include_str!("writer_migration.sql"))?;
+        }
+        if version < 25 {
+            connection.execute_batch(include_str!("lifetime_migration.sql"))?;
+        }
+        if version < 26 {
+            connection.execute_batch(include_str!("event_provenance_migration.sql"))?;
+        }
+        if version < 27 {
+            connection.execute_batch(include_str!("cron_identity_migration.sql"))?;
+        }
+        if version < 28 {
+            connection.execute_batch(include_str!("ledger_migration.sql"))?;
+        }
+        if version < 29 {
+            connection.execute_batch(include_str!("interaction_vote_migration.sql"))?;
+        }
+        if version < 30 {
+            connection.execute_batch(include_str!("access_migration.sql"))?;
+        }
+        if version < 31 {
+            connection.execute_batch(include_str!("credential_migration.sql"))?;
+        }
+        if version < 32 {
+            connection.execute_batch(include_str!("oauth_migration.sql"))?;
+        }
+        if version < 33 {
+            connection.execute_batch(include_str!("billing_migration.sql"))?;
+        }
+        if version<34 {connection.execute_batch(include_str!("access_endpoint_migration.sql"))?;}
+        if version<35 {connection.execute_batch(include_str!("registry_migration.sql"))?;}
+        if version<36 {connection.execute_batch(include_str!("workflow_migration.sql"))?;}
+        writer::initialize(&connection)?;
         Ok(Self {
-            connection: Mutex::new(connection),
-            artifact_dir: path.with_extension("artifacts"),
-            wait_ms: AtomicU64::new(0),
-            lock_count: AtomicU64::new(0),
+            connection: Arc::new(Mutex::new(connection)),
+            file_artifacts: Arc::new(file_artifacts),
+            wait_ms: Arc::new(AtomicU64::new(0)),
+            lock_count: Arc::new(AtomicU64::new(0)),
+            blocking_budget: Arc::new(tokio::sync::Semaphore::new(4)),
         })
     }
 
@@ -325,6 +438,7 @@ impl RunStore {
         route: Option<&RouteSnapshot>,
     ) -> Result<Admission, RuntimeError> {
         let admission = agent_core::RunAdmission {
+            workflow_node: None,
             plan_execution: None,
             session_key: session_id,
             expected_lifetime: expected.cloned(),
@@ -332,7 +446,7 @@ impl RunStore {
             input: input.into(),
             mode,
         };
-        self.admit_run_inner(&admission, route, None, None, None)
+        self.admit_run_inner(&admission, route, None, None, None, None)
     }
     pub fn admit_run(
         &self,
@@ -345,16 +459,132 @@ impl RunStore {
             Some(snapshot),
             None,
             None,
+            None,
         )
     }
+    pub fn admit_authorized_run(
+        &self,
+        admission: &agent_core::RunAdmission,
+        snapshot: &agent_core::RunSnapshot,
+        authorization: &agent_core::AuthorizationRequest,
+        verifier: &dyn agent_core::AuthorizationVerifier,
+    ) -> Result<Admission, RuntimeError> {
+        if authorization.context.request_id != admission.request_id
+            || authorization.attributes.workspace != snapshot.cwd
+        {
+            return Err(agent_core::AuthorizationError::ProtocolViolation.into());
+        }
+        self.admit_run_inner(
+            admission,
+            snapshot.route.as_ref(),
+            Some(snapshot),
+            None,
+            None,
+            Some((authorization, verifier)),
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
     fn admit_run_inner(
         &self,
         admission: &agent_core::RunAdmission,
         route: Option<&RouteSnapshot>,
         snapshot: Option<&agent_core::RunSnapshot>,
-        hook_parent: Option<(&agent_core::ExactOwner, &str)>,
+        hook_parent: Option<(
+            &agent_core::ExactOwner,
+            &str,
+            Option<&agent_core::EnterpriseOwnerEnvelope>,
+        )>,
         compact: Option<&agent_core::CompactRunRequest>,
+        authorization: Option<(
+            &agent_core::AuthorizationRequest,
+            &dyn agent_core::AuthorizationVerifier,
+        )>,
     ) -> Result<Admission, RuntimeError> {
+        self.admit_run_inner_owned(
+            admission,
+            route,
+            snapshot,
+            hook_parent,
+            compact,
+            authorization,
+            false,
+            false,
+        )
+        .map(|(admission, _)| admission)
+    }
+    pub(crate) fn admit_authorized_owned(
+        &self,
+        admission: &agent_core::RunAdmission,
+        snapshot: &agent_core::RunSnapshot,
+        authorization: &agent_core::AuthorizationRequest,
+        verifier: &dyn agent_core::AuthorizationVerifier,
+    ) -> Result<(Admission, agent_core::ExactOwner), RuntimeError> {
+        if authorization.context.request_id != admission.request_id
+            || authorization.attributes.workspace != snapshot.cwd
+        {
+            return Err(agent_core::AuthorizationError::ProtocolViolation.into());
+        }
+        self.admit_run_inner_owned(
+            admission,
+            snapshot.route.as_ref(),
+            Some(snapshot),
+            None,
+            None,
+            Some((authorization, verifier)),
+            true,
+            false,
+        )
+    }
+    pub(crate) fn admit_workload_owned(
+        &self,
+        admission: &agent_core::RunAdmission,
+        snapshot: &agent_core::RunSnapshot,
+        authorization: &agent_core::AuthorizationRequest,
+        verifier: &dyn agent_core::AuthorizationVerifier,
+    ) -> Result<(Admission, agent_core::ExactOwner), RuntimeError> {
+        use agent_core::*;
+        if authorization.context.scope != TenantContext::local()
+            || authorization.context.principal.kind != SubjectKind::Workload
+            || authorization.context.principal.subject_id.as_str() != LOCAL_CRON_SUBJECT
+            || authorization.context.request_id != admission.request_id
+            || authorization.attributes.workspace != snapshot.cwd
+            || authorization.attributes.entry_channel != HookChannel::Cron
+            || snapshot.entry_channel != HookChannel::Cron
+            || admission.expected_lifetime.is_some()
+            || admission.plan_execution.is_some()
+        {
+            return Err(AuthorizationError::ProtocolViolation.into());
+        }
+        self.admit_run_inner_owned(
+            admission,
+            snapshot.route.as_ref(),
+            Some(snapshot),
+            None,
+            None,
+            Some((authorization, verifier)),
+            true,
+            true,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn admit_run_inner_owned(
+        &self,
+        admission: &agent_core::RunAdmission,
+        route: Option<&RouteSnapshot>,
+        snapshot: Option<&agent_core::RunSnapshot>,
+        hook_parent: Option<(
+            &agent_core::ExactOwner,
+            &str,
+            Option<&agent_core::EnterpriseOwnerEnvelope>,
+        )>,
+        compact: Option<&agent_core::CompactRunRequest>,
+        authorization: Option<(
+            &agent_core::AuthorizationRequest,
+            &dyn agent_core::AuthorizationVerifier,
+        )>,
+        immediate: bool,
+        workload_bootstrap: bool,
+    ) -> Result<(Admission, agent_core::ExactOwner), RuntimeError> {
         let session_id = &admission.session_key;
         let expected = admission.expected_lifetime.as_ref();
         let request_id = &admission.request_id;
@@ -368,13 +598,75 @@ impl RunStore {
         })
         .to_string();
         let mut connection = self.lock_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(if immediate {
+            rusqlite::TransactionBehavior::Immediate
+        } else {
+            rusqlite::TransactionBehavior::Deferred
+        })?;
+        // 时间条件使用取锁并进入事务后的服务器时钟，不能复用排队前的可过期时间。
+        let checked_authorization = authorization.map(|(request, verifier)| {
+            let mut request = request.clone();
+            request.attributes.timestamp_ms = now_ms();
+            (request, verifier)
+        });
+        let authorization = checked_authorization
+            .as_ref()
+            .map(|(request, verifier)| (request, *verifier));
+        if let Some((parent, _, envelope)) = hook_parent {
+            let local = agent_core::EnterpriseOwnerEnvelope {
+                scope: agent_core::TenantContext::local(),
+                owner: parent.clone(),
+            };
+            let proof = envelope.unwrap_or(&local);
+            parent
+                .fence(&proof.owner)
+                .map_err(|_| agent_core::AuthorizationError::StaleOwner)?;
+            execution::check_execution_in(&transaction, proof)?;
+        }
+        let identity = authorization
+            .map(|(request, verifier)| enterprise::authorize_in(&transaction, request, verifier))
+            .transpose()?;
+        if let Some(lease)=&admission.workflow_node {let (request,_)=authorization.ok_or(CoordinationError::Forbidden)?;workflow::native_in(&transaction,request,admission,snapshot.ok_or(CoordinationError::InvalidRequest)?,lease,None)?;}
         let request_json = serde_json::to_string(&request_id)
             .map_err(|error| RuntimeError::Protocol(error.to_string()))?;
-        transaction.execute(
-            "INSERT OR IGNORE INTO sessions(id, created_at_ms) VALUES (?1, ?2)",
-            params![session_id.0, now_ms()],
-        )?;
+        if workload_bootstrap {
+            let (request, verifier) =
+                authorization.ok_or(agent_core::AuthorizationError::Unauthenticated)?;
+            let mut create = request.clone();
+            create.action = agent_core::Action::SessionCreate;
+            verifier.verify(
+                &create,
+                identity
+                    .as_ref()
+                    .ok_or(agent_core::AuthorizationError::Unauthenticated)?,
+            )?;
+            sessions::lifecycle_scope_in(
+                &transaction,
+                &request.context.scope,
+                &agent_core::SessionCommand::Create {
+                    key: session_id.clone(),
+                },
+            )?;
+            // 原create_in保留SessionStart/lifetime/writer事实，和原run准入同一TX回滚。
+            if sessions::metadata_in(&transaction, session_id)?.is_none() {
+                sessions::create_in(&transaction, session_id)?;
+            }
+        } else {
+            transaction.execute(
+                "INSERT OR IGNORE INTO sessions(id, created_at_ms) VALUES (?1, ?2)",
+                params![session_id.0, now_ms()],
+            )?;
+        }
+        if let Some((request, _)) = authorization {
+            enterprise::check_session_scope_in(&transaction, &request.context.scope, session_id)?;
+        }
+        if compact.is_some() && authorization.is_none() {
+            enterprise::check_session_scope_in(
+                &transaction,
+                &agent_core::TenantContext::local(),
+                session_id,
+            )?;
+        }
         let _metadata = sessions::metadata_in(&transaction, session_id)?
             .filter(|m| !m.deleted)
             .ok_or_else(|| RuntimeError::Protocol("session 已删除".into()))?;
@@ -382,11 +674,18 @@ impl RunStore {
             return Err(RuntimeError::Protocol("stale admission lifetime".into()));
         }
         if let Some(compact) = compact {
-            if let Some(existing) = compact_runs::existing_in(&transaction, compact)? {
-                return Ok(Admission::Existing(existing));
+            if let Some(existing) = compact_runs::existing_in(
+                &transaction,
+                compact,
+                authorization.map_or(&agent_core::TenantContext::local(), |(r, _)| {
+                    &r.context.scope
+                }),
+            )? {
+                let owner = sessions::owner_in(&transaction, &existing.run_id)?;
+                return Ok((Admission::Existing(existing), owner));
             }
         }
-        if let Some((parent, operation)) = hook_parent {
+        if let Some((parent, operation, _)) = hook_parent {
             if parent.session_key != *session_id {
                 return Err(RuntimeError::Protocol("continuation session 冲突".into()));
             }
@@ -411,7 +710,8 @@ impl RunStore {
                     .ok_or_else(|| RuntimeError::Protocol("plan execute receipt 缺 run".into()))?;
                 let run = read_run_in(&transaction, &run_id.0)?
                     .ok_or_else(|| RuntimeError::Protocol("plan receipt run 缺失".into()))?;
-                return Ok(Admission::Existing(run));
+                let owner = sessions::owner_in(&transaction, &run.run_id)?;
+                return Ok((Admission::Existing(run), owner));
             }
             if mode != AdmissionMode::RejectIfBusy {
                 return Err(RuntimeError::Protocol(
@@ -440,13 +740,17 @@ impl RunStore {
                     "相同 request id 的输入内容不同".into(),
                 ));
             }
+            if let Some((request, _)) = authorization {
+                enterprise::check_existing_in(&transaction, &RunId(id.clone()), request)?;
+            }
             let run = read_run_in(&transaction, &id)?
                 .ok_or_else(|| RuntimeError::Internal("缺少持久记录：existing run".into()))?;
             if (run.kind == agent_core::RunKind::Compact) != compact.is_some() {
                 return Err(RuntimeError::Protocol("request id 的 run kind 不同".into()));
             }
+            let owner=sessions::owner_in(&transaction,&run.run_id)?;
             views::commit(transaction)?;
-            return Ok(Admission::Existing(run));
+            return Ok((Admission::Existing(run),owner));
         }
         if input.len() > 65536 {
             return Err(RuntimeError::Protocol(
@@ -476,6 +780,8 @@ impl RunStore {
                 return Err(RuntimeError::Protocol("session 忙碌".into()));
             }
         }
+        if hook_parent.is_none() {let scope=authorization.map_or_else(TenantContext::local,|(r,_)|r.context.scope.clone());let fixed=registry::generation_in(&transaction,&scope,session_id,&_metadata.lifetime)?;if fixed.as_ref()!=snapshot.and_then(|s|s.installed_generation.as_ref()){return Err(CoordinationError::Conflict.into())}if let (Some(g),Some(snapshot))=(fixed,snapshot){agent_registry::validate_runtime(&g,snapshot)?;}}
+        writer::acquire_in(&transaction, session_id, &_metadata.lifetime)?;
         let now = now_ms();
         transaction.execute(
             "INSERT OR IGNORE INTO sessions(id, created_at_ms) VALUES (?1, ?2)",
@@ -487,7 +793,7 @@ impl RunStore {
         let rowid = transaction.last_insert_rowid();
         let run_id = RunId(format!("run-{rowid}"));
         let turn_id = TurnId(format!("turn-{rowid}"));
-        if let Some((parent, operation)) = hook_parent {
+        if let Some((parent, operation, _)) = hook_parent {
             transaction.execute("INSERT INTO hook_continuations(parent_run_id,child_run_id,operation_id) VALUES(?1,?2,?3)",params![parent.run_id.0,run_id.0,operation])?;
         }
         transaction.execute(
@@ -514,6 +820,16 @@ impl RunStore {
                 params![run_id.0, payload],
             )?;
         }
+        if let (Some((request, _)), Some(identity), Some(snapshot)) =
+            (authorization, identity.as_ref(), snapshot)
+        {
+            enterprise::freeze_in(&transaction, &run_id, snapshot, request, identity)?;
+        }
+        if authorization.is_none()
+            && let (Some((parent, _, _)), Some(snapshot)) = (hook_parent, snapshot)
+        {
+            enterprise::inherit_authorization_in(&transaction, &parent.run_id, &run_id, snapshot)?;
+        }
         if let Some(identity) = &admission.plan_execution {
             plans::admit_execution(
                 &transaction,
@@ -537,13 +853,31 @@ impl RunStore {
         }
         let run = read_run_in(&transaction, &run_id.0)?
             .ok_or_else(|| RuntimeError::Internal("缺少持久记录：inserted run".into()))?;
+        let owner = sessions::owner_in(&transaction, &run.run_id)?;
+        billing::reserve_in(&transaction, &EnterpriseOwnerEnvelope {scope:authorization.map_or_else(TenantContext::local,|(r,_)|r.context.scope.clone()),owner:owner.clone()}, snapshot,hook_parent.is_none())?;
+        ledgers::admit_in(&transaction, &run.run_id)?;
+        if let Some(lease)=&admission.workflow_node {let(request,_)=authorization.ok_or(CoordinationError::Forbidden)?;workflow::native_in(&transaction,request,admission,snapshot.ok_or(CoordinationError::InvalidRequest)?,lease,Some(&run.run_id))?;}
         views::commit(transaction)?;
-        Ok(Admission::New(run))
+        Ok((Admission::New(run), owner))
     }
 
     pub fn try_start_queued(&self, run_id: &RunId) -> Result<bool, RuntimeError> {
+        self.start_queued_scoped(run_id, None)
+    }
+    pub(crate) fn start_queued_scoped(
+        &self,
+        run_id: &RunId,
+        envelope: Option<&agent_core::EnterpriseOwnerEnvelope>,
+    ) -> Result<bool, RuntimeError> {
         let mut connection = self.lock_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(if envelope.is_some() {
+            rusqlite::TransactionBehavior::Immediate
+        } else {
+            rusqlite::TransactionBehavior::Deferred
+        })?;
+        if let Some(envelope) = envelope {
+            execution::check_execution_in(&transaction, envelope)?;
+        }
         let candidate: Option<String> = transaction
             .query_row(
                 "SELECT q.run_id FROM queued_messages q
@@ -562,6 +896,7 @@ impl RunStore {
             views::commit(transaction)?;
             return Ok(false);
         }
+        sessions::fence_in(&transaction, &sessions::owner_in(&transaction, run_id)?)?;
         let changed = transaction.execute(
             "UPDATE runs SET status='running', updated_at_ms=?2 WHERE id=?1 AND status='queued'",
             params![run_id.0, now_ms()],
@@ -613,60 +948,41 @@ impl RunStore {
     }
 
     pub fn queued_messages(&self, session_id: &str) -> Result<Vec<QueuedMessage>, RuntimeError> {
-        let connection = self.lock_connection()?;
-        let mut statement = connection.prepare("SELECT id, run_id, message, status FROM queued_messages WHERE session_id=?1 AND status='queued' ORDER BY id")?;
-        let rows = statement.query_map(params![session_id], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        })?;
-        rows.enumerate()
-            .map(|(index, row)| {
-                let (id, run_id, message, status) = row?;
-                Ok(QueuedMessage {
-                    id,
-                    position: index as i64 + 1,
-                    session_id: SessionId(session_id.to_owned()),
-                    run_id: RunId(run_id),
-                    message,
-                    status,
-                })
-            })
-            .collect()
+        self.queue_messages_scoped(&TenantContext::local(), &SessionId(session_id.into()), None)
     }
-
     pub fn queued_message(
         &self,
         session_id: &str,
         run_id: &RunId,
     ) -> Result<Option<QueuedMessage>, RuntimeError> {
-        let connection = self.lock_connection()?;
-        connection.query_row("SELECT id, message, status FROM queued_messages WHERE session_id=?1 AND run_id=?2",
-            params![session_id, run_id.0], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
-            .optional()?.map(|(id, message, status)| {
-                let position = if status == "queued" {
-                    connection.query_row("SELECT count(*) FROM queued_messages WHERE session_id=?1 AND status='queued' AND id<=?2", params![session_id, id], |row| row.get(0))?
-                } else { 0 };
-                Ok(QueuedMessage { id, position, session_id: SessionId(session_id.into()), run_id: run_id.clone(), message, status })
-            }).transpose()
+        self.queue_messages_scoped(
+            &TenantContext::local(),
+            &SessionId(session_id.into()),
+            Some(run_id),
+        )
+        .map(|mut rows| rows.pop())
     }
-
     pub fn recoverable_queued(&self) -> Result<Vec<RunRecord>, RuntimeError> {
-        let connection = self.lock_connection()?;
-        let mut statement = connection
-            .prepare("SELECT id FROM runs WHERE status='queued' AND id NOT IN (SELECT run_id FROM plan_decisions WHERE run_id IS NOT NULL AND decision='execute') ORDER BY created_at_ms, rowid")?;
-        let ids = statement
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        ids.iter()
-            .map(|id| {
-                read_run_in(&connection, id)?
-                    .ok_or_else(|| RuntimeError::Protocol("queued run 消失".into()))
-            })
-            .collect()
+        let scope = TenantContext::local();
+        let mut after = None;
+        let mut records = Vec::new();
+        loop {
+            let page = self.recoverable_queue_scoped(&scope, after, 32)?;
+            for run in page.runs {
+                records.push(
+                    self.run_record_scoped(&scope, &run)?
+                        .ok_or(CoordinationError::Corrupt)?,
+                );
+            }
+            if !page.has_more {
+                break;
+            }
+            if page.cursor == after || records.len() > 1024 {
+                return Err(CoordinationError::Corrupt.into());
+            }
+            after = page.cursor;
+        }
+        Ok(records)
     }
 
     pub fn session_exists(&self, session_id: &str) -> Result<bool, RuntimeError> {
@@ -682,8 +998,22 @@ impl RunStore {
     }
 
     pub fn remove_queued(&self, run_id: &RunId) -> Result<bool, RuntimeError> {
+        self.remove_queued_scoped(run_id, None)
+    }
+    pub(crate) fn remove_queued_scoped(
+        &self,
+        run_id: &RunId,
+        envelope: Option<&agent_core::EnterpriseOwnerEnvelope>,
+    ) -> Result<bool, RuntimeError> {
         let mut connection = self.lock_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(if envelope.is_some() {
+            rusqlite::TransactionBehavior::Immediate
+        } else {
+            rusqlite::TransactionBehavior::Deferred
+        })?;
+        if let Some(envelope) = envelope {
+            execution::check_execution_in(&transaction, envelope)?;
+        }
         let changed = transaction.execute(
             "UPDATE runs SET status='cancelled', updated_at_ms=?2 WHERE id=?1 AND status='queued'",
             params![run_id.0, now_ms()],
@@ -717,7 +1047,7 @@ impl RunStore {
         round: usize,
         calls: &[(ToolCall, String, String, bool)],
     ) -> Result<(), RuntimeError> {
-        self.prepare_batch_inner(run_id, round, calls, None)
+        self.prepare_batch_inner(run_id, round, calls, None, None)
     }
     pub fn prepare_owned_tool_batch(
         &self,
@@ -726,17 +1056,31 @@ impl RunStore {
         calls: &[(ToolCall, String, String, bool)],
         descriptors: &[agent_core::ToolDescriptor],
     ) -> Result<(), RuntimeError> {
-        self.prepare_batch_inner(&owner.run_id, round, calls, Some((owner, descriptors)))
+        self.prepare_batch_inner(
+            &owner.run_id,
+            round,
+            calls,
+            Some((owner, descriptors)),
+            None,
+        )
     }
-    fn prepare_batch_inner(
+    pub(crate) fn prepare_batch_inner(
         &self,
         run_id: &RunId,
         round: usize,
         calls: &[(ToolCall, String, String, bool)],
         descriptors: Option<(&agent_core::ExactOwner, &[agent_core::ToolDescriptor])>,
+        envelope: Option<&agent_core::EnterpriseOwnerEnvelope>,
     ) -> Result<(), RuntimeError> {
         let mut connection = self.lock_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(if envelope.is_some() {
+            rusqlite::TransactionBehavior::Immediate
+        } else {
+            rusqlite::TransactionBehavior::Deferred
+        })?;
+        if let Some(envelope) = envelope {
+            execution::check_execution_in(&transaction, envelope)?;
+        }
         if let Some((owner, descriptors)) = descriptors {
             sessions::fence_in(&transaction, owner)?;
             if descriptors.len() != calls.len() {
@@ -750,6 +1094,60 @@ impl RunStore {
         )?;
         if status != "running" {
             return Err(RuntimeError::Protocol("run 不在执行状态".into()));
+        }
+        if envelope.is_some() {
+            let saved_bytes: Option<(u64, u64)> = transaction.query_row(
+                "SELECT length(CAST(calls_json AS BLOB)),length(CAST(descriptor_json AS BLOB)) FROM tool_batches WHERE run_id=?1 AND round=?2",
+                params![run_id.0, round as i64], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
+            if saved_bytes.is_some_and(|(calls, descriptors)| {
+                calls > 1024 * 1024 || descriptors > 1024 * 1024
+            }) {
+                return Err(CoordinationError::Corrupt.into());
+            }
+            let existing: Option<(String,String)> = transaction.query_row(
+                "SELECT calls_json,descriptor_json FROM tool_batches WHERE run_id=?1 AND round=?2",
+                params![run_id.0, round as i64], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
+            if let Some((raw_calls, raw_descriptors)) = existing {
+                let saved: Vec<ToolCall> =
+                    serde_json::from_str(&raw_calls).map_err(|_| CoordinationError::Corrupt)?;
+                let saved_descriptors: Vec<agent_core::ToolDescriptor> =
+                    serde_json::from_str(&raw_descriptors)
+                        .map_err(|_| CoordinationError::Corrupt)?;
+                let expected_calls = calls
+                    .iter()
+                    .map(|(call, _, _, _)| call.clone())
+                    .collect::<Vec<_>>();
+                let expected_descriptors = descriptors
+                    .map(|(_, d)| d)
+                    .ok_or(CoordinationError::Conflict)?;
+                if serde_json::to_value(saved).map_err(|_| CoordinationError::Corrupt)?
+                    != serde_json::to_value(expected_calls)
+                        .map_err(|_| CoordinationError::InvalidRequest)?
+                    || serde_json::to_value(saved_descriptors)
+                        .map_err(|_| CoordinationError::Corrupt)?
+                        != serde_json::to_value(expected_descriptors)
+                            .map_err(|_| CoordinationError::InvalidRequest)?
+                {
+                    return Err(CoordinationError::Conflict.into());
+                }
+                let count: u64 = transaction.query_row(
+                    "SELECT count(*) FROM tool_executions WHERE run_id=?1 AND round=?2",
+                    params![run_id.0, round as i64],
+                    |r| r.get(0),
+                )?;
+                if count != calls.len() as u64 {
+                    return Err(CoordinationError::Corrupt.into());
+                }
+                for (call, effect, digest, safe) in calls {
+                    let stored: Option<(String,String,String,bool)>=transaction.query_row("SELECT name,effect,argument_digest,safe_to_replay FROM tool_executions WHERE run_id=?1 AND round=?2 AND call_id=?3",params![run_id.0,round as i64,call.id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+                    if stored.as_ref()
+                        != Some(&(call.name.clone(), effect.clone(), digest.clone(), *safe))
+                    {
+                        return Err(CoordinationError::Corrupt.into());
+                    }
+                }
+                return Ok(());
+            }
         }
         let mut budget: Option<i64> = transaction
             .query_row(
@@ -765,6 +1163,9 @@ impl RunStore {
         )?;
         if continuation == 1 {
             budget = Some(budget.map_or(8, |limit| limit.min(8)));
+        }
+        if let Some(max)=turns::run_snapshot_in(&transaction,run_id)?.and_then(|s|s.max_tool_calls) {
+            budget=Some(budget.map_or(max as i64,|b|b.min(max as i64)));
         }
         if let Some(budget) = budget {
             let used: i64 = transaction.query_row(
@@ -810,12 +1211,36 @@ impl RunStore {
         round: usize,
         call_id: &str,
     ) -> Result<(), RuntimeError> {
-        let changed = self.lock_connection()?.execute(
+        self.start_tool_scoped(run_id, round, call_id, None)
+    }
+    pub(crate) fn start_tool_scoped(
+        &self,
+        run_id: &RunId,
+        round: usize,
+        call_id: &str,
+        envelope: Option<&agent_core::EnterpriseOwnerEnvelope>,
+    ) -> Result<(), RuntimeError> {
+        let mut connection = self.lock_connection()?;
+        let tx = connection.transaction_with_behavior(if envelope.is_some() {
+            rusqlite::TransactionBehavior::Immediate
+        } else {
+            rusqlite::TransactionBehavior::Deferred
+        })?;
+        if let Some(envelope) = envelope {
+            execution::check_execution_in(&tx, envelope)?;
+        } else {
+            sessions::fence_in(&tx, &sessions::owner_in(&tx, run_id)?)?;
+        }
+        let changed = tx.execute(
             "UPDATE tool_executions SET status='running', started_at_ms=?4 WHERE run_id=?1 AND round=?2 AND call_id=?3 AND status='prepared'",
             params![run_id.0, round as i64, call_id, now_ms()])?;
         if changed != 1 {
             return Err(RuntimeError::Protocol("工具不是 prepared 状态".into()));
         }
+        let env=billing::envelope_in(&tx,run_id)?;
+        billing::start_tool_in(&tx,&env,round,call_id)?;
+        writer::before_commit(&tx)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -828,59 +1253,64 @@ impl RunStore {
         artifact_ref: Option<&str>,
         receipt: &Value,
     ) -> Result<(), RuntimeError> {
-        let changed = self.lock_connection()?.execute(
-            "UPDATE tool_executions SET status='terminal', finished_at_ms=?4, outcome=?5, artifact_ref=?6, receipt_json=?7
-                WHERE run_id=?1 AND round=?2 AND call_id=?3 AND status='running'",
-            params![run_id.0, round as i64, call_id, now_ms(), outcome, artifact_ref, receipt.to_string()])?;
-        if changed != 1 {
-            return Err(RuntimeError::Protocol("工具不是 running 状态".into()));
+        let mut connection = self.lock_connection()?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let owner = sessions::owner_in(&tx, run_id)?;
+        sessions::fence_in(&tx, &owner)?;
+        if let Some(reference) = artifact_ref {
+            let (identity, _) = self.file_artifacts.read(reference, 0, 1)?;
+            artifact_publication::verify_receipt(&identity, receipt, false)?;
         }
+        artifact_publication::finish_in(
+            &tx,
+            run_id,
+            round,
+            call_id,
+            outcome,
+            artifact_ref,
+            receipt,
+        )?;
+        sessions::fence_in(&tx, &owner)?;
+        tx.commit()?;
         Ok(())
     }
 
     pub fn store_tool_output(&self, content: &str) -> Result<String, RuntimeError> {
-        std::fs::create_dir_all(&self.artifact_dir)
-            .map_err(|error| RuntimeError::Internal(error.to_string()))?;
-        let digest = format!("{:x}", Sha256::digest(content.as_bytes()));
-        let target = self.artifact_dir.join(format!("sha256-{digest}.txt"));
-        if target.exists() {
-            let existing =
-                std::fs::read(&target).map_err(|e| RuntimeError::Internal(e.to_string()))?;
-            if format!("{:x}", Sha256::digest(&existing)) != digest {
-                return Err(RuntimeError::Protocol("artifact digest 损坏".into()));
-            }
-            return Ok(target.to_string_lossy().into_owned());
-        }
-        let temporary = self.artifact_dir.join(format!(
-            ".{digest}-{}-{}.tmp",
-            std::process::id(),
-            NEXT_ARTIFACT.fetch_add(1, Ordering::Relaxed)
-        ));
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let result = (|| -> std::io::Result<()> {
-            let mut file = options.open(&temporary)?;
-            file.write_all(content.as_bytes())?;
-            file.sync_all()?;
-            std::fs::rename(&temporary, &target)?;
-            std::fs::File::open(&self.artifact_dir)?.sync_all()?;
-            Ok(())
-        })();
-        if let Err(error) = result {
-            let _ = std::fs::remove_file(&temporary);
-            return Err(RuntimeError::Internal(error.to_string()));
-        }
-        Ok(target.to_string_lossy().into_owned())
+        self.file_artifacts.publish(content).map_err(Into::into)
     }
 
     pub fn finish_tool_batch(&self, run_id: &RunId, round: usize) -> Result<(), RuntimeError> {
+        self.finish_tool_batch_scoped(run_id, round, None)
+    }
+    pub(crate) fn finish_tool_batch_scoped(
+        &self,
+        run_id: &RunId,
+        round: usize,
+        envelope: Option<&agent_core::EnterpriseOwnerEnvelope>,
+    ) -> Result<(), RuntimeError> {
         let mut connection = self.lock_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(if envelope.is_some() {
+            rusqlite::TransactionBehavior::Immediate
+        } else {
+            rusqlite::TransactionBehavior::Deferred
+        })?;
+        if let Some(envelope) = envelope {
+            execution::check_execution_in(&transaction, envelope)?;
+            let state: Option<String> = transaction
+                .query_row(
+                    "SELECT state FROM tool_batches WHERE run_id=?1 AND round=?2",
+                    params![run_id.0, round as i64],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if state.as_deref() != Some("closed") {
+                return Err(CoordinationError::Conflict.into());
+            }
+            let published: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE run_id=?1 AND event='tool_batch_completed' AND json_extract(data_json,'$.round')=?2)",params![run_id.0,round as i64],|r|r.get(0))?;
+            if published {
+                return Ok(());
+            }
+        }
         let incomplete: i64 = transaction.query_row("SELECT count(*) FROM tool_executions WHERE run_id=?1 AND round=?2 AND (status!='terminal' OR outcome='outcome_unknown')", params![run_id.0, round as i64], |row| row.get(0))?;
         if incomplete != 0 {
             return Err(RuntimeError::Protocol("工具批次尚未全部完成".into()));
@@ -896,39 +1326,7 @@ impl RunStore {
     }
 
     pub fn tool_receipts(&self, run_id: &RunId) -> Result<Vec<ToolReceipt>, RuntimeError> {
-        let connection = self.lock_connection()?;
-        let mut statement = connection.prepare("SELECT round, call_id, name, status, effect, argument_digest, started_at_ms, finished_at_ms, outcome, artifact_ref, safe_to_replay, receipt_json FROM tool_executions WHERE run_id=?1 ORDER BY round, id")?;
-        let rows = statement.query_map(params![run_id.0], |row| {
-            Ok((
-                ToolReceipt {
-                    run_id: run_id.clone(),
-                    round: row.get(0)?,
-                    call_id: row.get(1)?,
-                    name: row.get(2)?,
-                    status: row.get(3)?,
-                    effect: row.get(4)?,
-                    argument_digest: row.get(5)?,
-                    started_at_ms: row.get(6)?,
-                    finished_at_ms: row.get(7)?,
-                    outcome: row.get(8)?,
-                    artifact_ref: row.get(9)?,
-                    safe_to_replay: row.get(10)?,
-                    receipt: None,
-                },
-                row.get::<_, Option<String>>(11)?,
-            ))
-        })?;
-        rows.map(|row| {
-            let (mut receipt, json) = row?;
-            receipt.receipt = json
-                .map(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|error| RuntimeError::Protocol(error.to_string()))
-                })
-                .transpose()?;
-            Ok(receipt)
-        })
-        .collect()
+        tool_receipts_in(&*self.lock_connection()?, run_id)
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -953,8 +1351,43 @@ impl RunStore {
         event: &str,
         data: &Value,
     ) -> Result<EventSeq, RuntimeError> {
+        self.append_event_scoped(run_id, event, data, None)
+    }
+    pub(crate) fn append_event_scoped(
+        &self,
+        run_id: &RunId,
+        event: &str,
+        data: &Value,
+        envelope: Option<&agent_core::EnterpriseOwnerEnvelope>,
+    ) -> Result<EventSeq, RuntimeError> {
         let mut connection = self.lock_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(if envelope.is_some() {
+            rusqlite::TransactionBehavior::Immediate
+        } else {
+            rusqlite::TransactionBehavior::Deferred
+        })?;
+        if let Some(envelope) = envelope {
+            if envelope.owner.run_id != *run_id {
+                return Err(agent_core::AuthorizationError::StaleOwner.into());
+            }
+            execution::check_execution_in(&transaction, envelope)?;
+            if events::is_live_event(event) {
+                let status: String = transaction.query_row(
+                    "SELECT status FROM runs WHERE id=?1",
+                    [&run_id.0],
+                    |row| row.get(0),
+                )?;
+                if status != "running" && status != "waiting_interaction" {
+                    return Err(agent_core::CoordinationError::Conflict.into());
+                }
+            }
+        } else {
+            enterprise::check_run_scope_in(
+                &transaction,
+                &agent_core::TenantContext::local(),
+                run_id,
+            )?;
+        }
         if event == "approval_required"
             && let Some(approval) = data.get("approval")
         {
@@ -977,25 +1410,13 @@ impl RunStore {
         &self,
         id: &InteractionId,
     ) -> Result<Option<InteractionRecord>, RuntimeError> {
-        let connection = self.lock_connection()?;
-        read_interaction_in(&connection, &id.0)
+        self.read_interaction_scoped(&TenantContext::local(), id)
     }
-
     pub fn list_interactions(
         &self,
         session_id: &str,
     ) -> Result<Vec<InteractionRecord>, RuntimeError> {
-        let connection = self.lock_connection()?;
-        let mut statement = connection.prepare("SELECT i.id FROM interactions i JOIN runs r ON r.id=i.run_id JOIN session_heads h ON h.session_id=r.session_id AND h.lifetime=r.lifetime AND h.deleted=0 WHERE r.session_id=?1 ORDER BY i.rowid")?;
-        let ids = statement
-            .query_map(params![session_id], |row| row.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        ids.iter()
-            .map(|id| {
-                read_interaction_in(&connection, id)?
-                    .ok_or_else(|| RuntimeError::Protocol("interaction 消失".into()))
-            })
-            .collect()
+        self.list_interactions_scoped(&TenantContext::local(), &SessionKey(session_id.to_owned()))
     }
 
     pub fn claim_interaction(
@@ -1006,12 +1427,108 @@ impl RunStore {
         revision: i64,
         approved: bool,
     ) -> Result<InteractionRecord, RuntimeError> {
+        self.claim_interaction_scoped(id, session_id, run_id, revision, approved, None)
+    }
+
+    pub(crate) fn claim_interaction_scoped(
+        &self,
+        id: &InteractionId,
+        session_id: &SessionId,
+        run_id: &RunId,
+        revision: i64,
+        approved: bool,
+        envelope: Option<&EnterpriseOwnerEnvelope>,
+    ) -> Result<InteractionRecord, RuntimeError> {
+        self.claim_interaction_authorized(
+            id, session_id, run_id, revision, approved, envelope, None,
+        )
+    }
+    pub(crate) fn claim_interaction_authorized(
+        &self,
+        id: &InteractionId,
+        session_id: &SessionId,
+        run_id: &RunId,
+        revision: i64,
+        approved: bool,
+        envelope: Option<&EnterpriseOwnerEnvelope>,
+        authorization: Option<(&AuthorizationRequest, &dyn AuthorizationVerifier)>,
+    ) -> Result<InteractionRecord, RuntimeError> {
         let mut connection = self.lock_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if let Some(envelope) = envelope {
+            if envelope.owner.session_key != *session_id || envelope.owner.run_id != *run_id {
+                return Err(AuthorizationError::StaleOwner.into());
+            }
+            execution::check_execution_in(&transaction, envelope)?;
+            let _ = requests::frozen_in(&transaction, run_id)?;
+        } else {
+            enterprise::check_run_scope_in(&transaction, &TenantContext::local(), run_id)?;
+            let owner = sessions::owner_in(&transaction, run_id)?;
+            sessions::fence_in(&transaction, &owner)?;
+        }
+        let anchor = run_interactions::interaction_anchor_in(
+            &transaction,
+            envelope
+                .map(|e| &e.scope)
+                .unwrap_or(&TenantContext::local()),
+            id,
+        )?
+        .ok_or(CoordinationError::Conflict)?;
+        if anchor.run_id != *run_id || anchor.session_key != *session_id {
+            return Err(AuthorizationError::Forbidden.into());
+        }
         let current = read_interaction_in(&transaction, &id.0)?
             .ok_or_else(|| RuntimeError::Protocol("interaction 不存在".into()))?;
         if current.session_id != *session_id || current.owner_run_id != *run_id {
             return Err(RuntimeError::Protocol("interaction owner 不匹配".into()));
+        }
+        if let Some((request, verifier)) = authorization {
+            let env = envelope.ok_or(AuthorizationError::Forbidden)?;
+            let snapshot = crate::enterprise::authorization_snapshot_in(&transaction, env)?;
+            let identity = crate::enterprise::identity_in(
+                &transaction,
+                &env.scope,
+                &request.context.principal.subject_id,
+            )?;
+            if request.context.scope != env.scope || request.action != Action::InteractionRespond {
+                return Err(AuthorizationError::Forbidden.into());
+            }
+            let mut checked = request.clone();
+            checked.attributes.timestamp_ms = now_ms();
+            verifier.verify(&checked, &identity)?;
+            checked.action = Action::SessionPrompt;
+            verifier.verify(&checked, &identity)?;
+            let dual = snapshot.as_ref().is_some_and(|s| s.policy.dual_approval);
+            if snapshot.is_none() && env.scope != TenantContext::local() {
+                return Err(AuthorizationError::Forbidden.into());
+            }
+            if dual
+                && snapshot.as_ref().is_some_and(|s| {
+                    request.context.principal.subject_id == s.context.principal.subject_id
+                })
+            {
+                return Err(AuthorizationError::Forbidden.into());
+            }
+            match crate::run_interactions::vote_in(
+                &transaction,
+                request,
+                env,
+                id,
+                revision,
+                approved,
+                &current,
+                dual,
+            )? {
+                crate::run_interactions::VoteProgress::Duplicate => return Ok(current),
+                crate::run_interactions::VoteProgress::Waiting => {
+                    let result = read_interaction_in(&transaction, &id.0)?
+                        .ok_or(CoordinationError::Corrupt)?;
+                    views::commit(transaction)?;
+                    return Ok(result);
+                }
+                crate::run_interactions::VoteProgress::Resolve => {}
+            }
         }
         let response = serde_json::json!({"approved": approved});
         if current.status != "pending" {
@@ -1037,6 +1554,7 @@ impl RunStore {
                 "interaction 的 run 已不在等待".into(),
             ));
         }
+        let next_revision = revision.checked_add(1).ok_or(CoordinationError::Conflict)?;
         transaction.execute("UPDATE interactions SET status=?2, response_json=?3, revision=revision+1 WHERE id=?1 AND status='pending'",
             params![id.0, if approved {"answered"} else {"rejected"}, response.to_string()])?;
         let pending: i64 = transaction.query_row(
@@ -1054,7 +1572,7 @@ impl RunStore {
             &transaction,
             run_id,
             "interaction_resolved",
-            &serde_json::json!({"interaction_id": id, "approved": approved, "revision": revision + 1}),
+            &serde_json::json!({"interaction_id": id, "approved": approved, "revision": next_revision}),
         )?;
         let result = read_interaction_in(&transaction, &id.0)?
             .ok_or_else(|| RuntimeError::Internal("缺少持久记录：claimed interaction".into()))?;
@@ -1079,6 +1597,16 @@ impl RunStore {
         content: Option<&str>,
         error: Option<(i64, &str)>,
     ) -> Result<RunRecord, RuntimeError> {
+        self.finish_owned_scoped(owner, status, content, error, None)
+    }
+    pub(crate) fn finish_owned_scoped(
+        &self,
+        owner: &agent_core::ExactOwner,
+        status: RunStatus,
+        content: Option<&str>,
+        error: Option<(i64, &str)>,
+        envelope: Option<&agent_core::EnterpriseOwnerEnvelope>,
+    ) -> Result<RunRecord, RuntimeError> {
         let run_id = &owner.run_id;
         if !matches!(
             status,
@@ -1090,9 +1618,17 @@ impl RunStore {
             return Err(RuntimeError::Protocol("finish 必须写入终态".into()));
         }
         let mut connection = self.lock_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(if envelope.is_some() {
+            rusqlite::TransactionBehavior::Immediate
+        } else {
+            rusqlite::TransactionBehavior::Deferred
+        })?;
+        if let Some(envelope) = envelope {
+            execution::check_execution_in(&transaction, envelope)?;
+        }
         let current = read_run_in(&transaction, &run_id.0)?
             .ok_or_else(|| RuntimeError::Protocol("run 不存在".into()))?;
+        sessions::fence_in(&transaction, owner)?;
         if current.kind == agent_core::RunKind::Compact {
             return Err(RuntimeError::Protocol(
                 "compact 必须通过 intent/receipt 同事务结算".into(),
@@ -1109,9 +1645,13 @@ impl RunStore {
             tracing::warn!(run_id = %run_id.0, existing = ?current.status, attempted = ?status, "拒绝冲突的 run 终态");
             return Err(RuntimeError::Protocol(format!("run {} 终态冲突", run_id.0)));
         }
-        sessions::fence_in(&transaction, owner)?;
         let incomplete_tools: i64 = transaction.query_row(
             "SELECT count(*) FROM tool_executions WHERE run_id=?1 AND (status!='terminal' OR outcome='outcome_unknown')",
+            params![run_id.0],
+            |row| row.get(0),
+        )?;
+        let incomplete_providers: i64 = transaction.query_row(
+            "SELECT count(*) FROM provider_attempts WHERE run_id=?1 AND status IN ('started','outcome_unknown','outcomeunknown')",
             params![run_id.0],
             |row| row.get(0),
         )?;
@@ -1120,24 +1660,26 @@ impl RunStore {
             params![run_id.0],
             |row| row.get(0),
         )?;
-        let status = if incomplete_tools > 0
-            || (status == RunStatus::Cancelled && started_side_effects > 0)
-        {
-            RunStatus::UnknownAfterRestart
-        } else {
-            status
-        };
+        let status = agent_core::normalize_run_terminal_status(
+            status,
+            incomplete_tools > 0,
+            incomplete_providers > 0,
+            started_side_effects > 0,
+        );
         let content = if status == RunStatus::Completed {
             content
         } else {
             None
         };
         let error = if status == RunStatus::UnknownAfterRestart {
-            Some((-32002, "工具执行结果未知，禁止自动重放"))
+            Some((-32002, "执行结果未知，禁止自动重放"))
         } else {
             error
         };
         turns::close_open_batches(&transaction, run_id)?;
+        if status == RunStatus::UnknownAfterRestart {
+            settle_interrupted_provider_attempts_in(&transaction, run_id)?;
+        }
         turns::commit_output_in(&transaction, run_id, status, content)?;
         if let Some(content) = content {
             insert_event(
@@ -1196,6 +1738,29 @@ impl RunStore {
         content: Option<&str>,
         evidence: &str,
     ) -> Result<RunRecord, RuntimeError> {
+        self.reconcile_unknown_scoped(
+            &TenantContext::local(),
+            run_id,
+            session_id,
+            expected_last_seq,
+            status,
+            content,
+            evidence,
+            None,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn reconcile_unknown_scoped(
+        &self,
+        scope: &TenantContext,
+        run_id: &RunId,
+        session_id: &SessionId,
+        expected_last_seq: EventSeq,
+        status: RunStatus,
+        content: Option<&str>,
+        evidence: &str,
+        envelope: Option<&EnterpriseOwnerEnvelope>,
+    ) -> Result<RunRecord, RuntimeError> {
         if !matches!(
             status,
             RunStatus::Completed | RunStatus::Failed | RunStatus::Cancelled
@@ -1208,7 +1773,21 @@ impl RunStore {
             ));
         }
         let mut connection = self.lock_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        enterprise::check_run_scope_in(&transaction, scope, run_id)?;
+        let actual = sessions::owner_in(&transaction, run_id)?;
+        sessions::lifetime_owner_in(
+            &transaction,
+            &actual.session_key,
+            &actual.session_lifetime_id,
+        )?;
+        if let Some(envelope) = envelope {
+            execution::check_execution_in(&transaction, envelope)?;
+            let _ = requests::frozen_in(&transaction, run_id)?;
+        } else {
+            sessions::fence_in(&transaction, &actual)?;
+        }
         let run = read_run_in(&transaction, &run_id.0)?
             .ok_or_else(|| RuntimeError::Protocol("run 不存在".into()))?;
         if run.kind == agent_core::RunKind::Compact {
@@ -1281,31 +1860,66 @@ impl RunStore {
     }
 
     pub fn route_snapshot(&self, run_id: &RunId) -> Result<Option<RouteSnapshot>, RuntimeError> {
-        let connection = self.lock_connection()?;
-        let raw: Option<String> = connection
-            .query_row(
-                "SELECT snapshot_json FROM run_routes WHERE run_id=?1",
-                params![run_id.0],
-                |row| row.get(0),
-            )
-            .optional()?;
-        raw.map(|value| {
-            serde_json::from_str(&value)
-                .map_err(|error| RuntimeError::Protocol(format!("route snapshot 无效: {error}")))
-        })
-        .transpose()
+        route_snapshot_in(&*self.lock_connection()?, run_id)
     }
 
     pub fn start_provider_attempt(&self, attempt: &ProviderAttempt) -> Result<(), RuntimeError> {
+        self.start_attempt_scoped(attempt, None)
+    }
+    pub(crate) fn start_attempt_scoped(
+        &self,
+        attempt: &ProviderAttempt,
+        envelope: Option<&agent_core::EnterpriseOwnerEnvelope>,
+    ) -> Result<(), RuntimeError> {
         if attempt.status != AttemptStatus::Started {
             return Err(RuntimeError::Protocol(
                 "attempt 初始状态必须为 started".into(),
             ));
         }
         let mut connection = self.lock_connection()?;
-        let tx = connection.transaction()?;
+        let tx = connection.transaction_with_behavior(if envelope.is_some() {
+            rusqlite::TransactionBehavior::Immediate
+        } else {
+            rusqlite::TransactionBehavior::Deferred
+        })?;
+        if let Some(envelope) = envelope {
+            execution::check_execution_in(&tx, envelope)?;
+            let run = read_run_in(&tx, &attempt.run_id.0)?.ok_or(CoordinationError::Conflict)?;
+            if run.status != RunStatus::Running {
+                return Err(CoordinationError::Conflict.into());
+            }
+            if let Some(route) = route_snapshot_in(&tx, &attempt.run_id)? {
+                let candidate = route
+                    .candidates
+                    .get(attempt.candidate_index as usize)
+                    .ok_or(CoordinationError::Conflict)?;
+                if candidate.profile_id != attempt.provider_profile_id
+                    || candidate.api_type != attempt.api_type
+                    || candidate.model != attempt.model
+                {
+                    return Err(CoordinationError::Conflict.into());
+                }
+            }
+        }
         let data = serde_json::to_string(attempt)
             .map_err(|error| RuntimeError::Internal(error.to_string()))?;
+        if let Some(previous) = provider_attempt_in(&tx, &attempt.attempt_id)? {
+            if serde_json::to_value(&previous).map_err(|_| CoordinationError::Corrupt)?
+                == serde_json::to_value(attempt).map_err(|_| CoordinationError::InvalidRequest)?
+            {
+                return Ok(());
+            }
+            return Err(CoordinationError::Conflict.into());
+        }
+        let count: u64 = tx.query_row(
+            "SELECT count(*) FROM provider_attempts WHERE run_id=?1",
+            [&attempt.run_id.0],
+            |r| r.get(0),
+        )?;
+        if count >= 1000 {
+            return Err(CoordinationError::InvalidRequest.into());
+        }
+        billing::start_provider_in(&tx,&attempt.run_id,attempt)?;
         tx.execute("INSERT INTO provider_attempts(attempt_id,run_id,round,candidate_index,status,data_json) VALUES (?1,?2,?3,?4,'started',?5)",
             params![attempt.attempt_id, attempt.run_id.0, attempt.round, attempt.candidate_index, data])?;
         insert_event(
@@ -1322,26 +1936,40 @@ impl RunStore {
     }
 
     pub fn finish_provider_attempt(&self, attempt: &ProviderAttempt) -> Result<(), RuntimeError> {
+        self.finish_attempt_scoped(attempt, None)
+    }
+    pub(crate) fn finish_attempt_scoped(
+        &self,
+        attempt: &ProviderAttempt,
+        envelope: Option<&agent_core::EnterpriseOwnerEnvelope>,
+    ) -> Result<(), RuntimeError> {
         if attempt.status == AttemptStatus::Started {
             return Err(RuntimeError::Protocol("attempt 终态无效".into()));
         }
         let mut connection = self.lock_connection()?;
-        let tx = connection.transaction()?;
-        let old: String = tx.query_row(
-            "SELECT data_json FROM provider_attempts WHERE attempt_id=?1",
-            params![attempt.attempt_id],
-            |row| row.get(0),
-        )?;
-        let previous: ProviderAttempt = serde_json::from_str(&old)
-            .map_err(|error| RuntimeError::Protocol(error.to_string()))?;
+        let tx = connection.transaction_with_behavior(if envelope.is_some() {
+            rusqlite::TransactionBehavior::Immediate
+        } else {
+            rusqlite::TransactionBehavior::Deferred
+        })?;
+        if let Some(envelope) = envelope {
+            execution::check_execution_in(&tx, envelope)?;
+        }
+        let previous =
+            provider_attempt_in(&tx, &attempt.attempt_id)?.ok_or(CoordinationError::Conflict)?;
+        if !previous.same_invocation(attempt) {
+            return Err(CoordinationError::Conflict.into());
+        }
+        sessions::fence_in(&tx, &sessions::owner_in(&tx, &previous.run_id)?)?;
         let data = serde_json::to_string(attempt)
             .map_err(|error| RuntimeError::Internal(error.to_string()))?;
         if previous.status != AttemptStatus::Started {
-            if serde_json::from_str::<Value>(&old).ok() == serde_json::from_str::<Value>(&data).ok()
+            if serde_json::to_value(&previous).map_err(|_| CoordinationError::Corrupt)?
+                == serde_json::from_str::<Value>(&data).map_err(|_| CoordinationError::Corrupt)?
             {
                 return Ok(());
             }
-            return Err(RuntimeError::Protocol("attempt 终态冲突".into()));
+            return Err(CoordinationError::Conflict.into());
         }
         if previous.run_id != attempt.run_id
             || previous.round != attempt.round
@@ -1350,7 +1978,7 @@ impl RunStore {
             return Err(RuntimeError::Protocol("attempt owner 冲突".into()));
         }
         tx.execute("UPDATE provider_attempts SET status=?2,data_json=?3 WHERE attempt_id=?1 AND status='started'",
-            params![attempt.attempt_id, format!("{:?}", attempt.status).to_ascii_lowercase(), data])?;
+            params![attempt.attempt_id, serde_json::to_value(attempt.status).map_err(|_|CoordinationError::Corrupt)?.as_str().ok_or(CoordinationError::Corrupt)?, data])?;
         insert_event(
             &tx,
             &attempt.run_id,
@@ -1362,19 +1990,14 @@ impl RunStore {
                 "usage": attempt.usage,
             }),
         )?;
+        let env=envelope.cloned().unwrap_or(EnterpriseOwnerEnvelope {scope:TenantContext::local(),owner:sessions::owner_in(&tx,&attempt.run_id)?});
+        billing::provider_in(&tx,&env,attempt)?;
         views::commit(tx)?;
         Ok(())
     }
 
     pub fn provider_attempts(&self, run_id: &RunId) -> Result<Vec<ProviderAttempt>, RuntimeError> {
-        let connection = self.lock_connection()?;
-        let mut stmt = connection
-            .prepare("SELECT data_json FROM provider_attempts WHERE run_id=?1 ORDER BY rowid")?;
-        let rows = stmt.query_map(params![run_id.0], |row| row.get::<_, String>(0))?;
-        rows.map(|row| {
-            serde_json::from_str(&row?).map_err(|error| RuntimeError::Protocol(error.to_string()))
-        })
-        .collect()
+        provider_attempts_in(&*self.lock_connection()?, run_id)
     }
 
     pub fn provider_usage(&self, run_id: &RunId) -> Result<ProviderUsage, RuntimeError> {
@@ -1392,42 +2015,17 @@ impl RunStore {
         session_id: &str,
         request_id: &RequestId,
     ) -> Result<Option<RunRecord>, RuntimeError> {
-        let connection = self.lock_connection()?;
-        let request_json = serde_json::to_string(request_id)
-            .map_err(|error| RuntimeError::Protocol(error.to_string()))?;
-        let id = connection
-            .query_row(
-                "SELECT id FROM runs WHERE session_id=?1 AND request_id_wire_json=?2 AND lifetime=(SELECT lifetime FROM session_heads WHERE session_id=?1 AND deleted=0)",
-                params![session_id, request_json],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?;
-        id.map(|id| read_run_in(&connection, &id))
-            .transpose()
-            .map(Option::flatten)
+        self.lookup_request_scoped(
+            &TenantContext::local(),
+            Some(&SessionId(session_id.into())),
+            request_id,
+        )
     }
-
     pub fn find_request_unique(
         &self,
         request_id: &RequestId,
     ) -> Result<Option<RunRecord>, RuntimeError> {
-        let connection = self.lock_connection()?;
-        let request_json = serde_json::to_string(request_id)
-            .map_err(|error| RuntimeError::Protocol(error.to_string()))?;
-        let mut statement = connection
-            .prepare("SELECT r.id FROM runs r JOIN session_heads h ON h.session_id=r.session_id AND h.lifetime=r.lifetime AND h.deleted=0 WHERE r.request_id_wire_json=?1 ORDER BY r.rowid LIMIT 2")?;
-        let ids = statement
-            .query_map(params![request_json], |row| row.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        if ids.len() > 1 {
-            return Err(RuntimeError::Protocol(
-                "request_id 跨 session 不唯一；必须提供 session_id + run_id".into(),
-            ));
-        }
-        ids.first()
-            .map(|id| read_run_in(&connection, id))
-            .transpose()
-            .map(Option::flatten)
+        self.lookup_request_scoped(&TenantContext::local(), None, request_id)
     }
 
     pub fn events_after(
@@ -1437,56 +2035,55 @@ impl RunStore {
         limit: usize,
     ) -> Result<Vec<StoredEvent>, RuntimeError> {
         let connection = self.lock_connection()?;
-        let mut statement = connection.prepare("SELECT seq, event, data_json FROM events WHERE run_id=?1 AND seq>?2 ORDER BY seq LIMIT ?3")?;
-        let rows =
-            statement.query_map(params![run_id.0, after.0, limit.min(1000) as i64], |row| {
-                Ok((
-                    row.get::<_, u64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })?;
-        rows.map(|row| {
-            let (seq, event, data) = row?;
-            let mut data: Value = serde_json::from_str(&data)
-                .map_err(|error| RuntimeError::Protocol(error.to_string()))?;
-            views::strip_transport_metadata(&mut data);
-            if let Some(stamp) = views::stamp_in(&connection, run_id, EventSeq(seq))? {
-                data.as_object_mut()
-                    .ok_or_else(|| RuntimeError::Protocol("事件 data 非 object".into()))?
-                    .insert(
-                        "_my_agent_view".into(),
-                        serde_json::to_value(stamp)
-                            .map_err(|error| RuntimeError::Protocol(error.to_string()))?,
-                    );
-            }
-            Ok(StoredEvent {
-                run_id: run_id.clone(),
-                seq: EventSeq(seq),
-                event,
-                data,
-            })
-        })
-        .collect()
+        events::events_in(&connection, run_id, after, limit.min(1000), None).map(|page| page.events)
     }
 
     pub fn recover(&self) -> Result<usize, RuntimeError> {
+        self.recover_scoped(&TenantContext::local())
+    }
+    pub(crate) fn recover_scoped(&self, scope: &TenantContext) -> Result<usize, RuntimeError> {
         let mut connection = self.lock_connection()?;
-        let transaction = connection.transaction()?;
-        transaction.execute("UPDATE resources SET state='orphaned',terminal_reason='restart: process identity cannot be proven' WHERE state IN ('starting','running','stopping')", [])?;
-        hooks::recover_in(&transaction)?;
-        transaction.execute("UPDATE compact_operations SET state='rejected',reason='restart: candidate not committed' WHERE state='pending'", [])?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        writer::protect_recovery(&transaction, scope)?;
+        transaction.execute("UPDATE resources SET state='orphaned',terminal_reason='restart: process identity cannot be proven' WHERE state IN ('starting','running','stopping') AND run_id IN (SELECT r.id FROM runs r JOIN session_scopes s ON s.session_id=r.session_id JOIN tenants t ON t.id=s.tenant_id WHERE t.organization_id=?1 AND s.tenant_id=?2 AND s.project_id=?3 AND s.agent_uid=?4)", params![scope.organization_id.as_str(),scope.tenant_id.as_str(),scope.project_id.as_str(),scope.agent_uid.as_str()])?;
+        hooks::recover_in(&transaction, scope)?;
+        transaction.execute("UPDATE compact_operations SET state='rejected',reason='restart: candidate not committed' WHERE state='pending' AND run_id IN (SELECT r.id FROM runs r JOIN session_scopes s ON s.session_id=r.session_id JOIN tenants t ON t.id=s.tenant_id WHERE t.organization_id=?1 AND s.tenant_id=?2 AND s.project_id=?3 AND s.agent_uid=?4)", params![scope.organization_id.as_str(),scope.tenant_id.as_str(),scope.project_id.as_str(),scope.agent_uid.as_str()])?;
 
         let ids = {
             let mut statement = transaction
-                .prepare("SELECT id FROM runs WHERE status IN ('running','waiting_interaction')")?;
+                .prepare("SELECT CASE WHEN length(CAST(r.id AS BLOB)) BETWEEN 1 AND 1024 THEN r.id END FROM runs r JOIN session_scopes s ON s.session_id=r.session_id JOIN tenants t ON t.id=s.tenant_id WHERE t.organization_id=?1 AND s.tenant_id=?2 AND s.project_id=?3 AND s.agent_uid=?4 AND r.status IN ('running','waiting_interaction') ORDER BY r.rowid LIMIT 1025")?;
             statement
-                .query_map([], |row| row.get::<_, String>(0))?
+                .query_map(
+                    params![
+                        scope.organization_id.as_str(),
+                        scope.tenant_id.as_str(),
+                        scope.project_id.as_str(),
+                        scope.agent_uid.as_str()
+                    ],
+                    |row| row.get::<_, Option<String>>(0),
+                )?
                 .collect::<Result<Vec<_>, _>>()?
         };
+        if ids.len() > 1024 {
+            return Err(CoordinationError::Corrupt.into());
+        }
+        let ids = ids
+            .into_iter()
+            .map(|id| id.ok_or_else(|| RuntimeError::Coordination(CoordinationError::Corrupt)))
+            .collect::<Result<Vec<_>, _>>()?;
         for id in &ids {
             let run_id = RunId(id.clone());
+            enterprise::check_run_scope_in(&transaction, scope, &run_id)?;
+            let owner = sessions::owner_in(&transaction, &run_id)?;
+            sessions::lifetime_owner_in(
+                &transaction,
+                &owner.session_key,
+                &owner.session_lifetime_id,
+            )?;
+            sessions::fence_in(&transaction, &owner)?;
             turns::close_open_batches(&transaction, &run_id)?;
+            settle_interrupted_provider_attempts_in(&transaction, &run_id)?;
             turns::commit_output_in(&transaction, &run_id, RunStatus::UnknownAfterRestart, None)?;
             if read_run_in(&transaction, id)?
                 .is_some_and(|run| run.kind == agent_core::RunKind::Compact)
@@ -1523,12 +2120,65 @@ impl RunStore {
         // The question stays readable, but no vanished task may answer or execute it.
         transaction.execute(
             "UPDATE interactions SET status='orphaned' WHERE status='pending' AND run_id IN
-            (SELECT id FROM runs WHERE status='unknown_after_restart')",
-            [],
+            (SELECT r.id FROM runs r JOIN session_scopes s ON s.session_id=r.session_id JOIN tenants t ON t.id=s.tenant_id WHERE t.organization_id=?1 AND s.tenant_id=?2 AND s.project_id=?3 AND s.agent_uid=?4 AND r.status='unknown_after_restart')",
+            params![scope.organization_id.as_str(),scope.tenant_id.as_str(),scope.project_id.as_str(),scope.agent_uid.as_str()],
         )?;
         views::commit(transaction)?;
         Ok(ids.len())
     }
+}
+
+fn settle_interrupted_provider_attempts_in(
+    db: &Connection,
+    run_id: &RunId,
+) -> Result<(), RuntimeError> {
+    sessions::fence_in(db, &sessions::owner_in(db, run_id)?)?;
+    let mut statement = db.prepare(
+        "SELECT attempt_id,round,candidate_index,data_json FROM provider_attempts WHERE run_id=?1 AND status='started' ORDER BY rowid",
+    )?;
+    let records = statement
+        .query_map(params![run_id.0], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u32>(1)?,
+                row.get::<_, u32>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    for (id, round, candidate, raw) in records {
+        let mut attempt: ProviderAttempt = serde_json::from_str(&raw)
+            .map_err(|error| RuntimeError::Protocol(error.to_string()))?;
+        if attempt.attempt_id != id
+            || attempt.run_id != *run_id
+            || attempt.round != round
+            || attempt.candidate_index != candidate
+            || attempt.status != AttemptStatus::Started
+        {
+            return Err(RuntimeError::Protocol(
+                "未确认 Provider owner/状态损坏".into(),
+            ));
+        }
+        attempt.status = AttemptStatus::OutcomeUnknown;
+        attempt.finished_at_ms = Some(now_ms());
+        billing::provider_in(db,&billing::envelope_in(db,run_id)?,&attempt)?;
+        let data = serde_json::to_string(&attempt)
+            .map_err(|error| RuntimeError::Protocol(error.to_string()))?;
+        db.execute(
+            "UPDATE provider_attempts SET status='outcome_unknown',data_json=?2 WHERE attempt_id=?1 AND status='started'",
+            params![attempt.attempt_id, data],
+        )?;
+        insert_event(
+            db,
+            run_id,
+            "provider_attempt_unknown",
+            &serde_json::json!({
+                "attempt_id":attempt.attempt_id,"status":attempt.status,"recovery_action":"reconcile_original_run"
+            }),
+        )?;
+    }
+    Ok(())
 }
 
 fn insert_event(
@@ -1537,6 +2187,9 @@ fn insert_event(
     event: &str,
     data: &Value,
 ) -> Result<EventSeq, RuntimeError> {
+    let owner = sessions::owner_in(connection, run_id)?;
+    writer::acquire_in(connection, &owner.session_key, &owner.session_lifetime_id)?;
+    sessions::fence_in(connection, &sessions::owner_in(connection, run_id)?)?;
     let seq: u64 = connection.query_row(
         "SELECT last_seq + 1 FROM runs WHERE id=?1",
         params![run_id.0],
@@ -1549,6 +2202,15 @@ fn insert_event(
         params![run_id.0, seq, now_ms()],
     )?;
     views::publish_in(connection, run_id, EventSeq(seq), event, data)?;
+    if event == "terminal" {
+        let status: RunStatus = serde_json::from_value(
+            data.get("status")
+                .cloned()
+                .ok_or(agent_core::CoordinationError::Corrupt)?,
+        )
+        .map_err(|_| agent_core::CoordinationError::Corrupt)?;
+        ledgers::terminal_in(connection, run_id, status)?;
+    }
     Ok(EventSeq(seq))
 }
 fn read_run_in(connection: &Connection, id: &str) -> Result<Option<RunRecord>, RuntimeError> {
@@ -1594,48 +2256,83 @@ fn read_interaction_in(
     connection: &Connection,
     id: &str,
 ) -> Result<Option<InteractionRecord>, RuntimeError> {
-    let raw = connection
-        .query_row(
-            "SELECT r.session_id, i.run_id, i.kind, i.status, i.revision, i.prompt, i.response_json, i.payload_json
-        FROM interactions i JOIN runs r ON r.id=i.run_id WHERE i.id=?1",
-            params![id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                    row.get::<_, String>(7)?,
-                ))
-            },
-        )
-        .optional()?;
-    raw.map(
-        |(session_id, run_id, kind, status, revision, prompt, response_json, payload_json)| {
-            Ok(InteractionRecord {
-                interaction_id: InteractionId(id.to_owned()),
-                session_id: SessionId(session_id),
-                owner_run_id: RunId(run_id),
-                kind,
-                status,
-                revision,
-                prompt,
-                payload: serde_json::from_str(&payload_json)
-                    .map_err(|error| RuntimeError::Protocol(error.to_string()))?,
-                response: response_json
-                    .map(|json| {
-                        serde_json::from_str(&json)
-                            .map_err(|error| RuntimeError::Protocol(error.to_string()))
-                    })
-                    .transpose()?,
-            })
-        },
-    )
-    .transpose()
+    type Raw = (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        i64,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        bool,
+        bool,
+    );
+    let raw:Option<Raw>=connection.query_row("SELECT CASE WHEN length(CAST(r.session_id AS BLOB)) BETWEEN 1 AND 1024 THEN r.session_id END,CASE WHEN length(CAST(i.run_id AS BLOB)) BETWEEN 1 AND 1024 THEN i.run_id END,CASE WHEN length(CAST(i.kind AS BLOB))<=64 THEN i.kind END,CASE WHEN length(CAST(i.status AS BLOB))<=32 THEN i.status END,i.revision,CASE WHEN typeof(i.prompt)='text' AND length(CAST(i.prompt AS BLOB))<=16384 THEN i.prompt END,CASE WHEN typeof(i.response_json)='text' AND length(CAST(i.response_json AS BLOB))<=65536 THEN i.response_json END,CASE WHEN typeof(i.payload_json)='text' AND length(CAST(i.payload_json AS BLOB))<=65536 THEN i.payload_json END,i.response_json IS NULL OR typeof(i.response_json)='text' AND length(CAST(i.response_json AS BLOB))<=65536,i.lifetime=r.lifetime AND i.generation=r.generation AND EXISTS(SELECT 1 FROM session_lifetime_owners o WHERE o.session_id=r.session_id AND o.lifetime=r.lifetime AND o.provenance='canonical') FROM interactions i JOIN runs r ON r.id=i.run_id WHERE i.id=?1",params![id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?,r.get(9)?))).optional()?;
+    let Some((
+        session,
+        run,
+        kind,
+        status,
+        revision,
+        prompt,
+        response,
+        payload,
+        response_bounded,
+        bound,
+    )) = raw
+    else {
+        return Ok(None);
+    };
+    if !response_bounded || !bound || revision < 0 {
+        return Err(CoordinationError::Corrupt.into());
+    }
+    let prompt = prompt.ok_or(CoordinationError::Corrupt)?;
+    let status = status.ok_or(CoordinationError::Corrupt)?;
+    if !matches!(
+        status.as_str(),
+        "pending" | "answered" | "rejected" | "orphaned"
+    ) {
+        return Err(CoordinationError::Corrupt.into());
+    }
+    let payload: Value = serde_json::from_str(&payload.ok_or(CoordinationError::Corrupt)?)
+        .map_err(|_| CoordinationError::Corrupt)?;
+    if !payload.is_object()
+        || payload
+            .get("id")
+            .is_some_and(|value| value.as_str() != Some(id))
+        || payload
+            .get("prompt")
+            .is_some_and(|value| value.as_str() != Some(prompt.as_str()))
+    {
+        return Err(CoordinationError::Corrupt.into());
+    }
+    let response = response
+        .map(|raw| serde_json::from_str::<Value>(&raw).map_err(|_| CoordinationError::Corrupt))
+        .transpose()?;
+    if matches!(status.as_str(), "answered" | "rejected")
+        && response.as_ref().and_then(|r| r["approved"].as_bool()) != Some(status == "answered")
+    {
+        return Err(CoordinationError::Corrupt.into());
+    }
+    if status == "pending" && response.is_some() {
+        return Err(CoordinationError::Corrupt.into());
+    }
+    let record = InteractionRecord {
+        interaction_id: InteractionId(id.to_owned()),
+        session_id: SessionId(session.ok_or(CoordinationError::Corrupt)?),
+        owner_run_id: RunId(run.ok_or(CoordinationError::Corrupt)?),
+        kind: kind.ok_or(CoordinationError::Corrupt)?,
+        status,
+        revision,
+        prompt,
+        payload,
+        response,
+    };
+    record.validate_saved()?;
+    Ok(Some(record))
 }
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1663,6 +2360,110 @@ fn backup_database(connection: &Connection, path: &Path, version: i64) -> Result
         serde_json::json!({"schema":version,"sha256":digest,"bytes":bytes.len()}).to_string();
     std::fs::write(&marker, payload).map_err(|e| RuntimeError::Internal(e.to_string()))?;
     Ok(())
+}
+
+pub(crate) fn tool_receipts_in(
+    connection: &Connection,
+    run_id: &RunId,
+) -> Result<Vec<ToolReceipt>, RuntimeError> {
+    let mut statement = connection.prepare("SELECT round, call_id, name, status, effect, argument_digest, started_at_ms, finished_at_ms, outcome, artifact_ref, safe_to_replay, receipt_json FROM tool_executions WHERE run_id=?1 ORDER BY round, id")?;
+    let rows = statement.query_map(params![run_id.0], |row| {
+        Ok((
+            ToolReceipt {
+                run_id: run_id.clone(),
+                round: row.get(0)?,
+                call_id: row.get(1)?,
+                name: row.get(2)?,
+                status: row.get(3)?,
+                effect: row.get(4)?,
+                argument_digest: row.get(5)?,
+                started_at_ms: row.get(6)?,
+                finished_at_ms: row.get(7)?,
+                outcome: row.get(8)?,
+                artifact_ref: row.get(9)?,
+                safe_to_replay: row.get(10)?,
+                receipt: None,
+            },
+            row.get::<_, Option<String>>(11)?,
+        ))
+    })?;
+    rows.map(|row| {
+        let (mut receipt, json) = row?;
+        receipt.receipt = json
+            .map(|json| {
+                serde_json::from_str(&json)
+                    .map_err(|error| RuntimeError::Protocol(error.to_string()))
+            })
+            .transpose()?;
+        Ok(receipt)
+    })
+    .collect()
+}
+pub(crate) fn route_snapshot_in(
+    connection: &Connection,
+    run_id: &RunId,
+) -> Result<Option<RouteSnapshot>, RuntimeError> {
+    let raw: Option<String> = connection
+        .query_row(
+            "SELECT snapshot_json FROM run_routes WHERE run_id=?1",
+            params![run_id.0],
+            |row| row.get(0),
+        )
+        .optional()?;
+    raw.map(|value| {
+        serde_json::from_str(&value)
+            .map_err(|error| RuntimeError::Protocol(format!("route snapshot 无效: {error}")))
+    })
+    .transpose()
+}
+pub(crate) fn provider_attempts_in(
+    connection: &Connection,
+    run_id: &RunId,
+) -> Result<Vec<ProviderAttempt>, RuntimeError> {
+    let mut stmt = connection.prepare("SELECT attempt_id,round,candidate_index,status,data_json FROM provider_attempts WHERE run_id=?1 ORDER BY rowid")?;
+    let rows = stmt.query_map(params![run_id.0], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, u32>(1)?,
+            row.get::<_, u32>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+        ))
+    })?;
+    rows.map(|row| {
+        let (id, round, candidate, status, raw) = row?;
+        decode_provider_attempt(run_id, &id, round, candidate, &status, &raw)
+    })
+    .collect()
+}
+
+fn decode_provider_attempt(
+    run_id: &RunId,
+    id: &str,
+    round: u32,
+    candidate: u32,
+    status: &str,
+    raw: &str,
+) -> Result<ProviderAttempt, RuntimeError> {
+    agent_core::decode_provider_attempt_fact(run_id, id, round, candidate, status, raw)
+        .map_err(Into::into)
+}
+fn provider_attempt_in(db: &Connection, id: &str) -> Result<Option<ProviderAttempt>, RuntimeError> {
+    let bytes: Option<u64> = db
+        .query_row(
+            "SELECT length(CAST(data_json AS BLOB)) FROM provider_attempts WHERE attempt_id=?1",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if bytes.is_some_and(|n| n > 1024 * 1024) {
+        return Err(CoordinationError::InvalidRequest.into());
+    }
+    let row:Option<(String,u32,u32,String,String)>=db.query_row("SELECT run_id,round,candidate_index,status,data_json FROM provider_attempts WHERE attempt_id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
+    row.map(|(run, round, candidate, status, raw)| {
+        decode_provider_attempt(&RunId(run), id, round, candidate, &status, &raw)
+    })
+    .transpose()
 }
 
 #[cfg(test)]
@@ -2308,7 +3109,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 20);
+        assert_eq!(version, 27);
         connection
             .execute("INSERT INTO schema_migrations VALUES (99, 99)", [])
             .unwrap();
@@ -2644,3 +3445,72 @@ mod tests {
 
 mod plans;
 mod readback;
+mod run_facts;
+
+#[cfg(test)]
+mod execution_timer_contract {
+    use super::*;
+    use agent_core::SessionKey;
+    #[tokio::test(flavor = "current_thread")]
+    async fn execution_terminal_does_not_block_current_thread_when_connection_is_owned() {
+        let root = std::env::temp_dir().join(format!("ma-terminal-timer-{}", std::process::id()));
+        let store = RunStore::open(&root.join("runtime.sqlite3")).unwrap();
+        let Admission::New(run) = store
+            .admit(SessionKey("timer".into()), RequestId::Number(1), "input")
+            .unwrap()
+        else {
+            panic!("new")
+        };
+        store.try_start_queued(&run.run_id).unwrap();
+        let envelope = agent_core::EnterpriseOwnerEnvelope {
+            scope: agent_core::TenantContext::local(),
+            owner: store.run_owner(&run.run_id).unwrap(),
+        };
+        let commit = agent_core::TurnCommit {
+            owner: envelope.owner.clone(),
+            status: RunStatus::Completed,
+            content: Some("output".into()),
+            error: None,
+        };
+        let locked_store = store.clone();
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+        let thread = std::thread::spawn(move || {
+            let _guard = locked_store.lock_connection().unwrap();
+            ready_tx.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(700));
+        });
+        ready_rx.recv().unwrap();
+        let began = std::time::Instant::now();
+        let (timer, result) = tokio::join!(
+            async {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                began.elapsed()
+            },
+            async {
+                agent_storage_ports::RunExecutionRepository::commit_run_turn(
+                    &store, &envelope, &commit,
+                )
+                .await
+            }
+        );
+        thread.join().unwrap();
+        result.unwrap();
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            timer < std::time::Duration::from_millis(150),
+            "真实Connection锁不能阻塞current_thread timer，耗时 {timer:?}"
+        );
+    }
+}
+
+mod execution;
+
+mod attempts;
+
+mod tools;
+
+mod run_compacts;
+mod run_discoveries;
+mod run_requests;
+mod run_turns;

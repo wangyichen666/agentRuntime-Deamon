@@ -1,0 +1,78 @@
+   Compiling agent-daemon-protocol v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-protocol)
+   Compiling agent-policy v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/policy)
+   Compiling agent-daemon-client v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-client)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-entry-support v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/entry-support)
+   Compiling agent-cli v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/cli)
+   Compiling agent-gateway v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/gateway)
+   Compiling agent-acp v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/acp)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+error[E0308]: mismatched types
+  --> tests/enterprise_identity_contract.rs:15:96
+   |
+15 | ..._identity::local_context(&identity, RequestId::Number(n)).unwrap(), expected_policy: identity.policy.version, action: Action::SessionP...
+   |                                        ----------------- ^ expected `u64`, found `i64`
+   |                                        |
+   |                                        arguments to this enum variant are incorrect
+   |
+note: tuple variant defined here
+  --> /Users/pilot/Documents/myproject/agent-rust/crates/core/src/wire.rs:6:5
+   |
+6  |     Number(u64),
+   |     ^^^^^^
+help: you can convert an `i64` to a `u64` and panic if the converted value doesn't fit
+   |
+15 |     AuthorizationRequest { context: agent_identity::local_context(&identity, RequestId::Number(n.try_into().unwrap())).unwrap(), expected_policy: identity.policy.version, action: Action::SessionPrompt, attributes: AuthorizationAttributes { workspace: ".".into(), entry_channel: HookChannel::DaemonRpc, tool_effect: None, timestamp_ms: 100, network: NetworkBoundary::None } }
+   |                                                                                                 ++++++++++++++++++++
+
+error[E0308]: mismatched types
+  --> tests/enterprise_identity_contract.rs:17:183
+   |
+17 | ...xpected_lifetime: None, request_id: RequestId::Number(n), input: "运行".into(), mode: AdmissionMode::Queue } }
+   |                                        ----------------- ^ expected `u64`, found `i64`
+   |                                        |
+   |                                        arguments to this enum variant are incorrect
+   |
+note: tuple variant defined here
+  --> /Users/pilot/Documents/myproject/agent-rust/crates/core/src/wire.rs:6:5
+   |
+6  |     Number(u64),
+   |     ^^^^^^
+help: you can convert an `i64` to a `u64` and panic if the converted value doesn't fit
+   |
+17 | fn admission(n: i64) -> RunAdmission { RunAdmission { plan_execution: None, session_key: SessionKey("same-public-key".into()), expected_lifetime: None, request_id: RequestId::Number(n.try_into().unwrap()), input: "运行".into(), mode: AdmissionMode::Queue } }
+   |                                                                                                                                                                                        ++++++++++++++++++++
+
+error[E0782]: expected a type, found a trait
+  --> tests/enterprise_identity_contract.rs:18:137
+   |
+18 | ...nerEnvelope { scope: TenantContext::local(), owner: agent_storage::TurnRepository::exact_owner(store,run).unwrap() } }
+   |                                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: you can add the `dyn` keyword if you want a trait object
+   |
+18 | fn envelope(store: &RunStore, run: &RunId) -> EnterpriseOwnerEnvelope { EnterpriseOwnerEnvelope { scope: TenantContext::local(), owner: <dyn agent_storage::TurnRepository>::exact_owner(store,run).unwrap() } }
+   |                                                                                                                                         ++++                              +
+
+error[E0624]: method `finish_owned` is private
+    --> tests/enterprise_identity_contract.rs:57:28
+     |
+57   |       assert!(matches!(store.finish_owned(&owner.owner,RunStatus::Completed,Some("迟到"),None),Err(RuntimeError::Authorization(AuthorizationErr...
+     |                              ^^^^^^^^^^^^ private method
+     |
+    ::: /Users/pilot/Documents/myproject/agent-rust/crates/storage/src/lib.rs:1108:5
+     |
+1108 | /     pub(crate) fn finish_owned(
+1109 | |         &self,
+1110 | |         owner: &agent_core::ExactOwner,
+1111 | |         status: RunStatus,
+1112 | |         content: Option<&str>,
+1113 | |         error: Option<(i64, &str)>,
+1114 | |     ) -> Result<RunRecord, RuntimeError> {
+     | |________________________________________- private method defined here
+
+Some errors have detailed explanations: E0308, E0624, E0782.
+For more information about an error, try `rustc --explain E0308`.
+error: could not compile `my-agent` (test "enterprise_identity_contract") due to 4 previous errors
+warning: build failed, waiting for other jobs to finish...

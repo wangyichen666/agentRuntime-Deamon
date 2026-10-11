@@ -1,0 +1,10 @@
+    Blocking waiting for file lock on build directory
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 14.03s
+     Running unittests src/lib.rs (target/debug/deps/agent_storage-fbe85d492dbd06bf)
+
+running 1 test
+test artifact_publication::tests::second_database_connection_gc_cannot_cross_reference_publication_transaction ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 73 filtered out; finished in 0.09s
+

@@ -1,0 +1,47 @@
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 32.95s
+     Running tests/run_context_contract.rs (target/debug/deps/run_context_contract-ee6fecea6942ef36)
+
+running 14 tests
+test compact_admission_denies_foreign_session_without_run_or_event ... ok
+test late_compact_owner_cannot_reject_or_finalize_new_generation ... ok
+test compact_begin_denies_foreign_session_before_idempotent_success ... ok
+
+thread 'dedicated_compact_run_denies_another_operation_without_any_terminal' panicked at tests/run_context_contract.rs:670:10:
+called `Result::unwrap()` on an `Err` value: SqlInputError { error: Error { code: Unknown, extended_code: 1 }, msg: "no such column: kind", sql: "SELECT count(*) FROM events WHERE run_id=?1 AND kind='terminal'", offset: 48 }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test dedicated_compact_run_denies_another_operation_without_any_terminal ... FAILED
+test complete_legal_linkage_moved_to_chat_run_is_corrupt ... ok
+test compact_settle_denies_foreign_session_without_terminal ... ok
+test native_compact_all_scope_and_owner_dimensions_are_fenced_before_reads_or_writes ... ok
+test compact_fact_denies_foreign_session_before_payload_read ... ok
+
+thread 'native_chat_compaction_source_cas_rejects_later_projection_without_terminal_or_clock' panicked at tests/run_context_contract.rs:787:10:
+called `Result::unwrap()` on an `Err` value: SqlInputError { error: Error { code: Unknown, extended_code: 1 }, msg: "no such column: kind", sql: "SELECT count(*) FROM events WHERE run_id=?1 AND kind='terminal'", offset: 48 }
+test native_chat_compaction_source_cas_rejects_later_projection_without_terminal_or_clock ... FAILED
+
+thread 'native_complete_compact_install_has_one_terminal_preserves_canonical_and_reads_without_lease_reacquisition' panicked at tests/run_context_contract.rs:454:10:
+called `Result::unwrap()` on an `Err` value: SqlInputError { error: Error { code: Unknown, extended_code: 1 }, msg: "no such column: kind", sql: "SELECT count(*) FROM events WHERE run_id=?1 AND kind='terminal'", offset: 48 }
+test native_complete_compact_install_has_one_terminal_preserves_canonical_and_reads_without_lease_reacquisition ... FAILED
+test native_terminal_insert_fault_rolls_back_compaction_and_run_together ... ok
+test canonical_readback_rejects_many_valid_empty_batches_before_allocation ... ok
+test native_compact_revocation_expiry_and_saved_source_budget_are_zero_new_epoch_or_clock ... ok
+
+thread 'native_compact_real_sqlite_lock_wait_keeps_timer_live_and_cancelled_awaiter_keeps_real_commit' panicked at tests/run_context_contract.rs:639:10:
+called `Result::unwrap()` on an `Err` value: SqlInputError { error: Error { code: Unknown, extended_code: 1 }, msg: "no such column: kind", sql: "SELECT count(*) FROM events WHERE run_id=?1 AND kind='terminal'", offset: 48 }
+test native_compact_real_sqlite_lock_wait_keeps_timer_live_and_cancelled_awaiter_keeps_real_commit ... FAILED
+
+failures:
+
+failures:
+    dedicated_compact_run_denies_another_operation_without_any_terminal
+    native_chat_compaction_source_cas_rejects_later_projection_without_terminal_or_clock
+    native_compact_real_sqlite_lock_wait_keeps_timer_live_and_cancelled_awaiter_keeps_real_commit
+    native_complete_compact_install_has_one_terminal_preserves_canonical_and_reads_without_lease_reacquisition
+
+test result: FAILED. 10 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.93s
+
+error: test failed, to rerun pass `--test run_context_contract`

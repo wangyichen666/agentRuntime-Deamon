@@ -12,8 +12,298 @@ use tokio::process::{Child, Command};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
+
+#[tokio::test]
+async fn paged_run_events_subscription_keeps_last_delivered_cursor_and_never_replays_provider() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let workspace = temp_workspace();
+        let runtime = PathBuf::from(format!(
+            "/tmp/ma-event-resync-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let store =
+            agent_storage::RunStore::open(&workspace.join(".my-agent/runtime.sqlite3")).unwrap();
+        let key = agent_core::SessionKey("session-resync-events.jsonl".into());
+        let agent_core::Admission::New(run) = store
+            .admit(
+                key.clone(),
+                agent_core::RequestId::String("resync-events".into()),
+                "已持久化",
+            )
+            .unwrap()
+        else {
+            panic!("新准入")
+        };
+        for index in 0..4 {
+            store
+                .append_event(
+                    &run.run_id,
+                    "large_delta",
+                    &json!({"index":index,"delta":"x".repeat(350*1024)}),
+                )
+                .unwrap();
+        }
+        let finished = store
+            .finish(
+                &run.run_id,
+                agent_core::RunStatus::Completed,
+                Some("已完成，无需执行"),
+                None,
+            )
+            .unwrap();
+        drop(store);
+        let (url, provider, calls) = mock_ollama().await;
+        let (mut process, socket) = daemon(&workspace, &runtime, &url).await;
+        let db = rusqlite::Connection::open(workspace.join(".my-agent/runtime.sqlite3")).unwrap();
+        let clock: u64 = db
+            .query_row("SELECT revision FROM snapshot_clock", [], |r| r.get(0))
+            .unwrap();
+        let resync = rpc(
+            &socket,
+            "subscribe",
+            "agent.subscribe",
+            json!({"request_id":"resync-events","session_id":key,"after_seq":0}),
+        )
+        .await;
+        assert_eq!(
+            resync["error"]["data"]["kind"], "resync_required",
+            "{resync}"
+        );
+        assert_eq!(
+            resync["error"]["data"]["cursor"], 0,
+            "未发送任何事件，不能把 cursor 提前跳到未交付页末"
+        );
+        let mut cursor = 0u64;
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            let page = rpc(
+                &socket,
+                "page",
+                "run.events",
+                json!({"run_id":run.run_id,"after_seq":cursor,"limit":1000}),
+            )
+            .await;
+            assert!(page.get("error").is_none(), "{page}");
+            assert!(serde_json::to_vec(&page).unwrap().len() <= 1024 * 1024);
+            for event in page["result"]["events"].as_array().unwrap() {
+                let seq = event["seq"].as_u64().unwrap();
+                assert!(seq > cursor);
+                assert!(seen.insert(seq));
+            }
+            let next = page["result"]["cursor"].as_u64().unwrap();
+            assert!(next > cursor);
+            cursor = next;
+            if page["result"]["has_more"] == false {
+                break;
+            }
+        }
+        assert_eq!(seen.len() as u64, finished.last_seq.0);
+        let terminal = rpc(
+            &socket,
+            "resume",
+            "agent.subscribe",
+            json!({"request_id":"resync-events","session_id":key,"after_seq":cursor}),
+        )
+        .await;
+        assert_eq!(
+            terminal["result"]["content"], "已完成，无需执行",
+            "{terminal}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            db.query_row::<u64, _, _>("SELECT revision FROM snapshot_clock", [], |r| r.get(0))
+                .unwrap(),
+            clock
+        );
+        assert!(
+            rpc(&socket, "stop", "daemon.stop", json!({}))
+                .await
+                .get("error")
+                .is_none()
+        );
+        assert!(process.wait().await.unwrap().success());
+        provider.abort();
+        drop(db);
+        std::fs::remove_dir_all(workspace).unwrap();
+        std::fs::remove_dir_all(runtime).unwrap();
+    })
+    .await
+    .expect("有界事件订阅与游标恢复合同超时");
+}
+
+#[tokio::test]
+async fn bounded_scoped_run_events_share_six_entries_and_restart_without_replay() {
+    tokio::time::timeout(Duration::from_secs(60),async {
+        let workspace=temp_workspace();
+        let runtime=PathBuf::from(format!("/tmp/ma-events-{}-{}",std::process::id(),NEXT.fetch_add(1,Ordering::Relaxed)));
+        let done="{\"message\":{\"role\":\"assistant\",\"content\":\"完成\"},\"done\":true}\n";
+        let (url,provider,captures)=mock_response_sequence_ollama(vec![done],done).await;
+        let (mut process,socket)=daemon(&workspace,&runtime,&url).await;
+        let key="session-events.jsonl";
+        assert!(rpc(&socket,"create","sessions.create",json!({"session_id":key})).await.get("error").is_none());
+        let (run,response)=chat(&socket,"event-run",key,"执行一次",true).await;
+        assert!(response.unwrap().get("error").is_none());
+        let mut v1=AcpStdioContract::start(&workspace,&runtime,&url,false).await;
+        assert!(v1.query(1,"initialize",json!({"protocolVersion":1})).await.0.get("error").is_none());
+        let own=v1.query(2,"session/new",json!({"cwd":workspace,"mcpServers":[]})).await.0["result"]["sessionId"].clone();
+        let mut v2=AcpStdioContract::start(&workspace,&runtime,&url,true).await;
+        assert!(v2.initialize(vec!["readback"]).await.get("error").is_none());
+        let diagnostic=workspace.join("events-web.stderr");
+        let mut web=Command::new(env!("CARGO_BIN_EXE_my-agent")).arg("--workspace").arg(&workspace).arg("serve").arg("--bind").arg("127.0.0.1:0").env("MY_AGENT_RUNTIME_DIR",&runtime).env("MY_AGENT_CONFIG",workspace.join("empty-config.json")).env("API_TYPE","ollama").env("MODEL_NAME","mock").env("OPENAI_BASE_URL",&url).stdout(std::fs::File::create(diagnostic.with_extension("endpoint")).unwrap()).stderr(std::fs::File::create(&diagnostic).unwrap()).kill_on_drop(true).spawn().unwrap();
+        let (port,mut ws)=ready_web_socket(&mut web,&diagnostic).await;
+        ws.send(WsMessage::Text(json!({"type":"connect","workspace":workspace}).to_string().into())).await.unwrap();ws.next().await.unwrap().unwrap();
+        let params=json!({"run_id":run,"after_seq":0,"limit":2});
+        let expected=rpc(&socket,"events","run.events",params.clone()).await;
+        assert!(expected.get("error").is_none(),"{expected}");assert_eq!(expected["result"]["events"].as_array().unwrap().len(),2);assert_eq!(expected["result"]["has_more"],true);
+        assert_eq!(v2.query(2,"_my_agent/run/events",params.clone()).await.0["result"],expected["result"]);
+        let (answer,updates)=v1.query(3,"session/prompt",json!({"sessionId":own,"prompt":[{"type":"text","text":format!("/events {run} 0 2")}]})).await;
+        assert!(answer.get("error").is_none(),"{answer}");assert!(updates.iter().any(|frame|frame["params"]["update"]["content"]["text"].as_str().is_some_and(|text|serde_json::from_str::<Value>(text).is_ok_and(|value|value==expected["result"]))));
+        let http=reqwest::Client::new();
+        assert_eq!(http.post(format!("http://127.0.0.1:{port}/api/runs/events")).json(&json!({"workspace":workspace,"params":params})).send().await.unwrap().json::<Value>().await.unwrap(),expected["result"]);
+        let cli=Command::new(env!("CARGO_BIN_EXE_my-agent")).arg("--workspace").arg(&workspace).arg("run-events").arg(&run).arg("--limit").arg("2").env("MY_AGENT_RUNTIME_DIR",&runtime).env("MY_AGENT_CONFIG",workspace.join("empty-config.json")).output().await.unwrap();
+        assert!(cli.status.success(),"{}",String::from_utf8_lossy(&cli.stderr));assert_eq!(serde_json::from_slice::<Value>(&cli.stdout).unwrap(),expected["result"]);
+        ws.send(WsMessage::Text(json!({"jsonrpc":"2.0","id":"events-ws","method":"run.events","params":params}).to_string().into())).await.unwrap();
+        let projected=loop{let frame:Value=serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();if frame["id"]=="events-ws"{break frame;}};assert_eq!(projected["result"],expected["result"]);
+        let forged=http.post(format!("http://127.0.0.1:{port}/api/runs/events")).json(&json!({"workspace":workspace,"params":{"run_id":run,"tenant_id":"foreign"}})).send().await.unwrap();assert_eq!(forged.status(),422);
+        assert_eq!(v2.query(4,"_my_agent/run/events",json!({"run_id":run,"tenant_id":"foreign"})).await.0["error"]["code"],-32602);
+        let db=rusqlite::Connection::open(workspace.join(".my-agent/runtime.sqlite3")).unwrap();
+        db.execute_batch("INSERT INTO organizations VALUES('foreign-org');INSERT INTO tenants VALUES('foreign-tenant','foreign-org');INSERT INTO projects VALUES('foreign-project','foreign-tenant');INSERT INTO agents VALUES('foreign-agent','foreign-tenant','foreign-project');").unwrap();
+        db.execute("UPDATE session_scopes SET tenant_id='foreign-tenant',project_id='foreign-project',agent_uid='foreign-agent' WHERE session_id=?1",[key]).unwrap();
+        let clock:u64=db.query_row("SELECT revision FROM snapshot_clock",[],|r|r.get(0)).unwrap();
+        let denied=rpc(&socket,"denied","run.events",params.clone()).await;
+        assert_eq!(denied["error"]["code"],-32041);assert_eq!(denied["error"]["data"]["kind"],"forbidden");
+        for (index,target) in [run.as_str(),"absent"].into_iter().enumerate() {
+            let denied_params=json!({"run_id":target,"after_seq":0,"limit":2});
+            assert_eq!(rpc(&socket,"denied","run.events",denied_params.clone()).await["error"],denied["error"]);
+            assert_eq!(v2.query(10+index as u64,"_my_agent/run/events",denied_params.clone()).await.0["error"],denied["error"]);
+            assert_eq!(v1.query(20+index as u64,"session/prompt",json!({"sessionId":own,"prompt":[{"type":"text","text":format!("/events {target} 0 2")}]})).await.0["error"],denied["error"]);
+            let projected=http.post(format!("http://127.0.0.1:{port}/api/runs/events")).json(&json!({"workspace":workspace,"params":denied_params})).send().await.unwrap();assert_eq!(projected.status(),403);assert_eq!(projected.json::<Value>().await.unwrap()["error"],denied["error"]);
+            ws.send(WsMessage::Text(json!({"jsonrpc":"2.0","id":"denied-ws","method":"run.events","params":denied_params}).to_string().into())).await.unwrap();
+            let projected=loop{let frame:Value=serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();if frame["id"]=="denied-ws"{break frame;}};assert_eq!(projected["error"],denied["error"]);
+            let cli=Command::new(env!("CARGO_BIN_EXE_my-agent")).arg("--workspace").arg(&workspace).arg("run-events").arg(target).env("MY_AGENT_RUNTIME_DIR",&runtime).env("MY_AGENT_CONFIG",workspace.join("empty-config.json")).output().await.unwrap();assert!(!cli.status.success());assert!(String::from_utf8_lossy(&cli.stderr).contains("无权访问此域"));
+        }
+        assert_eq!(db.query_row::<u64,_,_>("SELECT revision FROM snapshot_clock",[],|r|r.get(0)).unwrap(),clock);assert_eq!(captures.lock().await.len(),1);
+        v1.stop().await;v2.stop().await;web.kill().await.unwrap();web.wait().await.unwrap();
+        process.kill().await.unwrap();process.wait().await.unwrap();let (mut restarted,socket)=daemon(&workspace,&runtime,&url).await;
+        assert_eq!(rpc(&socket,"restart-denied","run.events",params.clone()).await["error"],denied["error"]);
+        db.execute("UPDATE session_scopes SET tenant_id='local-tenant',project_id='local-project',agent_uid='local-agent' WHERE session_id=?1",[key]).unwrap();
+        assert_eq!(rpc(&socket,"restart-read","run.events",params).await["result"],expected["result"]);assert_eq!(captures.lock().await.len(),1);
+        let stop=rpc(&socket,"stop","daemon.stop",json!({})).await;assert!(stop.get("error").is_none());assert!(restarted.wait().await.unwrap().success());provider.abort();drop(db);std::fs::remove_dir_all(workspace).unwrap();std::fs::remove_dir_all(runtime).unwrap();
+    }).await.expect("事件有界读回六入口和重启合同超时");
+}
+
+#[tokio::test]
+async fn central_async_authorization_storage_fault_preserves_typed_error_and_zero_admission() {
+    tokio::time::timeout(Duration::from_secs(60),async {
+        let workspace=temp_workspace();
+        let runtime=PathBuf::from(format!("/tmp/ma-identity-fault-{}-{}",std::process::id(),NEXT.fetch_add(1,Ordering::Relaxed)));
+        let (url,provider,calls)=mock_ollama().await;
+        let (mut process,socket)=daemon(&workspace,&runtime,&url).await;
+        let mut v1=AcpStdioContract::start(&workspace,&runtime,&url,false).await;
+        assert!(v1.query(1,"initialize",json!({"protocolVersion":1})).await.0.get("error").is_none());
+        let own=v1.query(2,"session/new",json!({"cwd":workspace,"mcpServers":[]})).await.0["result"]["sessionId"].clone();
+        let mut v2=AcpStdioContract::start(&workspace,&runtime,&url,true).await;
+        assert!(v2.initialize(vec!["readback"]).await.get("error").is_none());
+        let diagnostic=workspace.join("identity-fault-web.stderr");
+        let mut web=Command::new(env!("CARGO_BIN_EXE_my-agent")).arg("--workspace").arg(&workspace).arg("serve").arg("--bind").arg("127.0.0.1:0").env("MY_AGENT_RUNTIME_DIR",&runtime).env("MY_AGENT_CONFIG",workspace.join("empty-config.json")).env("API_TYPE","ollama").env("MODEL_NAME","mock").env("OPENAI_BASE_URL",&url).stdout(std::fs::File::create(diagnostic.with_extension("endpoint")).unwrap()).stderr(std::fs::File::create(&diagnostic).unwrap()).kill_on_drop(true).spawn().unwrap();
+        let (port,mut ws)=ready_web_socket(&mut web,&diagnostic).await;
+        ws.send(WsMessage::Text(json!({"type":"connect","workspace":workspace}).to_string().into())).await.unwrap();ws.next().await.unwrap().unwrap();
+        let db=rusqlite::Connection::open(workspace.join(".my-agent/runtime.sqlite3")).unwrap();
+        let clock:u64=db.query_row("SELECT revision FROM snapshot_clock",[],|r|r.get(0)).unwrap();
+        db.execute_batch("PRAGMA foreign_keys=OFF; DROP TABLE principals;").unwrap();
+        let denied=rpc(&socket,"fault","identity.readback",json!({})).await;
+        assert_eq!(denied["error"]["code"],-32053);assert_eq!(denied["error"]["data"]["kind"],"storage_unavailable");assert_eq!(denied["error"]["data"]["safe_auto_retry"],false);
+        assert_eq!(denied["error"]["message"],"存储服务不可用");
+        for method in ["chat.send","sessions.create","run.authorization"] {
+            let params=match method {"chat.send"=>json!({"session_id":own,"message":"不能准入"}),"sessions.create"=>json!({"session_id":"session-refused.jsonl"}),_=>json!({"owner":{"session_key":"none","session_lifetime_id":"none","run_id":"none","run_generation":1,"turn_id":"none"}})};
+            assert_eq!(rpc(&socket,"refused",method,params).await["error"],denied["error"]);
+        }
+        assert_eq!(v2.query(2,"_my_agent/identity/read",json!({})).await.0["error"],denied["error"]);
+        assert_eq!(v1.query(3,"session/prompt",json!({"sessionId":own,"prompt":[{"type":"text","text":"/identity"}]})).await.0["error"],denied["error"]);
+        ws.send(WsMessage::Text(json!({"jsonrpc":"2.0","id":"fault-ws","method":"identity.readback","params":{}}).to_string().into())).await.unwrap();
+        let projected=loop{let frame:Value=serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();if frame["id"]=="fault-ws"{break frame;}};
+        assert_eq!(projected["error"],denied["error"]);
+        let projected=reqwest::Client::new().get(format!("http://127.0.0.1:{port}/api/identity")).query(&[("workspace",workspace.to_str().unwrap())]).send().await.unwrap();
+        assert_eq!(projected.status(),503);assert_eq!(projected.json::<Value>().await.unwrap()["error"],denied["error"]);
+        let cli=Command::new(env!("CARGO_BIN_EXE_my-agent")).arg("--workspace").arg(&workspace).arg("identity").env("MY_AGENT_RUNTIME_DIR",&runtime).env("MY_AGENT_CONFIG",workspace.join("empty-config.json")).env("API_TYPE","ollama").env("MODEL_NAME","mock").env("OPENAI_BASE_URL",&url).output().await.unwrap();
+        assert!(!cli.status.success());let text=String::from_utf8_lossy(&cli.stderr);assert!(text.contains("存储服务不可用"),"{text}");assert!(!text.contains("principals"),"不能返回SQL内部错误：{text}");
+        assert_eq!(db.query_row::<u64,_,_>("SELECT count(*) FROM runs",[],|r|r.get(0)).unwrap(),0);
+        assert_eq!(db.query_row::<u64,_,_>("SELECT count(*) FROM session_heads WHERE session_id='session-refused.jsonl'",[],|r|r.get(0)).unwrap(),0);
+        assert_eq!(db.query_row::<u64,_,_>("SELECT revision FROM snapshot_clock",[],|r|r.get(0)).unwrap(),clock);
+        assert_eq!(calls.load(Ordering::SeqCst),0);
+        v1.stop().await;v2.stop().await;web.kill().await.unwrap();web.wait().await.unwrap();process.kill().await.unwrap();process.wait().await.unwrap();provider.abort();drop(db);std::fs::remove_dir_all(workspace).unwrap();std::fs::remove_dir_all(runtime).unwrap();
+    }).await.expect("中心异步授权数据库故障六入口与零准入合同超时");
+}
+
+#[tokio::test]
+async fn scoped_async_session_readback_is_consistent_across_six_entries_and_restart() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let workspace = temp_workspace();
+        let runtime = PathBuf::from(format!("/tmp/ma-scoped-read-{}-{}",std::process::id(),NEXT.fetch_add(1,Ordering::Relaxed)));
+        let (url, provider, calls) = mock_ollama().await;
+        let (mut process, socket) = daemon(&workspace, &runtime, &url).await;
+        let key = "session-scoped-read.jsonl";
+        let created = rpc(&socket,"create","sessions.create",json!({"session_id":key})).await;
+        assert!(created.get("error").is_none(),"{created}");
+        let life = created["result"]["session_lifetime_id"].clone();
+        let mut v1 = AcpStdioContract::start(&workspace,&runtime,&url,false).await;
+        assert!(v1.query(1,"initialize",json!({"protocolVersion":1})).await.0.get("error").is_none());
+        let own = v1.query(2,"session/new",json!({"cwd":workspace,"mcpServers":[]})).await.0["result"]["sessionId"].clone();
+        let mut v2 = AcpStdioContract::start(&workspace,&runtime,&url,true).await;
+        assert!(v2.initialize(vec!["readback"]).await.get("error").is_none());
+        let diagnostic = workspace.join("scoped-read-web.stderr");
+        let mut web = Command::new(env!("CARGO_BIN_EXE_my-agent")).arg("--workspace").arg(&workspace).arg("serve").arg("--bind").arg("127.0.0.1:0").env("MY_AGENT_RUNTIME_DIR",&runtime).env("MY_AGENT_CONFIG",workspace.join("empty-config.json")).env("API_TYPE","ollama").env("MODEL_NAME","mock").env("OPENAI_BASE_URL",&url).stdout(std::fs::File::create(diagnostic.with_extension("endpoint")).unwrap()).stderr(std::fs::File::create(&diagnostic).unwrap()).kill_on_drop(true).spawn().unwrap();
+        let (port,mut ws) = ready_web_socket(&mut web,&diagnostic).await;
+        ws.send(WsMessage::Text(json!({"type":"connect","workspace":workspace}).to_string().into())).await.unwrap();
+        ws.next().await.unwrap().unwrap();
+        let http = reqwest::Client::new();
+        let expected = rpc(&socket,"read","sessions.read",json!({"session_id":key})).await;
+        let native = agent_daemon_protocol::decode_session_readback(expected["result"].clone()).unwrap();
+        assert_eq!(v2.query(2,"_my_agent/session/read",acp_control(key,&life,json!({}))).await.0["result"],serde_json::to_value(native).unwrap());
+        let read = http.post(format!("http://127.0.0.1:{port}/api/sessions/read")).json(&json!({"workspace":workspace,"params":{"session_id":key}})).send().await.unwrap();
+        assert!(read.status().is_success()); assert_eq!(read.json::<Value>().await.unwrap(),expected["result"]);
+        let forged = http.post(format!("http://127.0.0.1:{port}/api/sessions/read")).json(&json!({"workspace":workspace,"params":{"session_id":key,"tenant_id":"foreign"}})).send().await.unwrap();
+        assert_eq!(forged.status(),422);
+        let db = rusqlite::Connection::open(workspace.join(".my-agent/runtime.sqlite3")).unwrap();
+        db.execute_batch("INSERT INTO organizations VALUES('foreign-org');INSERT INTO tenants VALUES('foreign-tenant','foreign-org');INSERT INTO projects VALUES('foreign-project','foreign-tenant');INSERT INTO agents VALUES('foreign-agent','foreign-tenant','foreign-project');").unwrap();
+        db.execute("UPDATE session_scopes SET tenant_id='foreign-tenant',project_id='foreign-project',agent_uid='foreign-agent' WHERE session_id=?1",[key]).unwrap();
+        let clock: u64 = db.query_row("SELECT revision FROM snapshot_clock",[],|r|r.get(0)).unwrap();
+        let denied = rpc(&socket,"denied","sessions.read",json!({"session_id":key})).await;
+        assert_eq!(denied["error"]["code"],-32041); assert_eq!(denied["error"]["data"]["kind"],"forbidden");
+        for (index,target) in [key,"absent.jsonl"].into_iter().enumerate() {
+            assert_eq!(rpc(&socket,"denied","sessions.read",json!({"session_id":target})).await["error"],denied["error"]);
+            let projected = v2.query(10+index as u64,"_my_agent/session/read",acp_control(target,&life,json!({}))).await.0;
+            assert_eq!(projected["error"],denied["error"],"ACP v2：{projected}");
+            ws.send(WsMessage::Text(json!({"jsonrpc":"2.0","id":"denied-ws","method":"sessions.read","params":{"session_id":target}}).to_string().into())).await.unwrap();
+            let projected = loop { let frame:Value=serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap(); if frame["id"]=="denied-ws" {break frame;} };
+            assert_eq!(projected["error"],denied["error"]);
+            let projected = http.post(format!("http://127.0.0.1:{port}/api/sessions/read")).json(&json!({"workspace":workspace,"params":{"session_id":target}})).send().await.unwrap();
+            assert_eq!(projected.status(),403); assert_eq!(projected.json::<Value>().await.unwrap()["error"],denied["error"]);
+            let projected = v1.query(20+index as u64,"session/prompt",json!({"sessionId":own,"prompt":[{"type":"text","text":format!("/snapshot {target}")}]})).await.0;
+            assert_eq!(projected["error"],denied["error"],"ACP v1：{projected}");
+            let output = Command::new(env!("CARGO_BIN_EXE_my-agent")).arg("--workspace").arg(&workspace).arg("session-read").arg(target).env("MY_AGENT_RUNTIME_DIR",&runtime).env("MY_AGENT_CONFIG",workspace.join("empty-config.json")).env("API_TYPE","ollama").env("MODEL_NAME","mock").env("OPENAI_BASE_URL",&url).output().await.unwrap();
+            assert!(!output.status.success());
+            let text = format!("{}{}",String::from_utf8_lossy(&output.stdout),String::from_utf8_lossy(&output.stderr));
+            assert!(text.contains("无权访问此域"),"CLI：{text}");
+        }
+        let listed = rpc(&socket,"list","sessions.list",json!({})).await;
+        assert!(listed["result"]["sessions"].as_array().unwrap().iter().all(|s|s["id"]!=key));
+        assert_eq!(db.query_row::<u64,_,_>("SELECT revision FROM snapshot_clock",[],|r|r.get(0)).unwrap(),clock);
+        assert_eq!(calls.load(Ordering::SeqCst),0,"读回拒绝不能启动 Provider");
+        v1.stop().await; v2.stop().await; web.kill().await.unwrap();web.wait().await.unwrap();
+        let stopped = rpc(&socket,"stop","daemon.stop",json!({})).await;assert!(stopped.get("error").is_none());assert!(process.wait().await.unwrap().success());
+        let (mut restarted,socket) = daemon(&workspace,&runtime,&url).await;
+        assert_eq!(rpc(&socket,"restart","sessions.read",json!({"session_id":key})).await["error"],denied["error"]);
+        assert_eq!(calls.load(Ordering::SeqCst),0);
+        restarted.kill().await.unwrap();restarted.wait().await.unwrap();provider.abort();drop(db);std::fs::remove_dir_all(workspace).unwrap();std::fs::remove_dir_all(runtime).unwrap();
+    }).await.expect("显式 scope 异步读回六入口与重启合同超时");
+}
 struct AcpStdioContract {
     process: Child,
+    diagnostic: Arc<std::sync::Mutex<Vec<u8>>>,
+    stderr_drain: tokio::task::JoinHandle<()>,
+    last_method: String,
     input: tokio::process::ChildStdin,
     output: tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
 }
@@ -37,8 +327,21 @@ impl AcpStdioContract {
             .spawn()
             .unwrap();
         let mut stderr = process.stderr.take().unwrap();
-        tokio::spawn(async move {
-            let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
+        let diagnostic = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let retained = diagnostic.clone();
+        let stderr_drain = tokio::spawn(async move {
+            let mut chunk = [0_u8; 4096];
+            loop {
+                let Ok(bytes) = stderr.read(&mut chunk).await else {
+                    break;
+                };
+                if bytes == 0 {
+                    break;
+                }
+                let mut saved = retained.lock().unwrap();
+                let length = bytes.min((64 * 1024_usize).saturating_sub(saved.len()));
+                saved.extend_from_slice(&chunk[..length]);
+            }
         });
         let input = process.stdin.take().unwrap();
         let output = BufReader::new(process.stdout.take().unwrap()).lines();
@@ -46,24 +349,32 @@ impl AcpStdioContract {
             process,
             input,
             output,
+            diagnostic,
+            stderr_drain,
+            last_method: String::new(),
         }
     }
     async fn send(&mut self, frame: Value) {
+        self.last_method = frame["method"].as_str().unwrap_or("unknown").to_owned();
         self.input
             .write_all(format!("{frame}\n").as_bytes())
             .await
             .unwrap();
     }
     async fn next(&mut self) -> Value {
-        serde_json::from_str(
-            &self
-                .output
-                .next_line()
-                .await
-                .unwrap()
-                .expect("ACP 连接提前终止"),
-        )
-        .unwrap()
+        match self.output.next_line().await.unwrap() {
+            Some(line) => serde_json::from_str(&line).unwrap(),
+            None => {
+                let status = self.process.wait().await.unwrap();
+                let _ = (&mut self.stderr_drain).await;
+                let diagnostic = self.diagnostic.lock().unwrap();
+                panic!(
+                    "ACP连接提前终止：method={}，status={status}，stderr={}",
+                    self.last_method,
+                    String::from_utf8_lossy(&diagnostic)
+                );
+            }
+        }
     }
     async fn query(&mut self, id: u64, method: &str, params: Value) -> (Value, Vec<Value>) {
         self.send(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
@@ -186,11 +497,11 @@ async fn acp_v2_long_prompt_and_native_compact_allow_exact_control_without_priva
         while count.load(Ordering::SeqCst)<6 {tokio::task::yield_now().await;}
         // 标准 close 必须取消 exact 工作、等待真实结算，并保留同一 lifetime/transcript。
         let closed=acp.query(9,"session/close",acp_control(key,life,json!({"operation_id":"close-active"}))).await.0;assert!(closed.get("error").is_none(),"{closed}");
-        let after=rpc(&socket,"after-close","sessions.read",json!({"session_id":key})).await;assert_eq!(after["result"]["session_lifetime_id"],*life);assert_eq!(after["result"]["transcript_revision"],before_close_revision);assert_eq!(rpc(&socket,"chat-cancelled","run.read",json!({"run_id":chat_owner["run_id"]})).await["result"]["status"],"cancelled");
+        let after=rpc(&socket,"after-close","sessions.read",json!({"session_id":key})).await;assert_eq!(after["result"]["session_lifetime_id"],*life);assert_eq!(after["result"]["transcript_revision"],before_close_revision);let unknown=rpc(&socket,"chat-cancelled","run.read",json!({"run_id":chat_owner["run_id"]})).await;assert_eq!(unknown["result"]["status"],"unknown_after_restart","Provider已接收的prompt不能因close伪造确定取消");assert_eq!(unknown["result"]["error_code"],-32002);let attempts=rpc(&socket,"chat-attempts","run.provider_attempts",json!({"run_id":chat_owner["run_id"]})).await;assert_eq!(attempts["result"]["attempts"].as_array().unwrap().len(),1);assert_eq!(attempts["result"]["attempts"][0]["status"],"outcome_unknown");
         assert!(acp.query(10,"session/close",acp_control(key,life,json!({"operation_id":"close-active"}))).await.0.get("error").is_none());
         assert!(acp.query(11,"session/close",acp_control(key,&json!("foreign-life"),json!({"operation_id":"close-active"}))).await.0.get("error").is_some());
         let count_before=count.load(Ordering::SeqCst);acp.stop().await;process.kill().await.unwrap();process.wait().await.unwrap();let(mut restarted,socket)=daemon(&workspace,&runtime,&url).await;
-        assert_eq!(rpc(&socket,"restart","run.read",json!({"run_id":native})).await["result"]["compact"],cancelled_compact);assert_eq!(count.load(Ordering::SeqCst),count_before);
+        assert_eq!(rpc(&socket,"restart","run.read",json!({"run_id":native})).await["result"]["compact"],cancelled_compact);assert_eq!(count.load(Ordering::SeqCst),count_before);assert_eq!(rpc(&socket,"chat-restart","run.read",json!({"run_id":chat_owner["run_id"]})).await["result"]["status"],"unknown_after_restart");
         restarted.kill().await.unwrap();restarted.wait().await.unwrap();provider.abort();std::fs::remove_dir_all(workspace).unwrap();std::fs::remove_dir_all(runtime).unwrap();
     }).await.expect("ACP 长 prompt/compact/control 合同超时");
 }
@@ -296,7 +607,11 @@ async fn provider_context_readback_rebuilds_captured_request_without_replay_or_w
         let restored=rpc(&socket,"restored","context.readback",params).await;assert_eq!(restored["result"],read["result"]);assert_eq!(captures.lock().await.len(),1);
         let changed=rpc(&socket,"permission","permissions.set",json!({"mode":"full"})).await;assert!(changed.get("error").is_none());
         let denied=rpc(&socket,"denied","context.readback",json!({"session_id":key,"expected_lifetime":created["result"]["session_lifetime_id"],"run_id":run,"local_diagnostics":true})).await;assert!(denied.get("error").is_some(),"权限改变禁止完整诊断");
-        let db=rusqlite::Connection::open(workspace.join(".my-agent/runtime.sqlite3")).unwrap();db.execute("UPDATE provider_requests SET capture_json='{}' WHERE run_id=?1",[&run]).unwrap();
+        let db=rusqlite::Connection::open(workspace.join(".my-agent/runtime.sqlite3")).unwrap();
+        db.execute("UPDATE provider_requests SET candidate_index=candidate_index+1 WHERE run_id=?1",[&run]).unwrap();
+        let wrongrow=rpc(&socket,"wrong-row","context.readback",json!({"session_id":key,"expected_lifetime":created["result"]["session_lifetime_id"],"run_id":run})).await;assert_eq!(wrongrow["error"]["code"],-32054);assert_eq!(wrongrow["error"]["data"]["kind"],"corrupt");assert_eq!(captures.lock().await.len(),1);
+        db.execute("UPDATE provider_requests SET candidate_index=candidate_index-1 WHERE run_id=?1",[&run]).unwrap();
+        db.execute("UPDATE provider_requests SET capture_json='{}' WHERE run_id=?1",[&run]).unwrap();
         let corrupt=rpc(&socket,"corrupt","context.readback",json!({"session_id":key,"expected_lifetime":created["result"]["session_lifetime_id"],"run_id":run})).await;assert!(corrupt.get("error").is_some());assert_eq!(captures.lock().await.len(),1);
         restarted.kill().await.unwrap();restarted.wait().await.unwrap();provider.abort();std::fs::remove_dir_all(workspace).unwrap();std::fs::remove_dir_all(runtime).unwrap();
     }).await.expect("Provider 请求只读合同超时");
@@ -736,6 +1051,8 @@ async fn stop_continuation_has_a_new_native_run_and_exact_cancel_preserves_paren
         let child=response["result"]["continuation_run_id"].as_str().expect("新 continuation native run").to_owned();assert_ne!(child,parent);
         let read=rpc(&socket,"child","run.read",json!({"run_id":child})).await;
         assert_eq!(read["result"]["continuation_parent_run_id"],parent);
+        let db=rusqlite::Connection::open(workspace.join(".my-agent/runtime.sqlite3")).unwrap();let inherited:String=db.query_row("SELECT snapshot_json FROM run_authorizations WHERE run_id=?1",[&child],|r|r.get(0)).unwrap();let inherited:Value=serde_json::from_str(&inherited).unwrap();assert_eq!(inherited["context"]["principal"]["subject_id"],"local-subject");assert_eq!(inherited["envelope"]["owner"]["run_id"],child);
+
         assert!(matches!(read["result"]["status"].as_str(),Some("queued"|"running")));
         let cancel=rpc(&socket,"cancel","agent.cancel",json!({"session_id":"session-stop.jsonl","run_id":child})).await;
         assert_eq!(cancel["result"]["cancelled"],true,"{cancel}");
@@ -986,6 +1303,7 @@ async fn versioned_plan_readback_execute_discard_and_restart_share_daemon_facts(
         process.kill().await.unwrap();process.wait().await.unwrap();
         let store=agent_storage::RunStore::open(&workspace.join(".my-agent/runtime.sqlite3")).unwrap();
         let prepared=store.admit_run(&agent_core::RunAdmission {
+            workflow_node: None,
             session_key:agent_core::SessionKey("session-plan.jsonl".into()),
             expected_lifetime:Some(serde_json::from_value(lifetime.clone()).unwrap()),
             request_id:agent_core::RequestId::String("execute".into()),input:native_input,
@@ -1037,9 +1355,11 @@ async fn versioned_plan_readback_execute_discard_and_restart_share_daemon_facts(
 
 async fn ready_web_socket(
     child: &mut Child,
-    port: u16,
     diagnostics: &Path,
-) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+) -> (
+    u16,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+) {
     let ready = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let Some(status) = child.try_wait().unwrap() {
@@ -1048,10 +1368,20 @@ async fn ready_web_socket(
                     std::fs::read_to_string(diagnostics).unwrap()
                 );
             }
-            if let Ok((socket, _)) =
-                tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/ws")).await
-            {
-                return socket;
+            let endpoint =
+                std::fs::read_to_string(diagnostics.with_extension("endpoint")).unwrap_or_default();
+            let address = endpoint.lines().find_map(|line| {
+                line.strip_prefix("my-agent 本地 API 正在监听 http://")
+                    .and_then(|value| value.parse::<std::net::SocketAddr>().ok())
+            });
+            if let Some(address) = address {
+                assert!(address.ip().is_loopback());
+                assert_ne!(address.port(), 0);
+                if let Ok((socket, _)) =
+                    tokio_tungstenite::connect_async(format!("ws://{address}/ws")).await
+                {
+                    return (address.port(), socket);
+                }
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -1293,6 +1623,16 @@ async fn mock_child_outside_read_ollama(
 
 async fn daemon(workspace: &Path, runtime_dir: &Path, url: &str) -> (Child, PathBuf) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_my-agent"));
+    if workspace.join("enable-object-artifacts").exists() {
+        command.env("AGENT_ARTIFACT_BACKEND", "s3");
+    } else {
+        command.env_remove("AGENT_ARTIFACT_BACKEND");
+    }
+    if workspace.join("enable-writer-leases").exists() {
+        command.env("AGENT_SESSION_WRITER", "1");
+    } else {
+        command.env_remove("AGENT_SESSION_WRITER");
+    }
     let hook_config = workspace.join(".my-agent/hooks.json");
     if hook_config.exists() {
         command.env("MY_AGENT_HOOKS_CONFIG", hook_config);
@@ -1329,7 +1669,10 @@ async fn daemon(workspace: &Path, runtime_dir: &Path, url: &str) -> (Child, Path
         if let Ok(entries) = std::fs::read_dir(runtime_dir) {
             for entry in entries.flatten() {
                 let socket = entry.path().join("daemon.sock");
-                if socket.exists() && UnixStream::connect(&socket).await.is_ok() {
+                if socket.exists()
+                    && entry.path().join("ready.json").exists()
+                    && UnixStream::connect(&socket).await.is_ok()
+                {
                     return (child, socket);
                 }
             }
@@ -1851,22 +2194,19 @@ async fn entry_views_with_decision(
     acp.kill().await.unwrap();
     acp.wait().await.unwrap();
 
-    let port_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = port_listener.local_addr().unwrap().port();
-    drop(port_listener);
     let web_diagnostics = workspace.join("contract-web.stderr");
     let mut web = Command::new(env!("CARGO_BIN_EXE_my-agent"))
         .arg("--workspace")
         .arg(workspace)
         .arg("serve")
         .arg("--bind")
-        .arg(format!("127.0.0.1:{port}"))
+        .arg("127.0.0.1:0")
         .env("MY_AGENT_RUNTIME_DIR", runtime_dir)
         .env("MY_AGENT_CONFIG", workspace.join("empty-config.json"))
         .env("API_TYPE", "ollama")
         .env("MODEL_NAME", "mock")
         .env("OPENAI_BASE_URL", url)
-        .stdout(std::process::Stdio::null())
+        .stdout(std::fs::File::create(web_diagnostics.with_extension("endpoint")).unwrap())
         .stderr(
             std::fs::OpenOptions::new()
                 .create(true)
@@ -1877,7 +2217,7 @@ async fn entry_views_with_decision(
         .kill_on_drop(true)
         .spawn()
         .unwrap();
-    let mut socket = ready_web_socket(&mut web, port, &web_diagnostics).await;
+    let (port, mut socket) = ready_web_socket(&mut web, &web_diagnostics).await;
     socket
         .send(WsMessage::Text(
             json!({"type":"connect","workspace":workspace})
@@ -2257,17 +2597,15 @@ async fn daemon_queue_is_durable_and_exact_cancel_does_not_hit_running_run() {
         let active = rpc(&socket, "active", "run.read", json!({"run_id":running})).await;
         assert_eq!(active["result"]["status"], "running");
         assert_eq!(provider_requests.load(Ordering::SeqCst), 2);
-        let port_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = port_listener.local_addr().unwrap().port();
-        drop(port_listener);
+
         let web_diagnostics = workspace.join("contract-web.stderr");
     let mut web = Command::new(env!("CARGO_BIN_EXE_my-agent"))
-            .arg("--workspace").arg(&workspace).arg("serve").arg("--bind").arg(format!("127.0.0.1:{port}"))
+            .arg("--workspace").arg(&workspace).arg("serve").arg("--bind").arg("127.0.0.1:0")
             .env("MY_AGENT_RUNTIME_DIR", &runtime_dir)
             .env("MY_AGENT_CONFIG", workspace.join("empty-config.json"))
             .env("API_TYPE", "ollama").env("MODEL_NAME", "mock").env("OPENAI_BASE_URL", &url)
-            .stdout(std::process::Stdio::null()).stderr(std::fs::OpenOptions::new().create(true).append(true).open(&web_diagnostics).unwrap()).kill_on_drop(true).spawn().unwrap();
-        let mut web_socket = ready_web_socket(&mut web, port, &web_diagnostics).await;
+            .stdout(std::fs::File::create(web_diagnostics.with_extension("endpoint")).unwrap()).stderr(std::fs::OpenOptions::new().create(true).append(true).open(&web_diagnostics).unwrap()).kill_on_drop(true).spawn().unwrap();
+        let (_, mut web_socket) = ready_web_socket(&mut web, &web_diagnostics).await;
         web_socket.send(WsMessage::Text(json!({"type":"connect","workspace":workspace}).to_string().into())).await.unwrap();
         let _ = web_socket.next().await.unwrap().unwrap();
         web_socket.send(WsMessage::Text(json!({"jsonrpc":"2.0","id":"web-survivor","method":"chat.send",
@@ -2328,6 +2666,10 @@ async fn durable_subagent_spawn_wait_restart_and_scoped_cancel() {
             "parent_run_id":parent,"child_run_ids":[child],"timeout_ms":5000})).await;
         assert_eq!(completed["result"]["children"][0]["status"], "completed", "{completed}");
         assert_eq!(completed["result"]["children"][0]["content"], "子任务完成");
+        let db=rusqlite::Connection::open(workspace.join(".my-agent/runtime.sqlite3")).unwrap();
+        let inherited:String=db.query_row("SELECT snapshot_json FROM run_authorizations WHERE run_id=?1",[&child],|r|r.get(0)).unwrap();
+        let inherited:Value=serde_json::from_str(&inherited).unwrap();assert_eq!(inherited["context"]["principal"]["subject_id"],"local-subject");assert_eq!(inherited["envelope"]["owner"]["run_id"],child);
+
         let child_readback=rpc(&socket,"child-meta","sessions.read",json!({"session_id":child_session})).await;
         let child_hooks=loop {
             let read=rpc(&socket,"child-hooks","hooks.readback",json!({"session_id":child_session,"expected_lifetime":child_readback["result"]["session_lifetime_id"]})).await;
@@ -2392,10 +2734,13 @@ async fn durable_subagent_spawn_wait_restart_and_scoped_cancel() {
         assert_eq!(cancelled["result"]["cancelled"], true, "{cancelled}");
         for _ in 0..100 {
             let status = rpc(&socket, "second-read", "run.read", json!({"run_id":second_id})).await;
-            if status["result"]["status"] == "cancelled" { break; }
+            if status["result"]["status"] == "unknown_after_restart" { break; }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert_eq!(rpc(&socket, "second-final", "run.read", json!({"run_id":second_id})).await["result"]["status"], "cancelled");
+        assert_eq!(rpc(&socket, "second-final", "run.read", json!({"run_id":second_id})).await["result"]["status"], "unknown_after_restart");
+        let attempts=rpc(&socket,"second-attempts","run.provider_attempts",json!({"run_id":second_id})).await;
+        assert_eq!(attempts["result"]["attempts"].as_array().unwrap().len(),1);
+        assert_eq!(attempts["result"]["attempts"][0]["status"],"outcome_unknown");
         assert_eq!(rpc(&socket, "unrelated-read", "run.read", json!({"run_id":unrelated})).await["result"]["status"], "running");
         let late_spawn = rpc(&socket, "late-spawn", "spawn_subagent", json!({
             "parent_session_id":session,"parent_run_id":parent,"spawn_key":"after-cancel",
@@ -2407,7 +2752,7 @@ async fn durable_subagent_spawn_wait_restart_and_scoped_cancel() {
         assert_eq!(listed["result"]["children"][0]["child_run_id"], child);
         assert_eq!(listed["result"]["children"][0]["status"], "completed");
         assert_eq!(listed["result"]["children"][0]["result_state"], "delivered");
-        assert_eq!(rpc(&socket, "second-restarted", "run.read", json!({"run_id":second_id})).await["result"]["status"], "cancelled");
+        assert_eq!(rpc(&socket, "second-restarted", "run.read", json!({"run_id":second_id})).await["result"]["status"], "unknown_after_restart");
         assert_eq!(rpc(&socket, "unrelated-unknown", "run.read", json!({"run_id":unrelated})).await["result"]["status"], "unknown_after_restart");
         assert_eq!(provider_requests.load(Ordering::SeqCst), 4);
         entry_views(&workspace, &runtime_dir, &url, &child, "子任务完成", Some(&parent)).await;
@@ -2856,7 +3201,7 @@ async fn compact_memory_receipts_survive_restart_and_all_three_entries() {
         entry_views_with_decision(&workspace,&runtime_dir,&url,&owner,"子任务完成",None,Some(&format!("/run {compact}"))).await;
         let doctor=rpc(&socket,"doctor","runtime.doctor",json!({})).await;
         assert_eq!(doctor["result"]["storage"]["integrity"],"ok");
-        assert_eq!(doctor["result"]["storage"]["schema_version"],20);
+        assert_eq!(doctor["result"]["storage"]["schema_version"],27);
         rpc(&socket,"clear","sessions.clear",json!({"session_id":key,"operation_id":"clear-context","expected_lifetime":fresh["result"]["session_lifetime_id"]})).await;
         let cleared=rpc(&socket,"clear-read","memory.list",json!({"session_id":key})).await;
         assert_eq!(cleared["result"]["entries"],json!([]));
@@ -2985,4 +3330,770 @@ async fn memory_maintenance_drains_multiple_batches_before_idle_exit() {
     })
     .await
     .expect("维护积压排空合同超时");
+}
+
+#[tokio::test]
+async fn enterprise_identity_is_canonical_and_survives_daemon_restart() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let workspace=temp_workspace();let runtime=PathBuf::from(format!("/tmp/ma-identity-{}-{}",std::process::id(),NEXT.fetch_add(1,Ordering::Relaxed)));
+        let done="{\"message\":{\"role\":\"assistant\",\"content\":\"完成\"},\"done\":true}\n";
+        let (url,provider,captures)=mock_response_sequence_ollama(vec![done],done).await;
+        let (mut process,socket)=daemon(&workspace,&runtime,&url).await;
+        let first=rpc(&socket,"identity","identity.readback",json!({})).await;
+        assert!(first.get("error").is_none(),"身份必须来自 daemon 持久事实：{first}");assert_eq!(first["result"]["scope"]["tenant_id"],"local-tenant");assert_eq!(first["result"]["enterprise_ready"],false);
+        let key="session-identity.jsonl";assert!(rpc(&socket,"create","sessions.create",json!({"session_id":key})).await.get("error").is_none());let (run,response)=chat(&socket,"identity-run",key,"授权运行",true).await;assert!(response.unwrap().get("error").is_none());
+        let db=rusqlite::Connection::open(workspace.join(".my-agent/runtime.sqlite3")).unwrap();
+        let owner:Value=db.query_row("SELECT r.session_id,r.lifetime,r.generation,t.id FROM runs r JOIN turns t ON t.run_id=r.id WHERE r.id=?1",[&run],|r|Ok(json!({"session_key":r.get::<_,String>(0)?,"session_lifetime_id":r.get::<_,String>(1)?,"run_id":run,"run_generation":r.get::<_,u64>(2)?,"turn_id":r.get::<_,String>(3)?}))).unwrap();
+        let frozen=rpc(&socket,"authorization","run.authorization",json!({"owner":owner})).await;assert!(frozen.get("error").is_none(),"{frozen}");assert_eq!(frozen["result"]["snapshot"]["context"]["scope"],first["result"]["scope"]);assert_eq!(frozen["result"]["snapshot"]["policy_digest"],first["result"]["policy_digest"]);
+        let mut v1=AcpStdioContract::start(&workspace,&runtime,&url,false).await;
+        assert!(v1.query(1,"initialize",json!({"protocolVersion":1})).await.0.get("error").is_none());
+        let created=v1.query(2,"session/new",json!({"cwd":workspace,"mcpServers":[]})).await.0;assert!(created.get("error").is_none(),"{created}");
+        let mut v2=AcpStdioContract::start(&workspace,&runtime,&url,true).await;assert!(v2.initialize(vec!["readback"]).await.get("error").is_none());
+
+        let diagnostic=workspace.join("identity-web.stderr");
+        let mut web=Command::new(env!("CARGO_BIN_EXE_my-agent")).arg("--workspace").arg(&workspace).arg("serve").arg("--bind").arg("127.0.0.1:0").env("MY_AGENT_RUNTIME_DIR",&runtime).env("MY_AGENT_CONFIG",workspace.join("empty-config.json")).env("API_TYPE","ollama").env("MODEL_NAME","mock").env("OPENAI_BASE_URL",&url).stdout(std::fs::File::create(diagnostic.with_extension("endpoint")).unwrap()).stderr(std::fs::File::create(&diagnostic).unwrap()).kill_on_drop(true).spawn().unwrap();
+        let (port, mut ws) = ready_web_socket(&mut web, &diagnostic).await;ws.send(WsMessage::Text(json!({"type":"connect","workspace":workspace}).to_string().into())).await.unwrap();assert_eq!(serde_json::from_str::<Value>(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap()["type"],"connected");
+        let clock:u64=db.query_row("SELECT revision FROM snapshot_clock WHERE id=1",[],|r|r.get(0)).unwrap();let events:u64=db.query_row("SELECT count(*) FROM events",[],|r|r.get(0)).unwrap();
+        let cli=Command::new(env!("CARGO_BIN_EXE_my-agent")).arg("--workspace").arg(&workspace).arg("identity").env("MY_AGENT_RUNTIME_DIR",&runtime).env("MY_AGENT_CONFIG",workspace.join("empty-config.json")).output().await.unwrap();assert!(cli.status.success(),"{}",String::from_utf8_lossy(&cli.stderr));assert_eq!(serde_json::from_slice::<Value>(&cli.stdout).unwrap(),first["result"]);
+        let (answer,updates)=v1.query(3,"session/prompt",json!({"sessionId":created["result"]["sessionId"],"prompt":[{"type":"text","text":"/identity"}]})).await;assert!(answer.get("error").is_none(),"{answer}");assert!(updates.iter().any(|frame|frame["params"]["update"]["content"]["text"].as_str().is_some_and(|text|serde_json::from_str::<Value>(text).is_ok_and(|v|v==first["result"]))),"v1 身份与 daemon 一致：{updates:?}");
+        assert_eq!(v2.query(2,"_my_agent/identity/read",json!({})).await.0["result"],first["result"]);
+        ws.send(WsMessage::Text(json!({"jsonrpc":"2.0","id":"identity-ws","method":"identity.readback","params":{}}).to_string().into())).await.unwrap();let projected=loop{let frame:Value=serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();if frame["id"]=="identity-ws"{break frame;}};assert_eq!(projected["result"],first["result"]);
+        let http=reqwest::Client::new();let read:Value=http.get(format!("http://127.0.0.1:{port}/api/identity")).query(&[("workspace",workspace.to_str().unwrap())]).send().await.unwrap().json().await.unwrap();assert_eq!(read,first["result"]);
+        for method in ["identity.readback","chat.send"] { let denied=rpc(&socket,"forged",method,json!({"tenant_id":"another-tenant","message":"无权输入"})).await;assert_eq!(denied["error"]["code"],-32602); }
+        assert_eq!(db.query_row::<u64,_,_>("SELECT revision FROM snapshot_clock WHERE id=1",[],|r|r.get(0)).unwrap(),clock);assert_eq!(db.query_row::<u64,_,_>("SELECT count(*) FROM events",[],|r|r.get(0)).unwrap(),events);assert_eq!(captures.lock().await.len(),1);
+        process.kill().await.unwrap();process.wait().await.unwrap();let (mut restarted,socket)=daemon(&workspace,&runtime,&url).await;
+        assert_eq!(rpc(&socket,"restart","identity.readback",json!({})).await["result"],first["result"]);assert_eq!(rpc(&socket,"restart-auth","run.authorization",json!({"owner":owner})).await["result"],frozen["result"]);assert_eq!(captures.lock().await.len(),1);
+        // 新策略拒绝读请求，三个协议面保留同一个稳定 code/data。
+        let mut policy:agent_core::PolicyDocument=serde_json::from_value(first["result"]["policy"].clone()).unwrap();policy.version="deny-read".to_owned().try_into().unwrap();policy.hard_denies.push(agent_core::Action::AgentRead);
+        db.execute("INSERT INTO identity_policies VALUES('local-tenant','local-project','local-agent','deny-read',?1)",[serde_json::to_string(&policy).unwrap()]).unwrap();db.execute("UPDATE identity_policy_heads SET version='deny-read'",[]).unwrap();
+        let denied=rpc(&socket,"denied","identity.readback",json!({})).await;assert_eq!(denied["error"]["code"],-32041);assert_eq!(denied["error"]["data"]["kind"],"forbidden");
+        // 新建连接保证真实跨重启恢复，不复用已关闭 daemon 的 socket。
+        v2.stop().await;let mut v2=AcpStdioContract::start(&workspace,&runtime,&url,true).await;assert!(v2.initialize(vec!["readback"]).await.get("error").is_none());let acp_denied=v2.query(2,"_my_agent/identity/read",json!({})).await.0;assert_eq!(acp_denied["error"],denied["error"]);
+        web.kill().await.unwrap();web.wait().await.unwrap();
+        let mut web=Command::new(env!("CARGO_BIN_EXE_my-agent")).arg("--workspace").arg(&workspace).arg("serve").arg("--bind").arg("127.0.0.1:0").env("MY_AGENT_RUNTIME_DIR",&runtime).env("MY_AGENT_CONFIG",workspace.join("empty-config.json")).env("API_TYPE","ollama").env("MODEL_NAME","mock").env("OPENAI_BASE_URL",&url).stdout(std::fs::File::create(diagnostic.with_extension("endpoint")).unwrap()).stderr(std::fs::File::create(&diagnostic).unwrap()).kill_on_drop(true).spawn().unwrap();let (port, mut ws) = ready_web_socket(&mut web, &diagnostic).await;
+        ws.send(WsMessage::Text(json!({"type":"connect","workspace":workspace}).to_string().into())).await.unwrap();ws.next().await.unwrap().unwrap();ws.send(WsMessage::Text(json!({"jsonrpc":"2.0","id":"denied-ws","method":"identity.readback","params":{}}).to_string().into())).await.unwrap();let ws_denied=loop{let value:Value=serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();if value["id"]=="denied-ws"{break value;}};assert_eq!(ws_denied["error"],denied["error"]);
+        let denied_http=http.get(format!("http://127.0.0.1:{port}/api/identity")).query(&[("workspace",workspace.to_str().unwrap())]).send().await.unwrap();assert_eq!(denied_http.status(),403);assert_eq!(denied_http.json::<Value>().await.unwrap()["error"],denied["error"]);
+        v1.stop().await;v2.stop().await;web.kill().await.unwrap();web.wait().await.unwrap();restarted.kill().await.unwrap();restarted.wait().await.unwrap();provider.abort();drop(db);std::fs::remove_dir_all(workspace).unwrap();std::fs::remove_dir_all(runtime).unwrap();
+    }).await.expect("企业身份与授权三入口合同超时");
+}
+
+#[tokio::test]
+async fn transactional_outbox_is_durable_before_publication_and_shared_after_restart() {
+    tokio::time::timeout(Duration::from_secs(60),async {
+        let workspace=temp_workspace();let runtime=PathBuf::from(format!("/tmp/ma-outbox-{}-{}",std::process::id(),NEXT.fetch_add(1,Ordering::Relaxed)));
+        let done="{\"message\":{\"role\":\"assistant\",\"content\":\"完成\"},\"done\":true}\n";
+        let (url,provider,captures)=mock_response_sequence_ollama(vec![done],done).await;
+        let (mut process,socket)=daemon(&workspace,&runtime,&url).await;
+        let empty=rpc(&socket,"empty","outbox.readback",json!({"after":0,"limit":10})).await;
+        assert!(empty.get("error").is_none(),"必须存在共享持久outbox读回：{empty}");assert_eq!(empty["result"]["records"],json!([]));
+        let key="session-outbox.jsonl";rpc(&socket,"create","sessions.create",json!({"session_id":key})).await;
+        let (_,response)=chat(&socket,"published-run",key,"敏感正文不会出现在发布元数据",true).await;assert!(response.unwrap().get("error").is_none());
+        // 状态条件等待 publisher 完成；依赖真实收据，不 sleep 猜竞态。
+        let read=loop {
+            let value=rpc(&socket,"drain","outbox.readback",json!({"after":0,"limit":64})).await;
+            let records=value["result"]["records"].as_array().unwrap();
+            if !records.is_empty() && records.iter().all(|r|r["delivered"]==true) {break value["result"].clone();}
+            tokio::task::yield_now().await;
+        };
+        assert!(read["records"].as_array().unwrap().iter().any(|r|r["event"]=="terminal"));
+        assert!(!read.to_string().contains("敏感正文"));assert!(!read.to_string().contains("payload_json"));
+        let db=rusqlite::Connection::open(workspace.join(".my-agent/runtime.sqlite3")).unwrap();
+        let count:u64=db.query_row("SELECT count(*) FROM publication_inbox WHERE consumer='local-journal'",[],|r|r.get(0)).unwrap();assert_eq!(count,read["records"].as_array().unwrap().len() as u64);
+        let first=rpc(&socket,"page1","outbox.readback",json!({"limit":1})).await;assert_eq!(first["result"]["has_more"],true);
+        let last=rpc(&socket,"last","outbox.readback",json!({"after":read["cursor"],"limit":1})).await;assert_eq!(last["result"]["records"],json!([]));assert_eq!(last["result"]["cursor"],read["cursor"]);
+        let mut v1=AcpStdioContract::start(&workspace,&runtime,&url,false).await;assert!(v1.query(1,"initialize",json!({"protocolVersion":1})).await.0.get("error").is_none());
+        let created=v1.query(2,"session/new",json!({"cwd":workspace,"mcpServers":[]})).await.0;
+        let mut v2=AcpStdioContract::start(&workspace,&runtime,&url,true).await;assert!(v2.initialize(vec!["readback"]).await.get("error").is_none());
+        let diagnostic=workspace.join("outbox-web.log");
+        let mut web=Command::new(env!("CARGO_BIN_EXE_my-agent")).arg("--workspace").arg(&workspace).arg("serve").arg("--bind").arg("127.0.0.1:0").env("MY_AGENT_RUNTIME_DIR",&runtime).env("MY_AGENT_CONFIG",workspace.join("empty-config.json")).env("API_TYPE","ollama").env("MODEL_NAME","mock").env("OPENAI_BASE_URL",&url).stdout(std::fs::File::create(diagnostic.with_extension("endpoint")).unwrap()).stderr(std::fs::File::create(&diagnostic).unwrap()).kill_on_drop(true).spawn().unwrap();
+        let (port, mut ws) = ready_web_socket(&mut web, &diagnostic).await;ws.send(WsMessage::Text(json!({"type":"connect","workspace":workspace}).to_string().into())).await.unwrap();ws.next().await.unwrap().unwrap();
+        let clock:u64=db.query_row("SELECT revision FROM snapshot_clock WHERE id=1",[],|r|r.get(0)).unwrap();let events:u64=db.query_row("SELECT count(*) FROM events",[],|r|r.get(0)).unwrap();
+        let cli=Command::new(env!("CARGO_BIN_EXE_my-agent")).arg("--workspace").arg(&workspace).arg("outbox").env("MY_AGENT_RUNTIME_DIR",&runtime).env("MY_AGENT_CONFIG",workspace.join("empty-config.json")).output().await.unwrap();assert!(cli.status.success(),"{}",String::from_utf8_lossy(&cli.stderr));assert_eq!(serde_json::from_slice::<Value>(&cli.stdout).unwrap(),read);
+        let (answer,updates)=v1.query(3,"session/prompt",json!({"sessionId":created["result"]["sessionId"],"prompt":[{"type":"text","text":"/outbox"}]})).await;assert!(answer.get("error").is_none());assert!(updates.iter().any(|frame|frame["params"]["update"]["content"]["text"].as_str().is_some_and(|text|serde_json::from_str::<Value>(text).is_ok_and(|v|v==read))));
+        assert_eq!(v2.query(2,"_my_agent/outbox/read",json!({})).await.0["result"],read);
+        ws.send(WsMessage::Text(json!({"jsonrpc":"2.0","id":"outbox-ws","method":"outbox.readback","params":{}}).to_string().into())).await.unwrap();let projected=loop{let frame:Value=serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();if frame["id"]=="outbox-ws"{break frame;}};assert_eq!(projected["result"],read);
+        let http=reqwest::Client::new();let response:Value=http.get(format!("http://127.0.0.1:{port}/api/outbox")).query(&[("workspace",workspace.to_str().unwrap())]).send().await.unwrap().json().await.unwrap();assert_eq!(response,read);
+        let invalid=rpc(&socket,"invalid","outbox.readback",json!({"limit":0})).await;assert_eq!(invalid["error"]["code"],-32602);assert_eq!(invalid["error"]["data"]["kind"],"invalid_request");
+        let acp_invalid=v2.query(3,"_my_agent/outbox/read",json!({"limit":0})).await.0;assert_eq!(acp_invalid["error"],invalid["error"]);
+        let invalid_http=http.get(format!("http://127.0.0.1:{port}/api/outbox")).query(&[("workspace",workspace.to_str().unwrap()),("limit","0")]).send().await.unwrap();assert_eq!(invalid_http.status(),400);assert_eq!(invalid_http.json::<Value>().await.unwrap()["error"],invalid["error"]);
+        let denied=rpc(&socket,"forged","outbox.readback",json!({"tenant_id":"foreign-tenant"})).await;assert_eq!(denied["error"]["code"],-32602);
+        assert_eq!(db.query_row::<u64,_,_>("SELECT revision FROM snapshot_clock WHERE id=1",[],|r|r.get(0)).unwrap(),clock);assert_eq!(db.query_row::<u64,_,_>("SELECT count(*) FROM events",[],|r|r.get(0)).unwrap(),events);assert_eq!(captures.lock().await.len(),1);
+        v1.stop().await;v2.stop().await;drop(ws);web.kill().await.unwrap();web.wait().await.unwrap();process.kill().await.unwrap();process.wait().await.unwrap();
+        let (mut restarted,socket)=daemon(&workspace,&runtime,&url).await;
+        assert_eq!(rpc(&socket,"restart","outbox.readback",json!({})).await["result"],read);
+        assert_eq!(db.query_row::<u64,_,_>("SELECT count(*) FROM publication_inbox WHERE consumer='local-journal'",[],|r|r.get(0)).unwrap(),count);assert_eq!(captures.lock().await.len(),1);
+        restarted.kill().await.unwrap();restarted.wait().await.unwrap();provider.abort();drop(db);std::fs::remove_dir_all(workspace).unwrap();std::fs::remove_dir_all(runtime).unwrap();
+    }).await.expect("持久 outbox 跨入口/重启合同超时");
+}
+
+#[tokio::test]
+async fn file_artifact_shared_readback_restart_and_link_denial_preserve_native_tool_receipt() {
+    tokio::time::timeout(Duration::from_secs(60),async {
+        let workspace=temp_workspace();let runtime=PathBuf::from(format!("/tmp/ma-file-artifact-{}-{}",std::process::id(),NEXT.fetch_add(1,Ordering::Relaxed)));std::fs::write(workspace.join("artifact-content.txt"),"artifact 的原始内容").unwrap();
+        let tool="{\"message\":{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"function\":{\"name\":\"read_file\",\"arguments\":{\"path\":\"artifact-content.txt\"}}}]},\"done\":false}\n{\"done\":true}\n";
+        let (url,provider,captures)=mock_tool_response_ollama(tool).await;let (mut process,socket)=daemon(&workspace,&runtime,&url).await;let key="session-artifact.jsonl";rpc(&socket,"create","sessions.create",json!({"session_id":key})).await;let (run,response)=chat(&socket,"artifact-run",key,"读取文件",true).await;assert!(response.unwrap().get("error").is_none());
+        let tools=rpc(&socket,"tools","run.tools",json!({"run_id":run})).await;let reference=tools["result"]["receipts"][0]["artifact_ref"].as_str().unwrap().to_owned();assert!(std::path::Path::new(&reference).exists());
+        let params=json!({"session_id":key,"run_id":run,"artifact_ref":reference,"offset":0,"limit":32});let first=rpc(&socket,"artifact","artifacts.read",params.clone()).await;assert!(first.get("error").is_none(),"{first}");
+        let mut v1=AcpStdioContract::start(&workspace,&runtime,&url,false).await;v1.query(1,"initialize",json!({"protocolVersion":1})).await;let created=v1.query(2,"session/new",json!({"cwd":workspace,"mcpServers":[]})).await.0;
+        let mut v2=AcpStdioContract::start(&workspace,&runtime,&url,true).await;assert!(v2.initialize(vec!["readback"]).await.get("error").is_none());
+        let diagnostic=workspace.join("artifact-web.log");let mut web=Command::new(env!("CARGO_BIN_EXE_my-agent")).arg("--workspace").arg(&workspace).arg("serve").arg("--bind").arg("127.0.0.1:0").env("MY_AGENT_RUNTIME_DIR",&runtime).env("MY_AGENT_CONFIG",workspace.join("empty-config.json")).env("API_TYPE","ollama").env("MODEL_NAME","mock").env("OPENAI_BASE_URL",&url).stdout(std::fs::File::create(diagnostic.with_extension("endpoint")).unwrap()).stderr(std::fs::File::create(&diagnostic).unwrap()).kill_on_drop(true).spawn().unwrap();let (port, mut ws) = ready_web_socket(&mut web, &diagnostic).await;ws.send(WsMessage::Text(json!({"type":"connect","workspace":workspace}).to_string().into())).await.unwrap();ws.next().await.unwrap().unwrap();
+        let db=rusqlite::Connection::open(workspace.join(".my-agent/runtime.sqlite3")).unwrap();let before:(u64,u64)=db.query_row("SELECT (SELECT revision FROM snapshot_clock WHERE id=1),(SELECT count(*) FROM events)",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();let calls=captures.lock().await.len();assert_eq!(calls,2);
+        let cli=Command::new(env!("CARGO_BIN_EXE_my-agent")).arg("--workspace").arg(&workspace).arg("artifact").args(["--session",key,"--run",&run,"--reference",&reference,"--limit","32"]).env("MY_AGENT_RUNTIME_DIR",&runtime).env("MY_AGENT_CONFIG",workspace.join("empty-config.json")).output().await.unwrap();assert!(cli.status.success(),"{}",String::from_utf8_lossy(&cli.stderr));assert_eq!(serde_json::from_slice::<Value>(&cli.stdout).unwrap(),first["result"]);
+        let (answer,updates)=v1.query(3,"session/prompt",json!({"sessionId":created["result"]["sessionId"],"prompt":[{"type":"text","text":format!("/artifact {params}")}]})).await;assert!(answer.get("error").is_none(),"{answer}");assert!(updates.iter().any(|frame|frame["params"]["update"]["content"]["text"].as_str().is_some_and(|text|serde_json::from_str::<Value>(text).is_ok_and(|v|v==first["result"]))));assert_eq!(v2.query(2,"_my_agent/artifacts/read",params.clone()).await.0["result"],first["result"]);
+        let http=reqwest::Client::new();let value:Value=http.post(format!("http://127.0.0.1:{port}/api/artifacts/read")).json(&json!({"workspace":workspace,"params":params})).send().await.unwrap().json().await.unwrap();assert_eq!(value,first["result"]);
+        ws.send(WsMessage::Text(json!({"jsonrpc":"2.0","id":"artifact-ws","method":"artifacts.read","params":params}).to_string().into())).await.unwrap();let projected=loop{let frame:Value=serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();if frame["id"]=="artifact-ws"{break frame;}};assert_eq!(projected["result"],first["result"]);
+        // 将已引用对象换成 symlink；正文仍相同也不得跟随读出。
+        let outside=workspace.join("outside-copy.txt");std::fs::copy(&reference,&outside).unwrap();std::fs::remove_file(&reference).unwrap();std::os::unix::fs::symlink(&outside,&reference).unwrap();let denied=rpc(&socket,"symlink","artifacts.read",params.clone()).await;assert_eq!(denied["error"]["code"],-32041);assert_eq!(denied["error"]["data"]["domain"],"artifact");assert!(!denied.to_string().contains(&reference));assert_eq!(v2.query(3,"_my_agent/artifacts/read",params.clone()).await.0["error"],denied["error"]);
+        let denied_http=http.post(format!("http://127.0.0.1:{port}/api/artifacts/read")).json(&json!({"workspace":workspace,"params":params})).send().await.unwrap();assert_eq!(denied_http.status(),403);assert_eq!(denied_http.json::<Value>().await.unwrap()["error"],denied["error"]);
+        std::fs::remove_file(&reference).unwrap();std::fs::copy(&outside,&reference).unwrap();let after:(u64,u64)=db.query_row("SELECT (SELECT revision FROM snapshot_clock WHERE id=1),(SELECT count(*) FROM events)",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();assert_eq!(before,after);assert_eq!(captures.lock().await.len(),calls);assert_eq!(rpc(&socket,"receipts","run.tools",json!({"run_id":run})).await["result"],tools["result"]);
+        v1.stop().await;v2.stop().await;drop(ws);web.kill().await.unwrap();web.wait().await.unwrap();process.kill().await.unwrap();process.wait().await.unwrap();let (mut restarted,socket)=daemon(&workspace,&runtime,&url).await;assert_eq!(rpc(&socket,"restart","artifacts.read",params).await["result"],first["result"]);assert_eq!(captures.lock().await.len(),calls);
+        restarted.kill().await.unwrap();restarted.wait().await.unwrap();provider.abort();drop(db);std::fs::remove_dir_all(workspace).unwrap();std::fs::remove_dir_all(runtime).unwrap();
+    }).await.expect("文件 artifact 六入口/重启/链接拒绝合同超时");
+}
+
+#[tokio::test]
+#[ignore = "需要独立真实 TLS MinIO lane"]
+async fn object_artifacts_use_original_tool_receipt_and_restart_without_provider_replay() {
+    tokio::time::timeout(Duration::from_secs(60),async {
+        let workspace=temp_workspace();std::fs::write(workspace.join("enable-object-artifacts"),"").unwrap();std::fs::write(workspace.join("object.txt"),"真实 S3 对象输出").unwrap();
+        let runtime=PathBuf::from(format!("/tmp/ma-s3-{}-{}",std::process::id(),NEXT.fetch_add(1,Ordering::Relaxed)));
+        let tool="{\"message\":{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"function\":{\"name\":\"read_file\",\"arguments\":{\"path\":\"object.txt\"}}}]},\"done\":false}\n{\"done\":true}\n";
+        let (url,provider,captures)=mock_tool_response_ollama(tool).await;let (mut process,socket)=daemon(&workspace,&runtime,&url).await;
+        let key="session-object-artifact.jsonl";rpc(&socket,"create","sessions.create",json!({"session_id":key})).await;
+        let (run,response)=chat(&socket,"object-run",key,"读取 object.txt",true).await;assert!(response.unwrap().get("error").is_none());
+        let receipts=rpc(&socket,"tools","run.tools",json!({"run_id":run})).await;
+        let reference=receipts["result"]["receipts"].as_array().unwrap().iter().find_map(|r|r["artifact_ref"].as_str()).unwrap().to_owned();
+        assert!(reference.starts_with("artifact:v1:"),"S3 配置必须命中真实对象 backend，不能静默生成 Local 路径：{reference}");
+        let params=json!({"session_id":key,"run_id":run,"artifact_ref":reference,"offset":0,"limit":32});
+        let first=rpc(&socket,"read","artifacts.read",params.clone()).await;assert!(first.get("error").is_none(),"{first}");
+        let mut v1=AcpStdioContract::start(&workspace,&runtime,&url,false).await;v1.query(1,"initialize",json!({"protocolVersion":1})).await;let created=v1.query(2,"session/new",json!({"cwd":workspace,"mcpServers":[]})).await.0;
+        let mut v2=AcpStdioContract::start(&workspace,&runtime,&url,true).await;assert!(v2.initialize(vec!["readback"]).await.get("error").is_none());
+        let diagnostic=workspace.join("artifact-web.log");let mut web=Command::new(env!("CARGO_BIN_EXE_my-agent")).arg("--workspace").arg(&workspace).arg("serve").arg("--bind").arg("127.0.0.1:0").env("MY_AGENT_RUNTIME_DIR",&runtime).env("MY_AGENT_CONFIG",workspace.join("empty-config.json")).env("API_TYPE","ollama").env("MODEL_NAME","mock").env("OPENAI_BASE_URL",&url).stdout(std::fs::File::create(diagnostic.with_extension("endpoint")).unwrap()).stderr(std::fs::File::create(&diagnostic).unwrap()).kill_on_drop(true).spawn().unwrap();let (port, mut ws) = ready_web_socket(&mut web, &diagnostic).await;ws.send(WsMessage::Text(json!({"type":"connect","workspace":workspace}).to_string().into())).await.unwrap();ws.next().await.unwrap().unwrap();
+        let db=rusqlite::Connection::open(workspace.join(".my-agent/runtime.sqlite3")).unwrap();let before:(u64,u64)=db.query_row("SELECT (SELECT revision FROM snapshot_clock WHERE id=1),(SELECT count(*) FROM events)",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();let calls=captures.lock().await.len();assert_eq!(calls,2);
+        let cli=Command::new(env!("CARGO_BIN_EXE_my-agent")).arg("--workspace").arg(&workspace).arg("artifact").args(["--session",key,"--run",&run,"--reference",&reference,"--limit","32"]).env("MY_AGENT_RUNTIME_DIR",&runtime).env("MY_AGENT_CONFIG",workspace.join("empty-config.json")).output().await.unwrap();assert!(cli.status.success(),"{}",String::from_utf8_lossy(&cli.stderr));assert_eq!(serde_json::from_slice::<Value>(&cli.stdout).unwrap(),first["result"]);
+        let (answer,updates)=v1.query(3,"session/prompt",json!({"sessionId":created["result"]["sessionId"],"prompt":[{"type":"text","text":format!("/artifact {params}")}]})).await;assert!(answer.get("error").is_none(),"{answer}");assert!(updates.iter().any(|frame|frame["params"]["update"]["content"]["text"].as_str().is_some_and(|text|serde_json::from_str::<Value>(text).is_ok_and(|v|v==first["result"]))));assert_eq!(v2.query(2,"_my_agent/artifacts/read",params.clone()).await.0["result"],first["result"]);
+        let http=reqwest::Client::new();let value:Value=http.post(format!("http://127.0.0.1:{port}/api/artifacts/read")).json(&json!({"workspace":workspace,"params":params})).send().await.unwrap().json().await.unwrap();assert_eq!(value,first["result"]);
+        ws.send(WsMessage::Text(json!({"jsonrpc":"2.0","id":"artifact-ws","method":"artifacts.read","params":params}).to_string().into())).await.unwrap();let projected=loop{let frame:Value=serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();if frame["id"]=="artifact-ws"{break frame;}};assert_eq!(projected["result"],first["result"]);
+        let after:(u64,u64)=db.query_row("SELECT (SELECT revision FROM snapshot_clock WHERE id=1),(SELECT count(*) FROM events)",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();assert_eq!(before,after);assert_eq!(captures.lock().await.len(),calls);
+        v1.stop().await;v2.stop().await;drop(ws);web.kill().await.unwrap();web.wait().await.unwrap();drop(db);
+        process.kill().await.unwrap();process.wait().await.unwrap();let (mut restarted,socket)=daemon(&workspace,&runtime,&url).await;
+        assert_eq!(rpc(&socket,"again","artifacts.read",params).await["result"],first["result"]);assert_eq!(rpc(&socket,"again-tools","run.tools",json!({"run_id":run})).await["result"],receipts["result"]);assert_eq!(captures.lock().await.len(),calls);
+        restarted.kill().await.unwrap();restarted.wait().await.unwrap();provider.abort();std::fs::remove_dir_all(workspace).unwrap();std::fs::remove_dir_all(runtime).unwrap();
+    }).await.expect("真实 S3 artifact 合同超时");
+}
+
+#[tokio::test]
+async fn second_live_daemon_cannot_recover_the_first_daemons_native_running_session() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let workspace = temp_workspace();
+        std::fs::write(workspace.join("enable-writer-leases"), "").unwrap();
+        let first_runtime = PathBuf::from(format!(
+            "/tmp/ma-writer-first-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let second_runtime = PathBuf::from(format!(
+            "/tmp/ma-writer-second-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let (url, provider, calls) = mock_ollama().await;
+        let (mut first, socket) = daemon(&workspace, &first_runtime, &url).await;
+        let key = "session-writer.jsonl";
+        rpc(
+            &socket,
+            "create",
+            "sessions.create",
+            json!({"session_id":key}),
+        )
+        .await;
+        chat(&socket, "done", key, "完成第一轮", true).await;
+        let (run, _) = chat(&socket, "active", key, "保持运行", false).await;
+        assert_eq!(
+            rpc(&socket, "before", "run.read", json!({"run_id":run})).await["result"]["status"],
+            "running"
+        );
+        // 等真实 mock HTTP 服务收到第二次请求，不能把 run_started 当成网络已开始。
+        while calls.load(Ordering::SeqCst) < 2 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let diagnostic = workspace.join("second-writer.stderr");
+        let mut second = Command::new(env!("CARGO_BIN_EXE_my-agent"))
+            .arg("--workspace")
+            .arg(&workspace)
+            .arg("daemon")
+            .env("AGENT_SESSION_WRITER", "1")
+            .env("MY_AGENT_RUNTIME_DIR", &second_runtime)
+            .env("MY_AGENT_CONFIG", workspace.join("empty-config.json"))
+            .env("API_TYPE", "ollama")
+            .env("MODEL_NAME", "mock")
+            .env("OPENAI_BASE_URL", &url)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::fs::File::create(&diagnostic).unwrap())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        loop {
+            if let Some(status) = second.try_wait().unwrap() {
+                assert!(!status.success());
+                assert!(
+                    std::fs::read_to_string(&diagnostic)
+                        .unwrap()
+                        .contains("租约")
+                );
+                break;
+            }
+            assert_eq!(
+                rpc(&socket, "live", "run.read", json!({"run_id":run})).await["result"]["status"],
+                "running",
+                "第二活 daemon 不能把首个活 owner 当作崩溃恢复"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        first.kill().await.unwrap();
+        first.wait().await.unwrap();
+        // 受控 DB 时钟故障模拟 lease 到期，避免用 sleep 猜测 takeover。
+        let db = rusqlite::Connection::open(workspace.join(".my-agent/runtime.sqlite3")).unwrap();
+        db.execute("UPDATE session_writer_leases SET expires_at_ms=0", [])
+            .unwrap();
+        let (mut restarted, socket) = daemon(&workspace, &first_runtime, &url).await;
+        assert_eq!(
+            rpc(&socket, "recovered", "run.read", json!({"run_id":run})).await["result"]["status"],
+            "unknown_after_restart"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "接管不能重放不确定的 Provider 调用"
+        );
+        let doctor = rpc(&socket, "writer-health", "runtime.doctor", json!({})).await;
+        assert_eq!(doctor["result"]["storage"]["writer"]["max_epoch"], 2);
+        assert_eq!(doctor["result"]["storage"]["writer"]["stale_bound"], 0);
+        restarted.kill().await.unwrap();
+        restarted.wait().await.unwrap();
+        drop(db);
+        provider.abort();
+        std::fs::remove_dir_all(workspace).unwrap();
+        std::fs::remove_dir_all(first_runtime).unwrap();
+        if second_runtime.exists() {
+            std::fs::remove_dir_all(second_runtime).unwrap();
+        }
+    })
+    .await
+    .expect("两个真实 daemon 的 writer 竞争合同超时");
+}
+
+#[tokio::test]
+async fn native_writer_health_six_projections_and_graceful_restart_share_database_facts() {
+    tokio::time::timeout(Duration::from_secs(60),async {
+        let workspace=temp_workspace();std::fs::write(workspace.join("enable-writer-leases"),"").unwrap();
+        let runtime=PathBuf::from(format!("/tmp/ma-writer-views-{}-{}",std::process::id(),NEXT.fetch_add(1,Ordering::Relaxed)));
+        let (url,provider,calls)=mock_ollama().await;
+        let (mut process,socket)=daemon(&workspace,&runtime,&url).await;
+        let mut v1=AcpStdioContract::start(&workspace,&runtime,&url,false).await;
+        v1.query(1,"initialize",json!({"protocolVersion":1})).await;
+        let created=v1.query(2,"session/new",json!({"cwd":workspace,"mcpServers":[]})).await.0;
+        let mut v2=AcpStdioContract::start(&workspace,&runtime,&url,true).await;
+        assert!(v2.initialize(vec!["readback"]).await.get("error").is_none());
+
+        let diagnostic=workspace.join("writer-web.log");
+        let mut web=Command::new(env!("CARGO_BIN_EXE_my-agent")).arg("--workspace").arg(&workspace).arg("serve").arg("--bind").arg("127.0.0.1:0").env("MY_AGENT_RUNTIME_DIR",&runtime).env("MY_AGENT_CONFIG",workspace.join("empty-config.json")).env("API_TYPE","ollama").env("MODEL_NAME","mock").env("OPENAI_BASE_URL",&url).stdout(std::fs::File::create(diagnostic.with_extension("endpoint")).unwrap()).stderr(std::fs::File::create(&diagnostic).unwrap()).kill_on_drop(true).spawn().unwrap();
+        let (port, mut ws) = ready_web_socket(&mut web, &diagnostic).await;
+        ws.send(WsMessage::Text(json!({"type":"connect","workspace":workspace}).to_string().into())).await.unwrap();ws.next().await.unwrap().unwrap();
+        let db=rusqlite::Connection::open(workspace.join(".my-agent/runtime.sqlite3")).unwrap();
+        let before:(u64,u64)=db.query_row("SELECT (SELECT revision FROM snapshot_clock),(SELECT count(*) FROM events)",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+        let first=rpc(&socket,"writer-health","runtime.doctor",json!({})).await;
+        let mut expected=first["result"]["storage"]["writer"].clone();expected.as_object_mut().unwrap().remove("database_time_ms");
+        assert_eq!(expected["enabled"],true);assert_eq!(expected["stale_bound"],0);assert!(expected["held"].as_u64().unwrap()>=1);
+        let compare=|mut actual:Value| {actual.as_object_mut().unwrap().remove("database_time_ms");assert_eq!(actual,expected);};
+        let cli=Command::new(env!("CARGO_BIN_EXE_my-agent")).arg("--workspace").arg(&workspace).arg("doctor").env("MY_AGENT_RUNTIME_DIR",&runtime).env("MY_AGENT_CONFIG",workspace.join("empty-config.json")).output().await.unwrap();
+        assert!(cli.status.success(),"{}",String::from_utf8_lossy(&cli.stderr));compare(serde_json::from_slice::<Value>(&cli.stdout).unwrap()["storage"]["writer"].clone());
+        let (answer,updates)=v1.query(3,"session/prompt",json!({"sessionId":created["result"]["sessionId"],"prompt":[{"type":"text","text":"/doctor"}]})).await;
+        assert!(answer.get("error").is_none());let text=updates.iter().find_map(|f|f["params"]["update"]["content"]["text"].as_str().filter(|t|serde_json::from_str::<Value>(t).is_ok_and(|v|v.get("writer").is_some()))).unwrap();compare(serde_json::from_str::<Value>(text).unwrap()["writer"].clone());
+        let v2read=v2.query(2,"_my_agent/runtime/doctor",json!({})).await.0;assert!(v2read.get("error").is_none(),"{v2read}");compare(v2read["result"]["storage"]["writer"].clone());
+        let http:Value=reqwest::get(format!("http://127.0.0.1:{port}/api/runtime/doctor")).await.unwrap().json().await.unwrap();compare(http["storage"]["writer"].clone());
+        ws.send(WsMessage::Text(json!({"jsonrpc":"2.0","id":"writer-ws","method":"runtime.doctor","params":{}}).to_string().into())).await.unwrap();
+        let projected=loop {let frame:Value=serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();if frame["id"]=="writer-ws" {break frame;}};
+        compare(projected["result"]["storage"]["writer"].clone());
+        assert_eq!(calls.load(Ordering::SeqCst),0);
+        assert_eq!(db.query_row::<(u64,u64),_,_>("SELECT (SELECT revision FROM snapshot_clock),(SELECT count(*) FROM events)",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap(),before);
+        v1.stop().await;v2.stop().await;drop(ws);web.kill().await.unwrap();web.wait().await.unwrap();
+        let stopped=rpc(&socket,"stop","daemon.stop",json!({})).await;assert!(stopped.get("error").is_none(),"{stopped}");assert!(process.wait().await.unwrap().success());
+        let (mut restarted,socket)=daemon(&workspace,&runtime,&url).await;
+        let health=rpc(&socket,"restart","runtime.doctor",json!({})).await;
+        assert_eq!(health["result"]["storage"]["writer"]["max_epoch"],2);
+        assert_eq!(health["result"]["storage"]["writer"]["stale_bound"],0);
+        assert_eq!(calls.load(Ordering::SeqCst),0);
+        restarted.kill().await.unwrap();restarted.wait().await.unwrap();provider.abort();drop(db);
+        std::fs::remove_dir_all(workspace).unwrap();std::fs::remove_dir_all(runtime).unwrap();
+    }).await.expect("writer 诊断六入口与有序退出重启合同超时");
+}
+
+#[tokio::test]
+async fn native_writer_cron_uses_daemons_canonical_repository_and_proof() {
+    tokio::time::timeout(Duration::from_secs(45),async {
+        let workspace=temp_workspace();std::fs::write(workspace.join("enable-writer-leases"),"").unwrap();
+        let runtime=PathBuf::from(format!("/tmp/ma-native-cron-{}-{}",std::process::id(),NEXT.fetch_add(1,Ordering::Relaxed)));
+        let (url,provider,calls)=mock_ollama().await;
+        let (mut process,socket)=daemon(&workspace,&runtime,&url).await;
+        let added=rpc(&socket,"cron-add","slash.execute",json!({"line":"/cron add native-proof interval=86400 验证后台原生writer"})).await;
+        assert!(added["result"]["content"].as_str().unwrap().contains("已添加"),"{added}");
+        let result=rpc(&socket,"cron-now","slash.execute",json!({"line":"/cron run-now native-proof"})).await;
+        assert!(result["result"]["content"].as_str().unwrap().contains("立即运行成功"),"后台执行必须复用 daemon 的原 writer proof：{result}");
+        let db=rusqlite::Connection::open(workspace.join(".my-agent/runtime.sqlite3")).unwrap();
+        let (run,key,owner):(String,String,String)=db.query_row("SELECT r.id,r.session_id,l.owner_id FROM runs r JOIN session_writer_leases l ON l.session_key=r.session_id AND l.lifetime=r.lifetime WHERE r.session_id LIKE 'session-cron-%' AND r.status='completed'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+        assert_eq!(rpc(&socket,"cron-read","run.read",json!({"run_id":run})).await["result"]["status"],"completed");
+        let distinct:u64=db.query_row("SELECT count(DISTINCT owner_id) FROM session_writer_leases",[],|r|r.get(0)).unwrap();assert_eq!(distinct,1,"前台和后台必须共用同一受管实例 proof：{owner}");
+        assert_eq!(calls.load(Ordering::SeqCst),1);
+        let attempts: u64 = db.query_row("SELECT count(*) FROM provider_attempts WHERE run_id=?1", [&run], |r|r.get(0)).unwrap();
+        assert_eq!(attempts,1,"后台必须记录原 Provider attempt，不能只用模型文本结算");
+        let frozen:String=db.query_row("SELECT snapshot_json FROM run_authorizations WHERE run_id=?1",[&run],|r|r.get(0)).unwrap();let frozen:Value=serde_json::from_str(&frozen).unwrap();
+        assert_eq!(frozen["context"]["principal"]["subject_id"],"local-cron-workload");assert_eq!(frozen["context"]["principal"]["kind"],"workload");assert_eq!(frozen["roles"],json!(["developer"]));assert_eq!(frozen["envelope"]["owner"]["run_id"],run);
+
+        let snapshot: String=db.query_row("SELECT snapshot_json FROM run_snapshots WHERE run_id=?1",[&run],|r|r.get(0)).unwrap();
+        assert!(serde_json::from_str::<Value>(&snapshot).unwrap()["route"].is_object(),"后台必须冻结原 Provider route");
+        let snapshot=rpc(&socket,"cron-session","sessions.read",json!({"session_id":key})).await;assert!(snapshot.get("error").is_none(),"{snapshot}");
+        entry_views(&workspace,&runtime,&url,&run,"已完成",None).await;
+        let mut v2=AcpStdioContract::start(&workspace,&runtime,&url,true).await;
+        assert!(v2.initialize(vec!["readback"]).await.get("error").is_none());
+        let canonical=rpc(&socket,"cron-canonical","sessions.read",json!({"session_id":key,"history_mode":"canonical"})).await;
+        let native=agent_daemon_protocol::decode_session_readback(canonical["result"].clone()).unwrap();
+        let life=serde_json::to_value(&native.session_lifetime_id).unwrap();
+        let projected=v2.query(2,"_my_agent/session/read",acp_control(&key,&life,json!({}))).await.0;
+        assert_eq!(projected["result"],serde_json::to_value(native).unwrap());
+        assert_eq!(calls.load(Ordering::SeqCst),1,"六入口读回不能重放后台Provider");
+        v2.stop().await;
+        let stopped=rpc(&socket,"stop","daemon.stop",json!({})).await;assert!(stopped.get("error").is_none());assert!(process.wait().await.unwrap().success());
+        let (mut restarted,socket)=daemon(&workspace,&runtime,&url).await;
+        assert_eq!(rpc(&socket,"restart-cron","run.read",json!({"run_id":run})).await["result"]["status"],"completed");assert_eq!(calls.load(Ordering::SeqCst),1);
+        restarted.kill().await.unwrap();restarted.wait().await.unwrap();provider.abort();drop(db);std::fs::remove_dir_all(workspace).unwrap();std::fs::remove_dir_all(runtime).unwrap();
+    }).await.expect("后台原生 writer 进程合同超时");
+}
+
+#[tokio::test]
+#[ignore = "需要独立真实 TLS MinIO，验证原生后台 writer 和冻结对象 backend"]
+async fn native_writer_cron_s3_preserves_original_receipt_and_never_falls_back_to_file() {
+    tokio::time::timeout(Duration::from_secs(60),async {
+        let workspace=temp_workspace();std::fs::write(workspace.join("enable-writer-leases"),"").unwrap();std::fs::write(workspace.join("enable-object-artifacts"),"").unwrap();
+        std::fs::write(workspace.join("cron-object.txt"),"后台真实 S3 对象输出").unwrap();
+        let runtime=PathBuf::from(format!("/tmp/ma-native-cron-s3-{}-{}",std::process::id(),NEXT.fetch_add(1,Ordering::Relaxed)));
+        let tool="{\"message\":{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"function\":{\"name\":\"read_file\",\"arguments\":{\"path\":\"cron-object.txt\"}}}]},\"done\":false}\n{\"done\":true}\n";
+        let (url,provider,captures)=mock_tool_response_ollama(tool).await;
+        let (mut process,socket)=daemon(&workspace,&runtime,&url).await;
+        let added=rpc(&socket,"cron-add","slash.execute",json!({"line":"/cron add native-object interval=86400 读取cron-object.txt"})).await;assert!(added["result"]["content"].as_str().unwrap().contains("已添加"));
+        let result=rpc(&socket,"cron-now","slash.execute",json!({"line":"/cron run-now native-object"})).await;assert!(result["result"]["content"].as_str().unwrap().contains("立即运行成功"),"{result}");
+        let db=rusqlite::Connection::open(workspace.join(".my-agent/runtime.sqlite3")).unwrap();
+        let (run,key):(String,String)=db.query_row("SELECT id,session_id FROM runs WHERE session_id LIKE 'session-cron-%' AND status='completed'",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+        let tools=rpc(&socket,"cron-receipts","run.tools",json!({"run_id":run})).await;
+        let reference=tools["result"]["receipts"].as_array().unwrap().iter().find_map(|r|r["artifact_ref"].as_str()).unwrap().to_owned();
+        assert!(reference.starts_with("artifact:v1:"),"后台必须命中冻结 S3，不能返回文件路径：{reference}");
+        let params=json!({"session_id":key,"run_id":run,"artifact_ref":reference,"offset":0,"limit":64});
+        let first=rpc(&socket,"cron-read","artifacts.read",params.clone()).await;assert!(first.get("error").is_none(),"{first}");
+        let snapshot:String=db.query_row("SELECT snapshot_json FROM run_snapshots WHERE run_id=?1",[&run],|r|r.get(0)).unwrap();let frozen:Value=serde_json::from_str(&snapshot).unwrap();assert!(frozen["artifact_store_id"].as_str().is_some_and(|s|s.len()==64));
+        assert_eq!(captures.lock().await.len(),2);
+        let stopped=rpc(&socket,"stop","daemon.stop",json!({})).await;assert!(stopped.get("error").is_none());assert!(process.wait().await.unwrap().success());
+        let (mut restarted,socket)=daemon(&workspace,&runtime,&url).await;assert_eq!(rpc(&socket,"restart-cron-object","artifacts.read",params).await["result"],first["result"]);assert_eq!(rpc(&socket,"restart-cron-tools","run.tools",json!({"run_id":run})).await["result"],tools["result"]);assert_eq!(captures.lock().await.len(),2);
+        restarted.kill().await.unwrap();restarted.wait().await.unwrap();provider.abort();drop(db);std::fs::remove_dir_all(workspace).unwrap();std::fs::remove_dir_all(runtime).unwrap();
+    }).await.expect("后台原生 S3 收据与重启合同超时");
+}
+
+#[tokio::test]
+async fn scheduled_native_cron_renews_and_recovers_without_provider_replay() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        for force_kill in [false, true] {
+            let workspace = temp_workspace();
+            std::fs::write(workspace.join("enable-writer-leases"), "").unwrap();
+            let runtime = PathBuf::from(format!("/tmp/ma-scheduled-cron-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+            let (url, provider, calls) = mock_ollama().await;
+            let (mut process, socket) = daemon(&workspace, &runtime, &url).await;
+            let added = rpc(&socket, "add", "slash.execute", json!({"line":"/cron add scheduled-native interval=1 后台续租"})).await;
+            assert!(added["result"]["content"].as_str().unwrap().contains("已添加"));
+            while calls.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            // 停用未来触发；正在执行的 canonical run 不因配置停用而伪造终态。
+            let disabled = rpc(&socket, "disable", "slash.execute", json!({"line":"/cron disable scheduled-native"})).await;
+            assert!(disabled.get("error").is_none());
+            let db = rusqlite::Connection::open(workspace.join(".my-agent/runtime.sqlite3")).unwrap();
+            let (run, owner, epoch, expiry): (String, String, u64, u64) = db.query_row(
+                "SELECT r.id,l.owner_id,l.epoch,l.expires_at_ms FROM runs r JOIN session_writer_leases l ON l.session_key=r.session_id AND l.lifetime=r.lifetime WHERE r.session_id LIKE 'session-cron-%' AND r.status='running'", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
+            loop {
+                let renewed: (String,u64,u64) = db.query_row("SELECT owner_id,epoch,expires_at_ms FROM session_writer_leases WHERE session_key=(SELECT session_id FROM runs WHERE id=?1)", [&run], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+                assert_eq!(renewed.0, owner); assert_eq!(renewed.1, epoch);
+                if renewed.2 > expiry { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(rpc(&socket,"live","run.read",json!({"run_id":run})).await["result"]["status"],"running");
+            if force_kill {
+                process.kill().await.unwrap(); process.wait().await.unwrap();
+                db.execute("UPDATE session_writer_leases SET expires_at_ms=0", []).unwrap();
+            } else {
+                let stopped = tokio::time::timeout(Duration::from_secs(3),rpc(&socket,"stop","daemon.stop",json!({}))).await.expect("daemon.stop 响应超时");
+                assert!(stopped.get("error").is_none());
+                assert!(tokio::time::timeout(Duration::from_secs(12),process.wait()).await.expect("后台 join 后进程退出超时").unwrap().success());
+                let status: String = db.query_row("SELECT status FROM runs WHERE id=?1", [&run], |r|r.get(0)).unwrap();
+                assert_eq!(status,"unknown_after_restart","先收敛后台执行体，再执行原 recovery");
+            }
+            let (mut restarted, socket) = tokio::time::timeout(Duration::from_secs(10),daemon(&workspace,&runtime,&url)).await.expect("后台恢复 daemon 启动超时");
+            assert_eq!(rpc(&socket,"recovered","run.read",json!({"run_id":run})).await["result"]["status"],"unknown_after_restart");
+            assert_eq!(calls.load(Ordering::SeqCst),2,"重启不得重新执行不确定的 Provider 调用");
+            let active: u64 = db.query_row("SELECT count(*) FROM runs WHERE status IN ('running','queued')", [], |r|r.get(0)).unwrap();
+            assert_eq!(active,0);
+            let attempt: String = db.query_row("SELECT status FROM provider_attempts WHERE run_id=?1", [&run], |r|r.get(0)).unwrap();
+            assert_eq!(attempt,"outcome_unknown","中断 Provider 必须保留原 attempt 的未知收据");
+            restarted.kill().await.unwrap(); restarted.wait().await.unwrap(); provider.abort(); drop(db);
+            std::fs::remove_dir_all(workspace).unwrap(); std::fs::remove_dir_all(runtime).unwrap();
+        }
+    }).await.expect("真实定时触发、续租与退出恢复合同超时");
+}
+
+#[tokio::test]
+async fn lifecycle_ports_reject_foreign_and_absent_commands_and_survive_fault_and_restart() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let workspace = temp_workspace();
+        let runtime = PathBuf::from(format!("/tmp/ma-life-port-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+        let (url, provider, calls) = mock_ollama().await;
+        let (mut process, socket) = daemon(&workspace, &runtime, &url).await;
+        let key = "session-life-port.jsonl";
+        let created = rpc(&socket, "create", "sessions.create", json!({"session_id":key,"operation_id":"life-create"})).await;
+        assert!(created.get("error").is_none(), "{created}");
+        let life = created["result"]["session_lifetime_id"].clone();
+        let close_params = json!({"session_id":key,"expected_lifetime":life,"operation_id":"life-close"});
+        let closed = rpc(&socket, "close", "session.close", close_params.clone()).await;
+        assert_eq!(closed["result"]["duplicate"], false, "{closed}");
+        let duplicate = rpc(&socket, "close-again", "session.close", close_params.clone()).await;
+        assert_eq!(duplicate["result"]["duplicate"], true, "{duplicate}");
+        let db = rusqlite::Connection::open(workspace.join(".my-agent/runtime.sqlite3")).unwrap();
+        let facts = || db.query_row::<(u64,u64,u64),_,_>("SELECT (SELECT revision FROM snapshot_clock),(SELECT count(*) FROM lifecycle_receipts),(SELECT count(*) FROM hook_publications)", [], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+        let prior = facts();
+        db.execute_batch("CREATE TRIGGER lifecycle_commit_fault BEFORE INSERT ON lifecycle_receipts BEGIN SELECT RAISE(ABORT,'private lifecycle fixture'); END;").unwrap();
+        let failure = rpc(&socket,"fault","sessions.clear",json!({"session_id":key,"expected_lifetime":life,"operation_id":"life-clear"})).await;
+        assert_eq!(failure["error"]["code"], agent_core::CoordinationError::StorageUnavailable.rpc_code(), "{failure}");
+        assert!(!failure.to_string().contains("private lifecycle"));
+        assert_eq!(facts(), prior);
+        db.execute_batch("DROP TRIGGER lifecycle_commit_fault;").unwrap();
+        db.execute_batch("INSERT INTO organizations VALUES('life-other-org');INSERT INTO tenants VALUES('life-other-tenant','life-other-org');INSERT INTO projects VALUES('life-other-project','life-other-tenant');INSERT INTO agents VALUES('life-other-agent','life-other-tenant','life-other-project');UPDATE session_scopes SET tenant_id='life-other-tenant',project_id='life-other-project',agent_uid='life-other-agent' WHERE session_id='session-life-port.jsonl';").unwrap();
+        for method in ["session.close", "sessions.clear", "sessions.delete", "sessions.fork"] {
+            for resource in [key, "session-absent-life.jsonl"] {
+                let mut params = json!({"session_id":resource,"expected_lifetime":life,"operation_id":format!("denied-{method}-{resource}")});
+                if method == "sessions.fork" {
+                    params["target_session_id"] = json!("session-denied-fork.jsonl");
+                    params["expected_revision"] = json!(0);
+                }
+                let denied = rpc(&socket,"denied",method,params).await;
+                assert_eq!(denied["error"]["code"], agent_core::CoordinationError::Forbidden.rpc_code(), "{method} / {resource}: {denied}");
+            }
+        }
+        assert_eq!(facts(), prior);
+        db.execute_batch("UPDATE session_scopes SET tenant_id='local-tenant',project_id='local-project',agent_uid='local-agent' WHERE session_id='session-life-port.jsonl';").unwrap();
+        let stop = rpc(&socket,"stop","daemon.stop",json!({})).await;
+        assert!(stop.get("error").is_none(), "{stop}");
+        assert!(process.wait().await.unwrap().success());
+        let (mut restarted, socket) = daemon(&workspace,&runtime,&url).await;
+        let replay = rpc(&socket,"close-restart","session.close",close_params).await;
+        assert_eq!(replay["result"]["duplicate"], true, "{replay}");
+        assert_eq!(replay["result"]["metadata"], closed["result"]["metadata"]);
+        assert_eq!(facts(), prior);
+        assert_eq!(calls.load(Ordering::SeqCst),0);
+        restarted.kill().await.unwrap();restarted.wait().await.unwrap();provider.abort();drop(db);
+        std::fs::remove_dir_all(workspace).unwrap();std::fs::remove_dir_all(runtime).unwrap();
+    }).await.expect("生命周期端口真实 daemon 合同超时");
+}
+
+#[tokio::test]
+async fn scoped_run_facts_tools_and_provider_share_six_entries_and_restart_without_replay() {
+    tokio::time::timeout(Duration::from_secs(60),async {
+        let workspace=temp_workspace();std::fs::write(workspace.join("facts.txt"),"六入口工具事实").unwrap();
+        let runtime=PathBuf::from(format!("/tmp/ma-run-facts-{}-{}",std::process::id(),NEXT.fetch_add(1,Ordering::Relaxed)));
+        let tool="{\"message\":{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"function\":{\"name\":\"read_file\",\"arguments\":{\"path\":\"facts.txt\"}}}]},\"done\":false}\n{\"done\":true}\n";
+        let (url,provider,captures)=mock_tool_response_ollama(tool).await;
+        let (mut process,socket)=daemon(&workspace,&runtime,&url).await;let key="session-run-facts.jsonl";
+        assert!(rpc(&socket,"create","sessions.create",json!({"session_id":key})).await.get("error").is_none());
+        let (run,response)=chat(&socket,"run-facts",key,"读取facts.txt",true).await;assert!(response.unwrap().get("error").is_none());
+        let mut v1=AcpStdioContract::start(&workspace,&runtime,&url,false).await;
+        assert!(v1.query(1,"initialize",json!({"protocolVersion":1})).await.0.get("error").is_none());
+        let own=v1.query(2,"session/new",json!({"cwd":workspace,"mcpServers":[]})).await.0["result"]["sessionId"].clone();
+        let mut v2=AcpStdioContract::start(&workspace,&runtime,&url,true).await;assert!(v2.initialize(vec!["readback"]).await.get("error").is_none());
+        let diagnostic=workspace.join("run-facts-web.stderr");
+        let mut web=Command::new(env!("CARGO_BIN_EXE_my-agent")).arg("--workspace").arg(&workspace).arg("serve").arg("--bind").arg("127.0.0.1:0").env("MY_AGENT_RUNTIME_DIR",&runtime).env("MY_AGENT_CONFIG",workspace.join("empty-config.json")).env("API_TYPE","ollama").env("MODEL_NAME","mock").env("OPENAI_BASE_URL",&url).stdout(std::fs::File::create(diagnostic.with_extension("endpoint")).unwrap()).stderr(std::fs::File::create(&diagnostic).unwrap()).kill_on_drop(true).spawn().unwrap();
+        let (port,mut ws)=ready_web_socket(&mut web,&diagnostic).await;ws.send(WsMessage::Text(json!({"type":"connect","workspace":workspace}).to_string().into())).await.unwrap();ws.next().await.unwrap().unwrap();
+        let db=rusqlite::Connection::open(workspace.join(".my-agent/runtime.sqlite3")).unwrap();
+        let clock:u64=db.query_row("SELECT revision FROM snapshot_clock",[],|r|r.get(0)).unwrap();
+        let http=reqwest::Client::new();let params=json!({"run_id":run});let mut expected=Vec::new();
+        let views=[("fact","run.read","read","_my_agent/run/read"),("tools","run.tools","tools","_my_agent/run/tools"),("provider","run.provider_attempts","provider","_my_agent/run/provider")];
+        for (index,(view,method,path,extension)) in views.iter().enumerate() {
+            let read=rpc(&socket,"fact",method,params.clone()).await;assert!(read.get("error").is_none(),"{read}");let value=read["result"].clone();
+            match *view {"fact"=>assert_eq!(value["status"],"completed"),"tools"=>assert!(!value["receipts"].as_array().unwrap().is_empty()),_=>assert_eq!(value["attempts"].as_array().unwrap().len(),2)}
+            let acp=v2.query(3+index as u64,extension,params.clone()).await.0;assert!(acp.get("error").is_none(),"ACP2 error：{}",acp["error"]);assert_eq!(acp["result"],value);
+            let (answer,updates)=v1.query(3+index as u64,"session/prompt",json!({"sessionId":own,"prompt":[{"type":"text","text":format!("/run {run} {view}")}]})).await;assert!(answer.get("error").is_none(),"{answer}");assert!(updates.iter().any(|f|f["params"]["update"]["content"]["text"].as_str().is_some_and(|s|serde_json::from_str::<Value>(s).is_ok_and(|v|v==value))));
+            assert_eq!(http.post(format!("http://127.0.0.1:{port}/api/runs/{path}")).json(&json!({"workspace":workspace,"params":params})).send().await.unwrap().json::<Value>().await.unwrap(),value);
+            let cli=Command::new(env!("CARGO_BIN_EXE_my-agent")).arg("--workspace").arg(&workspace).arg("run-read").arg(&run).arg("--view").arg(view).env("MY_AGENT_RUNTIME_DIR",&runtime).env("MY_AGENT_CONFIG",workspace.join("empty-config.json")).output().await.unwrap();assert!(cli.status.success(),"{}",String::from_utf8_lossy(&cli.stderr));assert_eq!(serde_json::from_slice::<Value>(&cli.stdout).unwrap(),value);
+            ws.send(WsMessage::Text(json!({"jsonrpc":"2.0","id":"facts-ws","method":method,"params":params}).to_string().into())).await.unwrap();let projected=loop{let v:Value=serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();if v["id"]=="facts-ws"{break v;}};assert_eq!(projected["result"],value);
+            assert_eq!(http.post(format!("http://127.0.0.1:{port}/api/runs/{path}")).json(&json!({"workspace":workspace,"params":{"run_id":run,"tenant_id":"foreign"}})).send().await.unwrap().status(),422);
+            assert_eq!(v2.query(6+index as u64,extension,json!({"run_id":run,"tenant_id":"foreign"})).await.0["error"]["code"],-32602);expected.push(value);
+        }
+        db.execute_batch("ALTER TABLE provider_attempts RENAME TO provider_attempts_fixture_fault;").unwrap();
+        let failure=rpc(&socket,"fault","run.provider_attempts",params.clone()).await["error"].clone();
+        assert_eq!(failure["code"],agent_core::CoordinationError::StorageUnavailable.rpc_code());
+        assert_eq!(failure["data"]["kind"],"storage_unavailable");assert!(!failure.to_string().contains("provider_attempts"));
+        assert_eq!(v2.query(10,"_my_agent/run/provider",params.clone()).await.0["error"],failure);
+        assert_eq!(v1.query(10,"session/prompt",json!({"sessionId":own,"prompt":[{"type":"text","text":format!("/run {run} provider")}]})).await.0["error"],failure);
+        let fault=http.post(format!("http://127.0.0.1:{port}/api/runs/provider")).json(&json!({"workspace":workspace,"params":params})).send().await.unwrap();assert_eq!(fault.status(),503);assert_eq!(fault.json::<Value>().await.unwrap()["error"],failure);
+        ws.send(WsMessage::Text(json!({"jsonrpc":"2.0","id":"fault-provider","method":"run.provider_attempts","params":params}).to_string().into())).await.unwrap();let fault=loop{let v:Value=serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();if v["id"]=="fault-provider"{break v;}};assert_eq!(fault["error"],failure);
+        let cli=Command::new(env!("CARGO_BIN_EXE_my-agent")).arg("--workspace").arg(&workspace).arg("run-read").arg(&run).arg("--view").arg("provider").env("MY_AGENT_RUNTIME_DIR",&runtime).env("MY_AGENT_CONFIG",workspace.join("empty-config.json")).output().await.unwrap();assert!(!cli.status.success());assert!(String::from_utf8_lossy(&cli.stderr).contains("存储服务不可用"));
+        db.execute_batch("ALTER TABLE provider_attempts_fixture_fault RENAME TO provider_attempts;").unwrap();
+        let summary=rpc(&socket,"legacy-summary","slash.execute",json!({"line":format!("/run {run}")})).await;
+        assert_eq!(summary["result"]["content"],format!("run_id={run} · session_id={key} · status=completed · seq={} · terminal=完成",expected[0]["last_seq"]));
+        db.execute_batch("INSERT INTO organizations VALUES('facts-other-org');INSERT INTO tenants VALUES('facts-other-tenant','facts-other-org');INSERT INTO projects VALUES('facts-other-project','facts-other-tenant');INSERT INTO agents VALUES('facts-other-agent','facts-other-tenant','facts-other-project');").unwrap();
+        db.execute("UPDATE session_scopes SET tenant_id='facts-other-tenant',project_id='facts-other-project',agent_uid='facts-other-agent' WHERE session_id=?1",[key]).unwrap();
+        for (index,(view,method,path,extension)) in views.iter().enumerate() {
+            let denied=rpc(&socket,"foreign",method,params.clone()).await["error"].clone();assert_eq!(denied["code"],-32041);assert_eq!(denied["data"]["kind"],"forbidden");
+            for (offset,target) in [run.as_str(),"absent"].into_iter().enumerate() {
+                let id=20+(index*2+offset) as u64;let params=json!({"run_id":target});
+                assert_eq!(rpc(&socket,"denied",method,params.clone()).await["error"],denied);
+                assert_eq!(v2.query(id,extension,params.clone()).await.0["error"],denied);
+                assert_eq!(v1.query(id,"session/prompt",json!({"sessionId":own,"prompt":[{"type":"text","text":format!("/run {target} {view}")}]})).await.0["error"],denied);
+                let result=http.post(format!("http://127.0.0.1:{port}/api/runs/{path}")).json(&json!({"workspace":workspace,"params":params})).send().await.unwrap();assert_eq!(result.status(),403);assert_eq!(result.json::<Value>().await.unwrap()["error"],denied);
+                ws.send(WsMessage::Text(json!({"jsonrpc":"2.0","id":"denied-facts","method":method,"params":params}).to_string().into())).await.unwrap();let result=loop{let v:Value=serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();if v["id"]=="denied-facts"{break v;}};assert_eq!(result["error"],denied);
+                let cli=Command::new(env!("CARGO_BIN_EXE_my-agent")).arg("--workspace").arg(&workspace).arg("run-read").arg(target).arg("--view").arg(view).env("MY_AGENT_RUNTIME_DIR",&runtime).env("MY_AGENT_CONFIG",workspace.join("empty-config.json")).output().await.unwrap();assert!(!cli.status.success());assert!(String::from_utf8_lossy(&cli.stderr).contains("无权访问此域"));
+            }
+        }
+        assert_eq!(db.query_row::<u64,_,_>("SELECT revision FROM snapshot_clock",[],|r|r.get(0)).unwrap(),clock);assert_eq!(captures.lock().await.len(),2);
+        v1.stop().await;v2.stop().await;web.kill().await.unwrap();web.wait().await.unwrap();process.kill().await.unwrap();process.wait().await.unwrap();
+        let (mut restarted,socket)=daemon(&workspace,&runtime,&url).await;
+        for (_,method,_,_) in views {assert_eq!(rpc(&socket,"restart-denied",method,params.clone()).await["error"]["code"],-32041);}
+        db.execute("UPDATE session_scopes SET tenant_id='local-tenant',project_id='local-project',agent_uid='local-agent' WHERE session_id=?1",[key]).unwrap();
+        for (index,(_,method,_,_)) in views.iter().enumerate(){assert_eq!(rpc(&socket,"restart-fact",method,params.clone()).await["result"],expected[index]);}
+        assert_eq!(captures.lock().await.len(),2);assert_eq!(db.query_row::<u64,_,_>("SELECT revision FROM snapshot_clock",[],|r|r.get(0)).unwrap(),clock);
+        restarted.kill().await.unwrap();restarted.wait().await.unwrap();provider.abort();drop(db);std::fs::remove_dir_all(workspace).unwrap();std::fs::remove_dir_all(runtime).unwrap();
+    }).await.expect("run事实六入口、scope与重启合同超时");
+}
+
+#[tokio::test]
+async fn foreground_terminal_keeps_admitted_generation_and_restart_never_replays_unknown_provider()
+{
+    tokio::time::timeout(Duration::from_secs(60),async {
+        let workspace=temp_workspace();let runtime=PathBuf::from(format!("/tmp/ma-frozen-terminal-{}-{}",std::process::id(),NEXT.fetch_add(1,Ordering::Relaxed)));
+        let listener=TcpListener::bind("127.0.0.1:0").await.unwrap();let url=format!("http://{}",listener.local_addr().unwrap());
+        let release=Arc::new(tokio::sync::Notify::new());let served=Arc::new(AtomicUsize::new(0));let server_count=served.clone();let server_release=release.clone();
+        let provider=tokio::spawn(async move {loop {let (mut stream,_)=listener.accept().await.unwrap();let served=server_count.clone();let release=server_release.clone();tokio::spawn(async move {
+            let mut request=Vec::new();let mut buffer=[0u8;8192];loop {let n=stream.read(&mut buffer).await.unwrap();if n==0{return;}request.extend_from_slice(&buffer[..n]);if request.windows(4).any(|w|w==b"\r\n\r\n"){break;}}
+            served.fetch_add(1,Ordering::SeqCst);release.notified().await;
+            let body="{\"message\":{\"role\":\"assistant\",\"content\":\"迟到输出\"},\"done\":false}\n{\"done\":true}\n";
+            let _=stream.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/x-ndjson\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",body.len()).as_bytes()).await;
+        });}});
+        let (mut process,socket)=daemon(&workspace,&runtime,&url).await;
+        let session=rpc(&socket,"session","session.new",json!({})).await["result"]["session_id"].as_str().unwrap().to_owned();
+        let stream=UnixStream::connect(&socket).await.unwrap();let (reader,mut writer)=stream.into_split();writer.write_all(format!("{}\n",json!({"jsonrpc":"2.0","id":"frozen-owner","method":"chat.send","params":{"session_id":session,"message":"原冻结请求"}})).as_bytes()).await.unwrap();
+        let mut lines=BufReader::new(reader).lines();
+        while served.load(Ordering::SeqCst)==0 {tokio::time::sleep(Duration::from_millis(10)).await;}
+        let db=rusqlite::Connection::open(workspace.join(".my-agent/runtime.sqlite3")).unwrap();
+        let run:String=db.query_row("SELECT id FROM runs WHERE status='running'",[],|r|r.get(0)).unwrap();let generation:u64=db.query_row("SELECT generation FROM runs WHERE id=?1",[&run],|r|r.get(0)).unwrap();
+        db.execute("UPDATE runs SET generation=generation+1 WHERE id=?1",[&run]).unwrap();release.notify_one();
+        let terminal=loop {let frame:Value=serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();if frame["id"]=="frozen-owner"{break frame;}};
+        assert_eq!(terminal["error"]["data"]["kind"],"stale_owner","迟到原caller必须拒绝，而不是采用later generation: {terminal}");
+        assert_eq!(db.query_row::<String,_,_>("SELECT status FROM runs WHERE id=?1",[&run],|r|r.get(0)).unwrap(),"running");
+        assert_eq!(db.query_row::<u64,_,_>("SELECT count(*) FROM turn_outputs WHERE run_id=?1",[&run],|r|r.get(0)).unwrap(),0);
+        assert_eq!(db.query_row::<u64,_,_>("SELECT count(*) FROM transcript_batches WHERE run_id=?1 AND operation_id='assistant-output'",[&run],|r|r.get(0)).unwrap(),0);
+        // 仅撤销本合同注入的 generation 损坏，原授权 owner/digest 保持；不提供生产自动修复。
+        db.execute("UPDATE runs SET generation=?1 WHERE id=?2",rusqlite::params![generation,run]).unwrap();
+        assert_eq!(served.load(Ordering::SeqCst),1);process.kill().await.unwrap();process.wait().await.unwrap();drop(lines);drop(writer);
+        let (mut restarted,socket)=daemon(&workspace,&runtime,&url).await;
+        let recovered=rpc(&socket,"recovered","run.read",json!({"run_id":run})).await;assert_eq!(recovered["result"]["status"],"unknown_after_restart","{recovered}");
+        assert_eq!(db.query_row::<u64,_,_>("SELECT generation FROM runs WHERE id=?1",[&run],|r|r.get(0)).unwrap(),generation);
+        assert_eq!(served.load(Ordering::SeqCst),1);restarted.kill().await.unwrap();restarted.wait().await.unwrap();provider.abort();drop(db);let _=std::fs::remove_dir_all(workspace);let _=std::fs::remove_dir_all(runtime);
+    }).await.expect("foreground frozen owner contract timeout");
+}
+
+#[tokio::test]
+async fn provider_request_accepted_then_connection_lost_is_unknown_without_retry_or_restart_replay()
+{
+    accepted_provider_wire_unknown(0).await;
+}
+#[tokio::test]
+async fn provider_request_accepted_then_cancelled_is_unknown_without_retry_or_restart_replay() {
+    accepted_provider_wire_unknown(1).await;
+}
+#[tokio::test]
+async fn provider_request_accepted_then_silent_timeout_is_unknown_without_retry_or_restart_replay()
+{
+    accepted_provider_wire_unknown(2).await;
+}
+async fn accepted_provider_wire_unknown(mode: u8) {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let workspace = temp_workspace();
+        let runtime = PathBuf::from(format!(
+            "/tmp/ma-provider-wire-unknown-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let count = accepted.clone();
+        let provider = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let count = count.clone();
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let mut buffer = [0u8; 8192];
+                    let offset = loop {
+                        let n = stream.read(&mut buffer).await.unwrap();
+                        if n == 0 {
+                            return;
+                        }
+                        request.extend_from_slice(&buffer[..n]);
+                        if let Some(i) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break i + 4;
+                        }
+                    };
+                    let headers = String::from_utf8_lossy(&request[..offset]);
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|n| n.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap();
+                    while request.len() < offset + length {
+                        let n = stream.read(&mut buffer).await.unwrap();
+                        if n == 0 {
+                            return;
+                        }
+                        request.extend_from_slice(&buffer[..n]);
+                    }
+                    let body: Value =
+                        serde_json::from_slice(&request[offset..offset + length]).unwrap();
+                    assert!(body["messages"].is_array());
+                    count.fetch_add(1, Ordering::SeqCst);
+                    // 确证完整模型请求已到达；丢失响应不能证明上游没有执行或计费。
+                    if mode == 0 {
+                        drop(stream);
+                    } else {
+                        // 保持无响应连接；真实取消/现场deadline只能停止等待，不能证明上游未执行。
+                        let _ = stream.read(&mut buffer).await;
+                    }
+                });
+            }
+        });
+        let (mut process, socket) = daemon(&workspace, &runtime, &url).await;
+        let session =
+            rpc(&socket, "session", "session.new", json!({})).await["result"]["session_id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+        let (run, terminal) =
+            chat(&socket, "wire-unknown", &session, "不能自动重放", mode != 1).await;
+        if mode == 1 {
+            for _ in 0..200 {
+                if accepted.load(Ordering::SeqCst) == 1 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(
+                accepted.load(Ordering::SeqCst),
+                1,
+                "必须确证上游已收到请求再取消"
+            );
+            let cancelled = rpc(
+                &socket,
+                "cancel",
+                "agent.cancel",
+                json!({"session_id":session,"run_id":run}),
+            )
+            .await;
+            assert_eq!(cancelled["result"]["cancelled"], true, "{cancelled}");
+        }
+        let fact = loop {
+            let current = rpc(&socket, "fact", "run.read", json!({"run_id":run})).await;
+            if current["result"]["status"] != "running" {
+                break current;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        let calls_before = accepted.load(Ordering::SeqCst);
+        let attempts = rpc(
+            &socket,
+            "attempts",
+            "run.provider_attempts",
+            json!({"run_id":run}),
+        )
+        .await;
+        process.kill().await.unwrap();
+        process.wait().await.unwrap();
+        let (mut restarted, socket) = daemon(&workspace, &runtime, &url).await;
+        let after = rpc(&socket, "restart", "run.read", json!({"run_id":run})).await;
+        let calls_after = accepted.load(Ordering::SeqCst);
+        restarted.kill().await.unwrap();
+        restarted.wait().await.unwrap();
+        provider.abort();
+        let _ = std::fs::remove_dir_all(workspace);
+        let _ = std::fs::remove_dir_all(runtime);
+        assert_eq!(
+            fact["result"]["status"], "unknown_after_restart",
+            "已到达上游且响应丢失必须unknown: {fact}; 原终态 {terminal:?}; calls={calls_before}"
+        );
+        assert_eq!(fact["result"]["error_code"], -32002);
+        if let Some(terminal) = terminal {
+            assert_eq!(terminal["error"]["code"], -32002);
+        }
+        assert_eq!(calls_before, 1, "不能根据没有输出重放已接受的Provider请求");
+        assert_eq!(attempts["result"]["attempts"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            attempts["result"]["attempts"][0]["status"],
+            "outcome_unknown"
+        );
+        assert_eq!(after["result"]["status"], "unknown_after_restart");
+        assert_eq!(calls_after, 1);
+    })
+    .await
+    .expect("accepted Provider wire unknown contract timeout");
+}
+
+#[tokio::test]
+async fn async_hook_observation_scope_budget_and_restart_never_reexecute_observer_or_provider() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let workspace=temp_workspace();
+        install_observer_hooks(&workspace,&[agent_core::HookEvent::SessionStart]);
+        std::fs::write(workspace.join(".my-agent/observer"),"#!/bin/sh\ncat >/dev/null\nprintf x >> .my-agent/hook-invocations\nprintf '{\"effect\":\"observe\"}'\n").unwrap();
+        let runtime=PathBuf::from(format!("/tmp/ma-hook-observation-{}-{}",std::process::id(),NEXT.fetch_add(1,Ordering::Relaxed)));
+        let (url,provider,calls)=mock_ollama().await;
+        let (mut process,socket)=daemon(&workspace,&runtime,&url).await;
+        let key="session-hook-observation.jsonl";
+        let created=rpc(&socket,"create","sessions.create",json!({"session_id":key,"operation_id":"hook-observation-create"})).await;
+        assert!(created.get("error").is_none(),"{created}");
+        let life=created["result"]["session_lifetime_id"].clone();
+        let params=json!({"session_id":key,"expected_lifetime":life});
+        let healthy=rpc(&socket,"history","hooks.readback",params.clone()).await;
+        assert_eq!(healthy["result"]["outcomes"].as_array().unwrap().len(),1,"{healthy}");
+        assert_eq!(healthy["result"]["outcomes"][0]["status"],"succeeded");
+        let invocations=std::fs::read(workspace.join(".my-agent/hook-invocations")).unwrap();
+        let db=rusqlite::Connection::open(workspace.join(".my-agent/runtime.sqlite3")).unwrap();
+        let saved:String=db.query_row("SELECT outcome_json FROM hook_outcomes WHERE session_id=?1",[key],|r|r.get(0)).unwrap();
+        let facts=||db.query_row::<(u64,u64,u64),_,_>("SELECT (SELECT revision FROM snapshot_clock),(SELECT count(*) FROM hook_outcomes),(SELECT sum(dispatched) FROM hook_publications)",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+        db.execute_batch("INSERT INTO organizations VALUES('hook-other');INSERT INTO tenants VALUES('hook-other','hook-other');INSERT INTO projects VALUES('hook-other','hook-other');INSERT INTO agents VALUES('hook-other','hook-other','hook-other');UPDATE session_scopes SET tenant_id='hook-other',project_id='hook-other',agent_uid='hook-other' WHERE session_id='session-hook-observation.jsonl';UPDATE hook_outcomes SET outcome_json='private-hook-invalid-json' WHERE session_id='session-hook-observation.jsonl'").unwrap();
+        let before=facts();
+        for (method,arguments) in [("hooks.readback",params.clone()),("slash.execute",json!({"line":format!("/hooks {key} {}",life.as_str().unwrap())}))] {
+            let denied=rpc(&socket,"foreign",method,arguments).await;
+            assert_eq!(denied["error"]["code"],agent_core::AuthorizationError::Forbidden.rpc_code(),"{denied}");assert!(!denied.to_string().contains("private-hook"));
+        }
+        assert_eq!(facts(),before);
+        db.execute_batch("UPDATE session_scopes SET tenant_id='local-tenant',project_id='local-project',agent_uid='local-agent' WHERE session_id='session-hook-observation.jsonl'").unwrap();
+        let mut huge:Value=serde_json::from_str(&saved).unwrap();huge["payload"]["data"]["padding"]=json!("字".repeat(400000));
+        db.execute("UPDATE hook_outcomes SET outcome_json=?1 WHERE session_id=?2",rusqlite::params![serde_json::to_string(&huge).unwrap(),key]).unwrap();
+        let before=facts();let over=rpc(&socket,"budget","hooks.readback",params.clone()).await;
+        assert_eq!(over["error"]["code"],agent_core::CoordinationError::Corrupt.rpc_code(),"{over}");assert_eq!(facts(),before);
+        db.execute("UPDATE hook_outcomes SET outcome_json=?1 WHERE session_id=?2",rusqlite::params![saved,key]).unwrap();
+        let stop=rpc(&socket,"stop","daemon.stop",json!({})).await;assert!(stop.get("error").is_none(),"{stop}");assert!(process.wait().await.unwrap().success());
+        let (mut restarted,socket)=daemon(&workspace,&runtime,&url).await;
+        let restored=rpc(&socket,"restored","hooks.readback",params).await;
+        assert_snapshot_projection(&restored["result"].to_string(),&healthy["result"].to_string());
+        assert_eq!(std::fs::read(workspace.join(".my-agent/hook-invocations")).unwrap(),invocations,"只读、越域拒绝、保存预算与重启不得重执行观察进程");assert_eq!(calls.load(Ordering::SeqCst),0);
+        restarted.kill().await.unwrap();restarted.wait().await.unwrap();provider.abort();drop(db);
+        std::fs::remove_dir_all(workspace).unwrap();std::fs::remove_dir_all(runtime).unwrap();
+    }).await.expect("实际Hook观察端口合同超时");
 }

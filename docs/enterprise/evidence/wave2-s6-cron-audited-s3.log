@@ -1,0 +1,48 @@
+sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+....+.....+++++++++++++++++++++++++++++++++++++++*.......+.+..+................+......+.........+.....+..........+...........+.+...+..+....+...+..+...+...+.......+..+.+.....+...+....+.....+...+.......+............+......+..+..........+..+..........+.....+.+++++++++++++++++++++++++++++++++++++++*....+..+...+....+.....+.+......+........+......................+.....+.+...+..+...+.....................+....+..+.......+.................+....+.....+......+..........+...+..+.+........+......+......+...+....+.....+...............+......+..........+..+..........+...............+.....+...+......+......+........................+...+...+............+.+......+...............+...+.....+.+...............+..+...+.........+...+....+......+........+......+...+.+...........+....+..+...+....+...+...+.....+......+.........+......+.........+.....................+.+.....+.........+...+.+..............+...+...+....+...+............+......+.....+.+.....+..........+.....+.+.........++++++
+...+.....................+.+.....+.+++++++++++++++++++++++++++++++++++++++*......+...+........+...+....+++++++++++++++++++++++++++++++++++++++*..++++++
+-----
+.......+++++++++++++++++++++++++++++++++++++++*........+.+++++++++++++++++++++++++++++++++++++++*.....+.+........+...+....+......+.........+.....+....+..+...+..........+..+.......+..+.............+...............+..+.........+......+.............+..+......+...+......................++++++
+.+........+.......+++++++++++++++++++++++++++++++++++++++*...+..+.+...+.....+.......+...+++++++++++++++++++++++++++++++++++++++*..+....+..+.........+.+......+...+...........+.+..+............+.........+.........+.+.....+......+.........+.++++++
+-----
+Certificate request self-signature ok
+subject=CN=localhost
+9238068e7a054625fdf104873714a9950032e712432071ad0e9bc3cc02fd7ca1
+   Compiling agent-core v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/core)
+   Compiling agent-storage-ports v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-ports)
+   Compiling agent-artifact v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/artifact)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.60s
+     Running unittests src/lib.rs (target/debug/deps/agent_artifact-250a7a3cb74f2038)
+
+running 1 test
+test s3::tests::s3_actual_bytes_scope_isolation_tamper_and_certificate_failure ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.14s
+     Running tests/object_artifact_contract.rs (target/debug/deps/object_artifact_contract-043dd12b0eccf5a4)
+
+running 1 test
+test s3_native_receipt_idempotency_restart_and_commit_fault_contract ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.17s
+
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.93s
+     Running tests/runtime_contract.rs (target/debug/deps/runtime_contract-ef559da8ec38e611)
+
+running 1 test
+test object_artifacts_use_original_tool_receipt_and_restart_without_provider_replay ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 4.30s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.53s
+     Running tests/runtime_contract.rs (target/debug/deps/runtime_contract-ef559da8ec38e611)
+
+running 1 test
+test native_writer_cron_s3_preserves_original_receipt_and_never_falls_back_to_file ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 2.24s
+
+codex-agent-s3-0bd2c1ffb8064f3c8c02

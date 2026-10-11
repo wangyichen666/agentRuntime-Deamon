@@ -1,0 +1,14 @@
+   Compiling digest v0.10.7
+   Compiling agent-core v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/core)
+   Compiling blake2 v0.10.6
+   Compiling sha2 v0.10.9
+   Compiling argon2 v0.5.3
+   Compiling agent-identity v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/identity)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 36.66s
+     Running tests/oidc_contract.rs (target/debug/deps/oidc_contract-343a2018a96793da)
+
+running 1 test
+test verified_signature_scope_and_fresh_keys_fail_closed ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+

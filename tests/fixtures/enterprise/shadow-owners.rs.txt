@@ -1,0 +1,8 @@
+use agent_core::RunRecord as Terminal;
+type Answers = std::collections::HashMap<String, InteractionRecord>;
+struct Gateway {
+    runs: std::sync::Mutex<Vec<Terminal>>,
+    approvals: Answers,
+}
+enum Shadow { Cached(std::cell::RefCell<RunStatus>) }
+static SHADOW: std::sync::Mutex<Vec<Message>> = make_shadow();

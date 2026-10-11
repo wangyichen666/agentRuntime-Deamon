@@ -1,0 +1,41 @@
+   Compiling agent-storage-ports v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-ports)
+   Compiling agent-artifact v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/artifact)
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling agent-storage-postgres v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-postgres)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 48.52s
+     Running tests/run_event_contract.rs (target/debug/deps/run_event_contract-d9c9a20dddd5294c)
+
+running 17 tests
+test event_port_validates_every_scope_dimension_and_wire_budgets ... ok
+test latest_event_port_checks_all_scope_dimensions_and_absence_before_any_payload ... ok
+test event_provenance_and_published_stamp_are_immutable_and_new_events_cannot_claim_legacy ... ok
+
+thread 'latest_event_port_reads_retired_lifetime_and_rejects_valid_json_with_wrong_digest' panicked at tests/run_event_contract.rs:764:6:
+called `Result::unwrap()` on an `Err` value: SqliteFailure(Error { code: ConstraintViolation, extended_code: 1811 }, Some("stale fact owner"))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test latest_view_event_denies_foreign_before_reading_payload ... ok
+test latest_event_port_filters_exact_child_preserves_original_stamp_and_never_writes ... ok
+test event_readback_denies_foreign_and_absent_runs_before_reading_payloads ... ok
+test latest_event_port_reads_retired_lifetime_and_rejects_valid_json_with_wrong_digest ... FAILED
+test direct_native_view_stamp_read_cannot_downgrade_missing_stamp_to_legacy ... ok
+test event_readback_limits_serialized_bytes_in_addition_to_row_count ... ok
+test native_event_with_deleted_stamp_is_corrupt_and_cannot_be_legacy ... ok
+test retired_run_events_keep_permanent_lifetime_identity ... ok
+test saved_native_stamp_budget_is_checked_before_loading_or_parsing_json ... ok
+test event_pages_preserve_exact_cursors_stamps_and_restart_without_writes ... ok
+test v25_upgrade_classifies_both_persistent_native_proofs_and_keeps_true_legacy_unversioned ... ok
+test v26_migration_fault_rolls_back_column_triggers_and_marker_and_future_schema_is_rejected ... ok
+test latest_view_event_denies_legal_oversized_payload_before_decode ... ok
+test oversized_and_corrupt_events_never_silently_skip_a_cursor ... ok
+
+failures:
+
+failures:
+    latest_event_port_reads_retired_lifetime_and_rejects_valid_json_with_wrong_digest
+
+test result: FAILED. 16 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.05s
+
+error: test failed, to rerun pass `--test run_event_contract`

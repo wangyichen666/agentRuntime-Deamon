@@ -1,0 +1,25 @@
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.69s
+     Running unittests src/lib.rs (target/debug/deps/agent_runtime-38b5f34af60c253d)
+
+running 1 test
+test loop_engine::tests::accepted_unknown_tool_stops_later_waves_and_model_rounds_after_original_receipt_commit ... FAILED
+
+failures:
+
+---- loop_engine::tests::accepted_unknown_tool_stops_later_waves_and_model_rounds_after_original_receipt_commit stdout ----
+
+thread 'loop_engine::tests::accepted_unknown_tool_stops_later_waves_and_model_rounds_after_original_receipt_commit' panicked at crates/runtime/src/loop_engine.rs:3190:9:
+未知结果必须直接typed收口，实际 Err(持久协调错误: 持久操作内容冲突
+
+Caused by:
+    持久操作内容冲突)，requests=1，后续副作用=1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    loop_engine::tests::accepted_unknown_tool_stops_later_waves_and_model_rounds_after_original_receipt_commit
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 131 filtered out; finished in 0.13s
+
+error: test failed, to rerun pass `-p agent-runtime --lib`

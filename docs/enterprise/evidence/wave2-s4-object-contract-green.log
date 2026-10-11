@@ -1,0 +1,15 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.79s
+     Running tests/object_artifact_contract.rs (target/debug/deps/object_artifact_contract-44f2f04df1f8dcec)
+
+running 7 tests
+test s3_native_receipt_idempotency_restart_and_commit_fault_contract ... ignored, 必须使用隔离 TLS MinIO 的真实 S3 lane
+test s3_cleartext_endpoint_and_unverified_certificate_configuration_fail_closed ... ok
+test object_io_failure_keeps_original_tool_running_and_prepared_evidence ... ok
+test file_object_port_has_prepared_native_receipt_idempotency_and_restart_contract ... ok
+test object_backend_is_bound_to_frozen_run_and_prepared_gc_protects_file ... ok
+test object_denormalized_column_corruption_and_native_receipt_tampering_fail_closed ... ok
+test object_reference_and_tool_terminal_rollback_in_the_same_native_transaction ... ok
+
+test result: ok. 6 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.22s
+

@@ -1,0 +1,25 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.32s
+     Running tests/run_event_contract.rs (target/debug/deps/run_event_contract-d9c9a20dddd5294c)
+
+running 2 tests
+
+thread 'direct_native_view_stamp_read_cannot_downgrade_missing_stamp_to_legacy' panicked at tests/run_event_contract.rs:357:5:
+assertion failed: matches!(f.store.event_view_stamp(&f.run.run_id, EventSeq(seq)),
+    Err(RuntimeError::Coordination(CoordinationError::Corrupt)))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'native_event_with_deleted_stamp_is_corrupt_and_cannot_be_legacy' panicked at tests/run_event_contract.rs:327:14:
+called `Result::unwrap_err()` on an `Ok` value: RunEventPage { events: [StoredEvent { run_id: RunId("run-1"), seq: EventSeq(1), event: "user_message", data: Object {"content": String("私密输入")} }], cursor: EventSeq(1), has_more: false }
+test direct_native_view_stamp_read_cannot_downgrade_missing_stamp_to_legacy ... FAILED
+test native_event_with_deleted_stamp_is_corrupt_and_cannot_be_legacy ... FAILED
+
+failures:
+
+failures:
+    direct_native_view_stamp_read_cannot_downgrade_missing_stamp_to_legacy
+    native_event_with_deleted_stamp_is_corrupt_and_cannot_be_legacy
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.08s
+
+error: test failed, to rerun pass `--test run_event_contract`

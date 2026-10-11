@@ -3,121 +3,9 @@ use agent_core::*;
 use rusqlite::{OptionalExtension, params};
 use sha2::{Digest, Sha256};
 
-const EPISODE_BYTES: usize = 16 * 1024;
-const OMITTED: &str = "\n[会话摘录已截断；完整证据保留在 transcript 中]\n";
-
-/// 保守过滤自动摘录中的常见凭据行；不是全面 DLP，不改写原始证据。
-fn redact_episode(content: &str) -> String {
-    redact_evidence(content, 1001)
-}
-fn redact_evidence(content: &str, char_limit: usize) -> String {
-    let mut output = String::new();
-    let mut remaining_chars = char_limit;
-    let mut removed = false;
-    let mut private_block = false;
-    for line in content.lines() {
-        let lower = line.to_ascii_lowercase();
-        if lower.contains("-----begin ") && lower.contains("private key-----") {
-            private_block = true;
-        }
-        let credential = private_block
-            || [
-                "api_key",
-                "api key:",
-                "authorization:",
-                "bearer ",
-                "password=",
-                "password:",
-                "password =",
-                "passwd=",
-                "client_secret",
-                "secret=",
-                "secret:",
-                "token=",
-                "token:",
-                "token =",
-                "sk-",
-                "ghp_",
-                "github_pat_",
-                "akia",
-                "aws_secret_access_key",
-            ]
-            .iter()
-            .any(|marker| lower.contains(marker))
-            || (lower.contains("://") && lower.contains('@'));
-        if credential {
-            removed = true;
-        } else {
-            if !output.is_empty() && remaining_chars > 0 {
-                output.push('\n');
-                remaining_chars -= 1;
-            }
-            for character in line.chars().take(remaining_chars) {
-                output.push(character);
-                remaining_chars -= 1;
-            }
-            if remaining_chars == 0 {
-                break;
-            }
-        }
-        if private_block && lower.contains("-----end ") && lower.contains("private key-----") {
-            private_block = false;
-        }
-    }
-    if removed && !output.trim().is_empty() {
-        output.push_str("\n[凭据行已过滤]");
-    }
-    output
-}
-
-/// 摘录不是模型提炼。字节与单消息字符双重上限，永不产生无标记的截断。
-#[derive(Default)]
-struct EpisodeExcerpt {
-    text: String,
-    source_message_ids: Vec<String>,
-    full: bool,
-}
-impl EpisodeExcerpt {
-    fn push(&mut self, message: &Message, source: String) {
-        if self.full
-            || !matches!(message.role, Role::User | Role::Assistant)
-            || !message.tool_calls.is_empty()
-        {
-            return;
-        }
-        let Some(content) = message.content.as_deref().filter(|s| !s.trim().is_empty()) else {
-            return;
-        };
-        let content = redact_episode(content);
-        if content.trim().is_empty() {
-            return;
-        }
-        let mut chars = content.chars();
-        let excerpt: String = chars.by_ref().take(1000).collect();
-        let clipped = chars.next().is_some();
-        let line = format!(
-            "{:?}: {excerpt}{}\n",
-            message.role,
-            if clipped { " [该消息已截断]" } else { "" }
-        );
-        let remaining = EPISODE_BYTES.saturating_sub(OMITTED.len() + self.text.len());
-        if line.len() <= remaining {
-            self.text.push_str(&line);
-            self.source_message_ids.push(source);
-        } else {
-            let mut end = remaining.min(line.len());
-            while !line.is_char_boundary(end) {
-                end -= 1;
-            }
-            if end > 0 {
-                self.text.push_str(&line[..end]);
-                self.source_message_ids.push(source);
-            }
-            self.text.push_str(OMITTED);
-            self.full = true;
-        }
-    }
-}
+use agent_storage_ports::{
+    MemoryEpisodeExcerpt as EpisodeExcerpt, redact_memory_evidence as redact_evidence,
+};
 
 pub trait MemoryRepository: Send + Sync {
     fn memory_evidence(
@@ -208,13 +96,10 @@ fn write_in(db: &rusqlite::Connection, entry: &MemoryRecord) -> Result<(), Runti
 }
 pub(crate) fn writable(db: &rusqlite::Connection, owner: &ExactOwner) -> Result<(), RuntimeError> {
     fence_in(db, owner)?;
-    let raw: Option<String> = db
-        .query_row(
-            "SELECT snapshot_json FROM run_snapshots WHERE run_id=?1",
-            params![owner.run_id.0],
-            |r| r.get(0),
-        )
-        .optional()?;
+    let raw:Option<Option<String>>=db.query_row("SELECT CASE WHEN typeof(snapshot_json)='text' AND length(CAST(snapshot_json AS BLOB))<=1048576 THEN snapshot_json END FROM run_snapshots WHERE run_id=?1",params![owner.run_id.0],|r|r.get(0)).optional()?;
+    let raw = raw
+        .map(|value| value.ok_or(CoordinationError::Corrupt))
+        .transpose()?;
     if raw
         .map(|raw| serde_json::from_str::<RunSnapshot>(&raw))
         .transpose()
@@ -245,9 +130,14 @@ pub(crate) fn read_source_evidence(
     if lifetime != source.session_lifetime_id.0 {
         return Err(RuntimeError::Protocol("来源lifetime不匹配".into()));
     }
-    let batch:Option<(String,u64,String,String)>=db.query_row("SELECT messages_json,start_seq,digest,run_id FROM transcript_batches WHERE lifetime=?1 AND start_seq<=?2 AND end_seq>?2 ORDER BY start_seq DESC LIMIT 1",params![lifetime,seq],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+    let batch:Option<(Option<String>,u64,Option<String>,Option<String>)>=db.query_row("SELECT CASE WHEN length(CAST(messages_json AS BLOB))<=4194304 THEN messages_json END,start_seq,CASE WHEN length(CAST(digest AS BLOB))=64 THEN digest END,CASE WHEN length(CAST(run_id AS BLOB)) BETWEEN 1 AND 1024 THEN run_id END FROM transcript_batches WHERE lifetime=?1 AND start_seq<=?2 AND end_seq>?2 ORDER BY start_seq DESC LIMIT 1",params![lifetime,seq],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
     let (raw, start, digest, run) =
         batch.ok_or_else(|| RuntimeError::Protocol("来源证据已缺失".into()))?;
+    let (raw, digest, run) = (
+        raw.ok_or(CoordinationError::Corrupt)?,
+        digest.ok_or(CoordinationError::Corrupt)?,
+        run.ok_or(CoordinationError::Corrupt)?,
+    );
     if digest != format!("{:x}", Sha256::digest(raw.as_bytes())) || run != source.run_id.0 {
         return Err(RuntimeError::Protocol("来源digest或owner不匹配".into()));
     }
@@ -275,10 +165,346 @@ impl MemoryRepository for RunStore {
         after_source: usize,
         limit: usize,
     ) -> Result<MemoryEvidencePage, RuntimeError> {
+        self.memory_evidence_scoped(visibility, memory_id, after_source, limit, None)
+    }
+    fn next_memory_ingest_due(&self) -> Result<Option<i64>, RuntimeError> {
+        RunStore::next_memory_ingest_due(self)
+    }
+    fn memory_assessments(
+        &self,
+        visibility: &MemoryVisibility,
+    ) -> Result<Vec<MemoryAssessment>, RuntimeError> {
+        RunStore::memory_assessments(self, visibility)
+    }
+    fn record_memory_exposures(
+        &self,
+        owner: &ExactOwner,
+        entries: &[MemoryExposure],
+        channel: &str,
+        policy: &str,
+    ) -> Result<(), RuntimeError> {
+        RunStore::record_memory_exposures(self, owner, entries, channel, policy)
+    }
+    fn memory_feedback(
+        &self,
+        owner: &ExactOwner,
+        operation: &str,
+        memory_id: &str,
+        feedback: MemoryFeedback,
+    ) -> Result<(), RuntimeError> {
+        RunStore::memory_feedback(self, owner, operation, memory_id, feedback)
+    }
+    fn flywheel_report(
+        &self,
+        lifetime: &SessionLifetimeId,
+    ) -> Result<serde_json::Value, RuntimeError> {
+        RunStore::flywheel_report(self, lifetime)
+    }
+    fn recover_memory_ingests(&self, limit: usize) -> Result<usize, RuntimeError> {
+        RunStore::recover_memory_ingests(self, limit)
+    }
+    fn memory_candidates(
+        &self,
+        visibility: &MemoryVisibility,
+    ) -> Result<Vec<MemoryRecord>, RuntimeError> {
+        crate::run_memories::memory_list(self, visibility, None, 1000, false, None)
+    }
+    fn memory_page(
+        &self,
+        visibility: &MemoryVisibility,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<MemoryRecord>, RuntimeError> {
+        crate::run_memories::memory_list(self, visibility, after, limit, true, None)
+    }
+    fn store_memory(
+        &self,
+        owner: &ExactOwner,
+        entry: &MemoryRecord,
+    ) -> Result<MemoryRecord, RuntimeError> {
+        self.store_memory_scoped(owner, entry, None)
+    }
+    fn forget_memory(
+        &self,
+        owner: &ExactOwner,
+        visibility: &MemoryVisibility,
+        id: &str,
+        revision: u64,
+    ) -> Result<bool, RuntimeError> {
+        self.forget_memory_scoped(owner, visibility, id, revision, None)
+    }
+    fn ingest_committed_turn(&self, owner: &ExactOwner) -> Result<(), RuntimeError> {
+        self.ingest_memory_scoped(owner, None)
+    }
+}
+impl RunStore {
+    pub fn import_legacy_memory(&self, source: &str, bytes: &[u8]) -> Result<(), RuntimeError> {
+        self.import_legacy_memory_scoped(&TenantContext::local(), source, bytes)
+    }
+    pub(crate) fn import_legacy_memory_scoped(
+        &self,
+        scope: &TenantContext,
+        source: &str,
+        bytes: &[u8],
+    ) -> Result<(), RuntimeError> {
+        if scope != &TenantContext::local() {
+            return Err(AuthorizationError::Forbidden.into());
+        }
+        let mut db = self.lock_connection()?;
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if tx.query_row(
+            "SELECT count(*) FROM memory_legacy_imports WHERE source=?1",
+            params![source],
+            |r| r.get::<_, i64>(0),
+        )? != 0
+        {
+            return Ok(());
+        }
+        let digest = format!("{:x}", Sha256::digest(bytes));
+        for (index, line) in String::from_utf8_lossy(bytes).lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            // 坏行也保留为隔离审计条目，绝不推断其来源或升级作用域。
+            let content = serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .and_then(|v| v.get("content").and_then(|v| v.as_str()).map(str::to_owned))
+                .unwrap_or_else(|| line.into());
+            let content = content.chars().take(8000).collect::<String>();
+            let entry = MemoryRecord {
+                id: format!("legacy:{digest}:{index}"),
+                layer: MemoryLayer::Episode,
+                scope: MemoryScope::Legacy(source.into()),
+                kind: MemoryKind::Explicit,
+                content_digest: format!("{:x}", Sha256::digest(content.as_bytes())),
+                content,
+                source: None,
+                source_message_ids: vec![],
+                event_time: 0,
+                created_at: 0,
+                updated_at: 0,
+                expires_at: None,
+                confidence: 0,
+                confirmed_by_user: false,
+                revision: 0,
+            };
+            write_in(&tx, &entry)?;
+        }
+        tx.execute(
+            "INSERT INTO memory_legacy_imports VALUES(?1,?2)",
+            params![source, digest],
+        )?;
+        super::views::commit(tx)?;
+        Ok(())
+    }
+}
+
+impl RunStore {
+    pub(crate) fn store_memory_scoped(
+        &self,
+        owner: &ExactOwner,
+        entry: &MemoryRecord,
+        envelope: Option<&EnterpriseOwnerEnvelope>,
+    ) -> Result<MemoryRecord, RuntimeError> {
+        let mut db = self.lock_connection()?;
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        crate::run_memories::check_memory_proof_in(&tx, owner, envelope)?;
+        writable(&tx, owner)?;
+        if entry.source.as_ref() != Some(owner) {
+            return Err(RuntimeError::Protocol("memory source owner 不匹配".into()));
+        }
+        match &entry.scope {
+            MemoryScope::Session(l) if l == &owner.session_lifetime_id => {}
+            MemoryScope::Project(_) if entry.confirmed_by_user => {}
+            MemoryScope::Global
+                if entry.confirmed_by_user && entry.layer == MemoryLayer::Semantic => {}
+            _ => return Err(RuntimeError::Protocol("memory scope 未授权".into())),
+        }
+        let previous =
+            crate::run_memories::read_memory_in(&tx, &entry.id, envelope.map(|e| &e.scope))?;
+        if let Some(previous) = previous {
+            let old_ttl = previous
+                .expires_at
+                .map(|t| t.saturating_sub(previous.created_at));
+            let new_ttl = entry.expires_at.map(|t| t.saturating_sub(entry.created_at));
+            if previous.content_digest != entry.content_digest
+                || previous.scope != entry.scope
+                || previous.source != entry.source
+                || previous.kind != entry.kind
+                || previous.layer != entry.layer
+                || previous.confirmed_by_user != entry.confirmed_by_user
+                || old_ttl != new_ttl
+            {
+                return Err(RuntimeError::Protocol("memory id 幂等冲突".into()));
+            }
+            super::views::commit(tx)?;
+            return Ok(previous);
+        } else {
+            let forgotten: i64 = tx.query_row(
+                "SELECT count(*) FROM memory_forget_receipts WHERE memory_id=?1 AND result=1",
+                params![entry.id],
+                |r| r.get(0),
+            )?;
+            if forgotten > 0 {
+                return Err(RuntimeError::Protocol(
+                    "该 memory operation 已被遗忘，不能通过重试复活".into(),
+                ));
+            }
+            write_in(&tx, entry)?;
+        }
+        super::views::commit(tx)?;
+        Ok(entry.clone())
+    }
+    pub(crate) fn forget_memory_scoped(
+        &self,
+        owner: &ExactOwner,
+        visibility: &MemoryVisibility,
+        id: &str,
+        revision: u64,
+        envelope: Option<&EnterpriseOwnerEnvelope>,
+    ) -> Result<bool, RuntimeError> {
+        let mut db = self.lock_connection()?;
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        crate::run_memories::check_memory_proof_in(&tx, owner, envelope)?;
+        writable(&tx, owner)?;
+        if visibility.lifetime != owner.session_lifetime_id {
+            return Err(RuntimeError::Protocol(
+                "memory visibility owner 不匹配".into(),
+            ));
+        }
+        let receipt:Option<bool>=tx.query_row("SELECT result FROM memory_forget_receipts WHERE run_id=?1 AND memory_id=?2 AND revision=?3",params![owner.run_id.0,id,revision],|r|r.get(0)).optional()?;
+        if let Some(result) = receipt {
+            return Ok(result);
+        }
+        let saved = crate::run_memories::read_memory_in(&tx, id, envelope.map(|e| &e.scope))?;
+        let Some(entry) = saved else {
+            tx.execute(
+                "INSERT INTO memory_forget_receipts VALUES(?1,?2,?3,0)",
+                params![owner.run_id.0, id, revision],
+            )?;
+            super::views::commit(tx)?;
+            return Ok(false);
+        };
+        if !visibility.allows(&entry, super::now_ms() as u64 / 1000) || entry.revision != revision {
+            return Err(RuntimeError::Protocol(
+                "memory 不可见或 revision 冲突".into(),
+            ));
+        }
+        tx.execute(
+            "DELETE FROM memories WHERE id=?1 AND revision=?2",
+            params![id, revision],
+        )?;
+        tx.execute(
+            "INSERT INTO memory_forget_receipts VALUES(?1,?2,?3,1)",
+            params![owner.run_id.0, id, revision],
+        )?;
+        super::views::commit(tx)?;
+        Ok(true)
+    }
+    pub(crate) fn ingest_memory_scoped(
+        &self,
+        owner: &ExactOwner,
+        envelope: Option<&EnterpriseOwnerEnvelope>,
+    ) -> Result<(), RuntimeError> {
+        let mut db = self.lock_connection()?;
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        crate::run_memories::check_memory_proof_in(&tx, owner, envelope)?;
+        writable(&tx, owner)?;
+        if super::read_run_in(&tx, &owner.run_id.0)?.is_some_and(|run| run.kind == RunKind::Compact)
+        {
+            return Err(RuntimeError::Protocol(
+                "compact turn 不能摄入聊天记忆".into(),
+            ));
+        }
+        let status: String = tx.query_row(
+            "SELECT status FROM turn_commits WHERE run_id=?1",
+            params![owner.run_id.0],
+            |r| r.get(0),
+        )?;
+        if status != "completed" {
+            return Err(RuntimeError::Protocol("只能摄入成功提交的 turn".into()));
+        }
+        if tx.query_row(
+            "SELECT count(*) FROM memory_ingests WHERE run_id=?1",
+            params![owner.run_id.0],
+            |r| r.get::<_, i64>(0),
+        )? != 0
+        {
+            return Ok(());
+        }
+        let mut q=tx.prepare("SELECT CASE WHEN typeof(messages_json)='text' AND length(CAST(messages_json AS BLOB))<=4194304 THEN messages_json END,start_seq FROM transcript_batches WHERE run_id=?1 ORDER BY start_seq LIMIT 32769")?;
+        let rows = q.query_map(params![owner.run_id.0], |r| {
+            Ok((r.get::<_, Option<String>>(0)?, r.get::<_, u64>(1)?))
+        })?;
+        let mut excerpt = EpisodeExcerpt::default();
+        let mut rows_seen = 0usize;
+        let mut bytes_seen = 0usize;
+        for row in rows {
+            rows_seen += 1;
+            if rows_seen > 32768 {
+                return Err(CoordinationError::Corrupt.into());
+            }
+            let (raw, start) = row?;
+            let raw = raw.ok_or(CoordinationError::Corrupt)?;
+            bytes_seen = bytes_seen.saturating_add(raw.len());
+            if bytes_seen > 16 * 1024 * 1024 {
+                return Err(CoordinationError::Corrupt.into());
+            }
+            let messages: Vec<Message> =
+                serde_json::from_str(&raw).map_err(|e| RuntimeError::Protocol(e.to_string()))?;
+            for (index, message) in messages.into_iter().enumerate() {
+                excerpt.push(
+                    &message,
+                    format!("{}:{}", owner.session_lifetime_id.0, start + index as u64),
+                );
+            }
+            if excerpt.full {
+                break;
+            }
+        }
+        drop(q);
+        let now = super::now_ms() as u64 / 1000;
+        let entry = MemoryRecord {
+            id: format!("turn:{}", owner.run_id.0),
+            layer: MemoryLayer::Episode,
+            scope: MemoryScope::Session(owner.session_lifetime_id.clone()),
+            kind: MemoryKind::TurnSummary,
+            content_digest: format!("{:x}", Sha256::digest(excerpt.text.as_bytes())),
+            content: excerpt.text,
+            source: Some(owner.clone()),
+            source_message_ids: excerpt.source_message_ids,
+            event_time: now,
+            created_at: now,
+            updated_at: now,
+            expires_at: None,
+            confidence: 70,
+            confirmed_by_user: false,
+            revision: 0,
+        };
+        if !entry.content.is_empty() {
+            write_in(&tx, &entry)?;
+        }
+        tx.execute(
+            "INSERT INTO memory_ingests VALUES(?1,?2,'completed',NULL)",
+            params![owner.run_id.0, owner.session_lifetime_id.0],
+        )?;
+        super::views::commit(tx)?;
+        Ok(())
+    }
+    pub(crate) fn memory_evidence_scoped(
+        &self,
+        visibility: &MemoryVisibility,
+        memory_id: &str,
+        after_source: usize,
+        limit: usize,
+        context: Option<(&TenantContext, &SessionKey)>,
+    ) -> Result<MemoryEvidencePage, RuntimeError> {
         if memory_id.len() > 512 {
             return Err(RuntimeError::Protocol("memory evidence标识超出预算".into()));
         }
-        let db = self.lock_connection()?;
+        let mut connection = self.lock_connection()?;
+        let db = connection.transaction()?;
+        crate::run_memories::check_memory_read_in(&db, visibility, context)?;
         let active: bool = db.query_row(
             "SELECT EXISTS(SELECT 1 FROM session_heads WHERE lifetime=?1 AND deleted=0)",
             params![visibility.lifetime.0],
@@ -289,16 +515,9 @@ impl MemoryRepository for RunStore {
                 "memory evidence lifetime 已失效".into(),
             ));
         }
-        let raw: Option<String> = db
-            .query_row(
-                "SELECT data_json FROM memories WHERE id=?1",
-                params![memory_id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let raw = raw.ok_or_else(|| RuntimeError::Protocol("memory 已遗忘或不存在".into()))?;
-        let entry: MemoryRecord =
-            serde_json::from_str(&raw).map_err(|e| RuntimeError::Protocol(e.to_string()))?;
+        let entry =
+            crate::run_memories::read_memory_in(&db, memory_id, context.map(|(scope, _)| scope))?
+                .ok_or(CoordinationError::Conflict)?;
         if !visibility.allows(&entry, super::now_ms() as u64 / 1000) {
             return Err(RuntimeError::Protocol("memory 不可见".into()));
         }
@@ -352,328 +571,6 @@ impl MemoryRepository for RunStore {
         }
         page.has_more = page.next_source < entry.source_message_ids.len();
         Ok(page)
-    }
-    fn next_memory_ingest_due(&self) -> Result<Option<i64>, RuntimeError> {
-        RunStore::next_memory_ingest_due(self)
-    }
-    fn memory_assessments(
-        &self,
-        visibility: &MemoryVisibility,
-    ) -> Result<Vec<MemoryAssessment>, RuntimeError> {
-        RunStore::memory_assessments(self, visibility)
-    }
-    fn record_memory_exposures(
-        &self,
-        owner: &ExactOwner,
-        entries: &[MemoryExposure],
-        channel: &str,
-        policy: &str,
-    ) -> Result<(), RuntimeError> {
-        RunStore::record_memory_exposures(self, owner, entries, channel, policy)
-    }
-    fn memory_feedback(
-        &self,
-        owner: &ExactOwner,
-        operation: &str,
-        memory_id: &str,
-        feedback: MemoryFeedback,
-    ) -> Result<(), RuntimeError> {
-        RunStore::memory_feedback(self, owner, operation, memory_id, feedback)
-    }
-    fn flywheel_report(
-        &self,
-        lifetime: &SessionLifetimeId,
-    ) -> Result<serde_json::Value, RuntimeError> {
-        RunStore::flywheel_report(self, lifetime)
-    }
-    fn recover_memory_ingests(&self, limit: usize) -> Result<usize, RuntimeError> {
-        RunStore::recover_memory_ingests(self, limit)
-    }
-    fn memory_candidates(
-        &self,
-        visibility: &MemoryVisibility,
-    ) -> Result<Vec<MemoryRecord>, RuntimeError> {
-        let db = self.lock_connection()?;
-        let mut q=db.prepare("SELECT data_json FROM memories WHERE ((scope='session' AND lifetime=?1) OR (scope='project' AND project=?2) OR (scope='global' AND ?3 AND json_extract(data_json,'$.confirmed_by_user')=1 AND json_extract(data_json,'$.layer')='semantic')) AND (json_extract(data_json,'$.expires_at') IS NULL OR json_extract(data_json,'$.expires_at')>?4) ORDER BY rowid DESC LIMIT 1000")?;
-        let rows = q
-            .query_map(
-                params![
-                    visibility.lifetime.0,
-                    visibility.project,
-                    visibility.allow_confirmed_global,
-                    super::now_ms() / 1000
-                ],
-                |r| r.get::<_, String>(0),
-            )?
-            .collect::<Result<Vec<_>, _>>()?;
-        rows.into_iter()
-            .map(|raw| {
-                serde_json::from_str(&raw).map_err(|e| RuntimeError::Protocol(e.to_string()))
-            })
-            .collect()
-    }
-    fn memory_page(
-        &self,
-        visibility: &MemoryVisibility,
-        after: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<MemoryRecord>, RuntimeError> {
-        let db = self.lock_connection()?;
-        let mut q=db.prepare("SELECT data_json FROM memories WHERE id>?5 AND ((scope='session' AND lifetime=?1) OR (scope='project' AND project=?2) OR (scope='global' AND ?3 AND json_extract(data_json,'$.confirmed_by_user')=1 AND json_extract(data_json,'$.layer')='semantic')) AND (json_extract(data_json,'$.expires_at') IS NULL OR json_extract(data_json,'$.expires_at')>?4) ORDER BY id LIMIT ?6")?;
-        let rows = q
-            .query_map(
-                params![
-                    visibility.lifetime.0,
-                    visibility.project,
-                    visibility.allow_confirmed_global,
-                    super::now_ms() / 1000,
-                    after.unwrap_or(""),
-                    limit.clamp(1, 101) as i64
-                ],
-                |r| r.get::<_, String>(0),
-            )?
-            .collect::<Result<Vec<_>, _>>()?;
-        rows.into_iter()
-            .map(|raw| {
-                serde_json::from_str(&raw).map_err(|e| RuntimeError::Protocol(e.to_string()))
-            })
-            .collect()
-    }
-    fn store_memory(
-        &self,
-        owner: &ExactOwner,
-        entry: &MemoryRecord,
-    ) -> Result<MemoryRecord, RuntimeError> {
-        let mut db = self.lock_connection()?;
-        let tx = db.transaction()?;
-        writable(&tx, owner)?;
-        if entry.source.as_ref() != Some(owner) {
-            return Err(RuntimeError::Protocol("memory source owner 不匹配".into()));
-        }
-        match &entry.scope {
-            MemoryScope::Session(l) if l == &owner.session_lifetime_id => {}
-            MemoryScope::Project(_) if entry.confirmed_by_user => {}
-            MemoryScope::Global
-                if entry.confirmed_by_user && entry.layer == MemoryLayer::Semantic => {}
-            _ => return Err(RuntimeError::Protocol("memory scope 未授权".into())),
-        }
-        let old: Option<String> = tx
-            .query_row(
-                "SELECT data_json FROM memories WHERE id=?1",
-                params![entry.id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(old) = old {
-            let previous: MemoryRecord =
-                serde_json::from_str(&old).map_err(|e| RuntimeError::Protocol(e.to_string()))?;
-            let old_ttl = previous
-                .expires_at
-                .map(|t| t.saturating_sub(previous.created_at));
-            let new_ttl = entry.expires_at.map(|t| t.saturating_sub(entry.created_at));
-            if previous.content_digest != entry.content_digest
-                || previous.scope != entry.scope
-                || previous.source != entry.source
-                || previous.kind != entry.kind
-                || previous.layer != entry.layer
-                || previous.confirmed_by_user != entry.confirmed_by_user
-                || old_ttl != new_ttl
-            {
-                return Err(RuntimeError::Protocol("memory id 幂等冲突".into()));
-            }
-            super::views::commit(tx)?;
-            return Ok(previous);
-        } else {
-            let forgotten: i64 = tx.query_row(
-                "SELECT count(*) FROM memory_forget_receipts WHERE memory_id=?1 AND result=1",
-                params![entry.id],
-                |r| r.get(0),
-            )?;
-            if forgotten > 0 {
-                return Err(RuntimeError::Protocol(
-                    "该 memory operation 已被遗忘，不能通过重试复活".into(),
-                ));
-            }
-            write_in(&tx, entry)?;
-        }
-        super::views::commit(tx)?;
-        Ok(entry.clone())
-    }
-    fn forget_memory(
-        &self,
-        owner: &ExactOwner,
-        visibility: &MemoryVisibility,
-        id: &str,
-        revision: u64,
-    ) -> Result<bool, RuntimeError> {
-        let mut db = self.lock_connection()?;
-        let tx = db.transaction()?;
-        writable(&tx, owner)?;
-        if visibility.lifetime != owner.session_lifetime_id {
-            return Err(RuntimeError::Protocol(
-                "memory visibility owner 不匹配".into(),
-            ));
-        }
-        let receipt:Option<bool>=tx.query_row("SELECT result FROM memory_forget_receipts WHERE run_id=?1 AND memory_id=?2 AND revision=?3",params![owner.run_id.0,id,revision],|r|r.get(0)).optional()?;
-        if let Some(result) = receipt {
-            return Ok(result);
-        }
-        let raw: Option<String> = tx
-            .query_row(
-                "SELECT data_json FROM memories WHERE id=?1",
-                params![id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let Some(raw) = raw else {
-            tx.execute(
-                "INSERT INTO memory_forget_receipts VALUES(?1,?2,?3,0)",
-                params![owner.run_id.0, id, revision],
-            )?;
-            super::views::commit(tx)?;
-            return Ok(false);
-        };
-        let entry: MemoryRecord =
-            serde_json::from_str(&raw).map_err(|e| RuntimeError::Protocol(e.to_string()))?;
-        if !visibility.allows(&entry, super::now_ms() as u64 / 1000) || entry.revision != revision {
-            return Err(RuntimeError::Protocol(
-                "memory 不可见或 revision 冲突".into(),
-            ));
-        }
-        tx.execute(
-            "DELETE FROM memories WHERE id=?1 AND revision=?2",
-            params![id, revision],
-        )?;
-        tx.execute(
-            "INSERT INTO memory_forget_receipts VALUES(?1,?2,?3,1)",
-            params![owner.run_id.0, id, revision],
-        )?;
-        super::views::commit(tx)?;
-        Ok(true)
-    }
-    fn ingest_committed_turn(&self, owner: &ExactOwner) -> Result<(), RuntimeError> {
-        let mut db = self.lock_connection()?;
-        let tx = db.transaction()?;
-        writable(&tx, owner)?;
-        if super::read_run_in(&tx, &owner.run_id.0)?.is_some_and(|run| run.kind == RunKind::Compact)
-        {
-            return Err(RuntimeError::Protocol(
-                "compact turn 不能摄入聊天记忆".into(),
-            ));
-        }
-        let status: String = tx.query_row(
-            "SELECT status FROM turn_commits WHERE run_id=?1",
-            params![owner.run_id.0],
-            |r| r.get(0),
-        )?;
-        if status != "completed" {
-            return Err(RuntimeError::Protocol("只能摄入成功提交的 turn".into()));
-        }
-        if tx.query_row(
-            "SELECT count(*) FROM memory_ingests WHERE run_id=?1",
-            params![owner.run_id.0],
-            |r| r.get::<_, i64>(0),
-        )? != 0
-        {
-            return Ok(());
-        }
-        let mut q=tx.prepare("SELECT messages_json,start_seq FROM transcript_batches WHERE run_id=?1 ORDER BY start_seq")?;
-        let rows = q.query_map(params![owner.run_id.0], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, u64>(1)?))
-        })?;
-        let mut excerpt = EpisodeExcerpt::default();
-        for row in rows {
-            let (raw, start) = row?;
-            let messages: Vec<Message> =
-                serde_json::from_str(&raw).map_err(|e| RuntimeError::Protocol(e.to_string()))?;
-            for (index, message) in messages.into_iter().enumerate() {
-                excerpt.push(
-                    &message,
-                    format!("{}:{}", owner.session_lifetime_id.0, start + index as u64),
-                );
-            }
-            if excerpt.full {
-                break;
-            }
-        }
-        drop(q);
-        let now = super::now_ms() as u64 / 1000;
-        let entry = MemoryRecord {
-            id: format!("turn:{}", owner.run_id.0),
-            layer: MemoryLayer::Episode,
-            scope: MemoryScope::Session(owner.session_lifetime_id.clone()),
-            kind: MemoryKind::TurnSummary,
-            content_digest: format!("{:x}", Sha256::digest(excerpt.text.as_bytes())),
-            content: excerpt.text,
-            source: Some(owner.clone()),
-            source_message_ids: excerpt.source_message_ids,
-            event_time: now,
-            created_at: now,
-            updated_at: now,
-            expires_at: None,
-            confidence: 70,
-            confirmed_by_user: false,
-            revision: 0,
-        };
-        if !entry.content.is_empty() {
-            write_in(&tx, &entry)?;
-        }
-        tx.execute(
-            "INSERT INTO memory_ingests VALUES(?1,?2,'completed',NULL)",
-            params![owner.run_id.0, owner.session_lifetime_id.0],
-        )?;
-        super::views::commit(tx)?;
-        Ok(())
-    }
-}
-impl RunStore {
-    pub fn import_legacy_memory(&self, source: &str, bytes: &[u8]) -> Result<(), RuntimeError> {
-        let mut db = self.lock_connection()?;
-        let tx = db.transaction()?;
-        if tx.query_row(
-            "SELECT count(*) FROM memory_legacy_imports WHERE source=?1",
-            params![source],
-            |r| r.get::<_, i64>(0),
-        )? != 0
-        {
-            return Ok(());
-        }
-        let digest = format!("{:x}", Sha256::digest(bytes));
-        for (index, line) in String::from_utf8_lossy(bytes).lines().enumerate() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            // 坏行也保留为隔离审计条目，绝不推断其来源或升级作用域。
-            let content = serde_json::from_str::<serde_json::Value>(line)
-                .ok()
-                .and_then(|v| v.get("content").and_then(|v| v.as_str()).map(str::to_owned))
-                .unwrap_or_else(|| line.into());
-            let content = content.chars().take(8000).collect::<String>();
-            let entry = MemoryRecord {
-                id: format!("legacy:{digest}:{index}"),
-                layer: MemoryLayer::Episode,
-                scope: MemoryScope::Legacy(source.into()),
-                kind: MemoryKind::Explicit,
-                content_digest: format!("{:x}", Sha256::digest(content.as_bytes())),
-                content,
-                source: None,
-                source_message_ids: vec![],
-                event_time: 0,
-                created_at: 0,
-                updated_at: 0,
-                expires_at: None,
-                confidence: 0,
-                confirmed_by_user: false,
-                revision: 0,
-            };
-            write_in(&tx, &entry)?;
-        }
-        tx.execute(
-            "INSERT INTO memory_legacy_imports VALUES(?1,?2)",
-            params![source, digest],
-        )?;
-        super::views::commit(tx)?;
-        Ok(())
     }
 }
 
@@ -1057,6 +954,10 @@ mod tests {
         );
         store.store_memory(&owner, &item).unwrap();
         let snapshot = RunSnapshot {
+            workflow: None,
+            installed_generation:None,
+            billing_policy: None,
+            artifact_store_id: None,
             entry_channel: agent_core::HookChannel::DaemonRpc,
             route: None,
             tools: vec![],

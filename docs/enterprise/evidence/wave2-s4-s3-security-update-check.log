@@ -1,0 +1,111 @@
+    Updating `rsproxy-sparse` index
+     Locking 22 packages to latest Rust 1.88 compatible versions
+      Adding combine v4.6.8
+      Adding crc v3.3.0 (available: v3.4.0)
+      Adding crc-catalog v2.5.0
+      Adding crc-fast v1.9.0 (available: v1.10.0, requires Rust 1.89)
+      Adding itertools v0.15.0
+      Adding jni v0.22.4
+      Adding jni-macros v0.22.4
+      Adding jni-sys v0.4.1
+      Adding jni-sys-macros v0.4.1
+    Updating object_store v0.12.4 -> v0.14.2
+    Updating quick-xml v0.38.4 -> v0.41.0
+      Adding reqwest v0.13.5
+      Adding rustls-platform-verifier v0.7.1
+      Adding rustls-platform-verifier-android v0.2.0
+      Adding same-file v1.0.6
+      Adding simd_cesu8 v1.2.0
+      Adding simdutf8 v0.1.5
+      Adding spin v0.10.1
+      Adding walkdir v2.5.0
+      Adding wasm-streams v0.5.0
+      Adding webpki-root-certs v1.0.9
+      Adding winapi-util v0.1.11
+ Downloading crates ...
+  Downloaded crc v3.3.0 (registry `rsproxy-sparse`)
+  Downloaded crc-fast v1.9.0 (registry `rsproxy-sparse`)
+  Downloaded crc-catalog v2.5.0 (registry `rsproxy-sparse`)
+  Downloaded quick-xml v0.41.0 (registry `rsproxy-sparse`)
+  Downloaded spin v0.10.1 (registry `rsproxy-sparse`)
+  Downloaded itertools v0.15.0 (registry `rsproxy-sparse`)
+  Downloaded rustls-platform-verifier v0.7.1 (registry `rsproxy-sparse`)
+    Checking futures-util v0.3.34
+    Checking futures-channel v0.3.34
+    Checking security-framework-sys v2.17.0
+    Checking tokio-rustls v0.26.4
+    Checking crc-catalog v2.5.0
+    Checking digest v0.11.3
+    Checking base64 v0.23.1
+    Checking spin v0.10.1
+    Checking itertools v0.15.0
+    Checking rand v0.10.2
+    Checking crc v3.3.0
+    Checking agent-core v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/core)
+    Checking security-framework v3.7.0
+    Checking md-5 v0.11.0
+    Checking hyper v1.11.1
+    Checking quick-xml v0.41.0
+    Checking tower v0.5.3
+    Checking crc-fast v1.9.0
+    Checking hyper-util v0.1.20
+    Checking agent-storage-ports v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-ports)
+    Checking rustls-platform-verifier v0.7.1
+    Checking tower-http v0.6.11
+    Checking hyper-rustls v0.27.9
+    Checking reqwest v0.13.5
+    Checking object_store v0.14.2
+    Checking agent-artifact v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/artifact)
+error[E0599]: no method named `get` found for struct `Arc<(dyn ObjectStore + 'static)>` in the current scope
+    --> crates/artifact/src/s3.rs:150:35
+     |
+150  |         let response = self.store.get(key).await.map_err(error)?;
+     |                                   ^^^ method not found in `Arc<dyn ObjectStore>`
+     |
+    ::: /Users/pilot/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/object_store-0.14.2/src/lib.rs:1456:8
+     |
+1456 |     fn get(&self, location: &Path) -> impl Future<Output = Result<GetResult>>;
+     |        --- the method is available for `Arc<(dyn ObjectStore + 'static)>` here
+     |
+     = help: items from traits can only be used if the trait is in scope
+help: trait `ObjectStoreExt` which provides `get` is implemented but not in scope; perhaps you want to import it
+     |
+1    + use object_store::ObjectStoreExt;
+     |
+
+error[E0599]: no method named `delete` found for struct `Arc<(dyn ObjectStore + 'static)>` in the current scope
+    --> crates/artifact/src/s3.rs:226:24
+     |
+226  |             self.store.delete(&temporary).await.map_err(error)?;
+     |                        ^^^^^^ method not found in `Arc<dyn ObjectStore>`
+     |
+    ::: /Users/pilot/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/object_store-0.14.2/src/lib.rs:1499:8
+     |
+1499 |     fn delete(&self, location: &Path) -> impl Future<Output = Result<()>>;
+     |        ------ the method is available for `Arc<(dyn ObjectStore + 'static)>` here
+     |
+     = help: items from traits can only be used if the trait is in scope
+help: trait `ObjectStoreExt` which provides `delete` is implemented but not in scope; perhaps you want to import it
+     |
+1    + use object_store::ObjectStoreExt;
+     |
+
+error[E0599]: no method named `delete` found for struct `Arc<(dyn ObjectStore + 'static)>` in the current scope
+    --> crates/artifact/src/s3.rs:235:73
+     |
+235  |                 tokio::time::timeout(Duration::from_secs(5), self.store.delete(&temporary)).await;
+     |                                                                         ^^^^^^ method not found in `Arc<dyn ObjectStore>`
+     |
+    ::: /Users/pilot/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/object_store-0.14.2/src/lib.rs:1499:8
+     |
+1499 |     fn delete(&self, location: &Path) -> impl Future<Output = Result<()>>;
+     |        ------ the method is available for `Arc<(dyn ObjectStore + 'static)>` here
+     |
+     = help: items from traits can only be used if the trait is in scope
+help: trait `ObjectStoreExt` which provides `delete` is implemented but not in scope; perhaps you want to import it
+     |
+1    + use object_store::ObjectStoreExt;
+     |
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `agent-artifact` (lib) due to 3 previous errors

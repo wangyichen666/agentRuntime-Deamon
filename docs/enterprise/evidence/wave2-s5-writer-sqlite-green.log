@@ -1,0 +1,27 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.48s
+     Running tests/writer_contract.rs (target/debug/deps/writer_contract-12f2878073cdb615)
+
+running 5 tests
+test sqlite_writer_repository_uses_database_time_complete_scope_and_epoch_cas ... ok
+test writer_two_independent_connections_have_one_winner_with_controlled_barrier ... ok
+test native_writer_renewal_preserves_epoch_and_does_not_advance_business_event_clock ... ok
+test native_writer_expired_process_cannot_self_reacquire_and_unconfigured_store_cannot_bypass ... ok
+
+thread 'native_writer_old_callback_terminal_transcript_and_recovery_are_fenced_after_takeover' panicked at tests/writer_contract.rs:152:5:
+assertion failed: matches!(f.store.commit_turn(&TurnCommit
+    {
+        owner: f.owner.clone(), status: RunStatus::Completed, content:
+        Some("迟到成功".into()), error: None
+    }),
+    Err(agent_storage::RuntimeError::Coordination(CoordinationError::StaleLease)))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test native_writer_old_callback_terminal_transcript_and_recovery_are_fenced_after_takeover ... FAILED
+
+failures:
+
+failures:
+    native_writer_old_callback_terminal_transcript_and_recovery_are_fenced_after_takeover
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+error: test failed, to rerun pass `--test writer_contract`

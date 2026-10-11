@@ -1,6 +1,18 @@
 use agent_core::{EventSeq, InteractionId, RequestId, RunId, RunStatus, SessionKey as SessionId};
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutboxReadParams {
+    #[serde(default)]
+    pub after: u64,
+    #[serde(default = "outbox_default_limit")]
+    pub limit: u32,
+}
+fn outbox_default_limit() -> u32 {
+    32
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContextReadParams {
@@ -487,3 +499,91 @@ pub struct PlanDiscardParams {
     pub expected_lifetime: agent_core::SessionLifetimeId,
     pub identity: agent_core::PlanExecution,
 }
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorizationReadParams {
+    pub owner: agent_core::ExactOwner,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditReadParams {
+    pub after: u64,
+    pub limit: u32,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuotaReadParams {
+    pub metric: String,
+    pub window_start_ms: i64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuotaConfigureParams {
+    pub metric: String,
+    pub window_start_ms: i64,
+    pub window_end_ms: i64,
+    pub budget: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityManageParams {
+    pub command: agent_core::IdentityCommand,
+    pub operation_id: String,
+}
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DirectoryCreateParams {
+    pub operation_id: String,
+}
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DirectoryResolveParams {
+    pub session_id: String,
+}
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccessAcquireParams {
+    #[serde(default="legacy_endpoint")] pub endpoint:String,
+    pub class: agent_core::AccessClass,
+    pub operation_id: String,
+}
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccessReleaseParams {
+    pub operation_id: String,
+}
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialIssueParams {
+    pub subject_id: agent_core::SubjectId,
+    pub ttl_secs: u64,
+    pub operation_id: String,
+}
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialRevokeParams {
+    pub key_id: String,
+    pub operation_id: String,
+}
+
+#[derive(Clone,Debug,Deserialize,Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BillingConfigureParams {pub policy:agent_core::BillingPolicy,pub operation_id:String}
+#[derive(Clone,Debug,Deserialize,Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BillingUsageParams {#[serde(default)] pub after:u64, #[serde(default="billing_page_limit")] pub limit:u32}
+fn billing_page_limit()->u32 {32}
+
+fn legacy_endpoint()->String {"legacy".into()}
+
+#[derive(Clone,Debug,serde::Deserialize,serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegistryGenerationParams {pub digest:String}
+
+#[derive(Clone,Debug,serde::Serialize,serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowReadParams {pub id:String,#[serde(default)] pub after:u64,#[serde(default="workflow_page_limit")] pub limit:u32}
+fn workflow_page_limit()->u32{64}

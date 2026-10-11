@@ -1,0 +1,17 @@
+BEGIN IMMEDIATE;
+CREATE TABLE registry_trust_versions(organization_id TEXT NOT NULL,tenant_id TEXT NOT NULL,project_id TEXT NOT NULL,agent_uid TEXT NOT NULL,version TEXT NOT NULL,digest TEXT NOT NULL,trust_json TEXT NOT NULL,PRIMARY KEY(organization_id,tenant_id,project_id,agent_uid,version));
+CREATE TRIGGER immutable_registry_trust_update BEFORE UPDATE ON registry_trust_versions BEGIN SELECT RAISE(ABORT,'immutable registry trust'); END;
+CREATE TRIGGER immutable_registry_trust_delete BEFORE DELETE ON registry_trust_versions BEGIN SELECT RAISE(ABORT,'immutable registry trust'); END;
+CREATE TABLE registry_control(organization_id TEXT NOT NULL,tenant_id TEXT NOT NULL,project_id TEXT NOT NULL,agent_uid TEXT NOT NULL,state_json TEXT NOT NULL CHECK(length(CAST(state_json AS BLOB))<=65536),PRIMARY KEY(organization_id,tenant_id,project_id,agent_uid));
+CREATE TABLE registry_generations(organization_id TEXT NOT NULL,tenant_id TEXT NOT NULL,project_id TEXT NOT NULL,agent_uid TEXT NOT NULL,digest TEXT NOT NULL,version TEXT NOT NULL,generation_json TEXT NOT NULL CHECK(length(CAST(generation_json AS BLOB))<=262144),pack_json TEXT NOT NULL CHECK(length(CAST(pack_json AS BLOB))<=3145728),PRIMARY KEY(organization_id,tenant_id,project_id,agent_uid,digest),UNIQUE(organization_id,tenant_id,project_id,agent_uid,version));
+CREATE TABLE registry_operations(organization_id TEXT NOT NULL,tenant_id TEXT NOT NULL,project_id TEXT NOT NULL,agent_uid TEXT NOT NULL,actor_id TEXT NOT NULL,operation_id TEXT NOT NULL,command_digest TEXT NOT NULL,receipt_json TEXT NOT NULL CHECK(length(CAST(receipt_json AS BLOB))<=262144),PRIMARY KEY(organization_id,tenant_id,project_id,agent_uid,actor_id,operation_id));
+CREATE TABLE registry_session_bindings(organization_id TEXT NOT NULL,tenant_id TEXT NOT NULL,project_id TEXT NOT NULL,agent_uid TEXT NOT NULL,session_key TEXT NOT NULL,lifetime TEXT NOT NULL,digest TEXT,PRIMARY KEY(organization_id,tenant_id,project_id,agent_uid,session_key,lifetime));
+INSERT INTO registry_session_bindings SELECT t.organization_id,s.tenant_id,s.project_id,s.agent_uid,h.session_id,h.lifetime,NULL FROM session_heads h JOIN session_scopes s ON s.session_id=h.session_id JOIN tenants t ON t.id=s.tenant_id;
+CREATE TRIGGER immutable_registry_generations_update BEFORE UPDATE ON registry_generations BEGIN SELECT RAISE(ABORT,'immutable registry fact'); END;
+CREATE TRIGGER immutable_registry_generations_delete BEFORE DELETE ON registry_generations BEGIN SELECT RAISE(ABORT,'immutable registry fact'); END;
+CREATE TRIGGER immutable_registry_operations_update BEFORE UPDATE ON registry_operations BEGIN SELECT RAISE(ABORT,'immutable registry fact'); END;
+CREATE TRIGGER immutable_registry_operations_delete BEFORE DELETE ON registry_operations BEGIN SELECT RAISE(ABORT,'immutable registry fact'); END;
+CREATE TRIGGER immutable_registry_session_bindings_update BEFORE UPDATE ON registry_session_bindings BEGIN SELECT RAISE(ABORT,'immutable registry fact'); END;
+CREATE TRIGGER immutable_registry_session_bindings_delete BEFORE DELETE ON registry_session_bindings BEGIN SELECT RAISE(ABORT,'immutable registry fact'); END;
+INSERT INTO schema_migrations VALUES(35,CAST(strftime('%s','now') AS INTEGER)*1000);
+COMMIT;

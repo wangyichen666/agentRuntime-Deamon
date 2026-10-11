@@ -8,12 +8,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::time::Instant;
-use tokio::io::AsyncReadExt;
 use tokio::sync::{Mutex, mpsc};
 use tracing::{Instrument, info, info_span};
 
 use super::approval::PendingApprovalInfo;
 use super::{ActiveKey, ActiveRequest, ActiveRequestUpdate, DaemonState, SessionRuntime};
+use agent_core::{CoordinationError, TenantContext};
 use agent_daemon_protocol::slash::{SlashAction, SlashParse, SlashRegistry, SlashResponse};
 use agent_daemon_protocol::{
     EventKind, JsonRpcRequest, JsonRpcResponse, MAX_FRAME_BYTES, RequestId, ServerFrame,
@@ -23,7 +23,7 @@ use agent_runtime::cron::ScheduleSpec;
 use agent_runtime::loop_engine::{AgentEvent, CancellationToken};
 use agent_runtime::provider::ProviderProfile;
 use agent_runtime::safety::{SafetyMode, SafetyPolicy};
-use agent_runtime::session::{SessionStatus, SessionTraceRecord};
+use agent_runtime::session::SessionTraceRecord;
 use agent_runtime::tools::ReadFileTool;
 use agent_storage::{
     Admission, AdmissionMode, DelegationRecord, DelegationRequest, EventSeq, InteractionId, RunId,
@@ -33,6 +33,14 @@ use agent_storage::{
 const INVALID_PARAMS: i64 = -32602;
 const METHOD_NOT_FOUND: i64 = -32601;
 const INTERNAL_ERROR: i64 = -32603;
+
+tokio::task_local! {
+    pub(crate) static AUTHENTICATED_IDENTITY:agent_core::RuntimeIdentity;
+    pub(crate) static WORKFLOW_LEASE:agent_core::WorkflowNodeLease;
+    pub(crate) static WORKFLOW_DIRECTIVE:agent_core::WorkflowNativeDirective;
+    static CREDENTIAL_EXPIRY:u64;
+    static REQUEST_CHANNEL:agent_core::HookChannel;
+}
 const REQUEST_CANCELLED: i64 = -32800;
 const REQUEST_CONFLICT: i64 = -32001;
 const WEB_PAGE_MAX_BYTES: usize = MAX_FRAME_BYTES - 256 * 1024;
@@ -51,7 +59,286 @@ use agent_daemon_protocol::params::*;
 type ModelSaveParams = agent_daemon_protocol::params::ModelSaveParams<ProviderProfile>;
 
 impl DaemonState {
+    async fn run_fact_value(&self, run: &RunId, view: &str) -> Result<Value, (i64, String)> {
+        let scope = self.scope();
+        match view {
+            "fact" => self
+                .run_fact_store
+                .read_run_fact(&scope, run)
+                .await
+                .map(|read| {
+                    let mut fact = json!(read.run);
+                    if let Some(compact) = read.compact {
+                        fact["compact"] = json!(compact);
+                    }
+                    if let Some(stamp) = read.view_stamp {
+                        fact["_my_agent_view"] = json!(stamp);
+                    }
+                    fact["snapshot"] = json!(read.snapshot);
+                    fact["continuation_parent_run_id"] = json!(read.continuation_parent_run_id);
+                    fact["continuation_run_id"] = json!(read.continuation_run_id);
+                    fact
+                })
+                .map_err(|e| (e.rpc_code(), e.to_string())),
+            "tools" => self
+                .run_fact_store
+                .read_tool_receipts(&scope, run)
+                .await
+                .map(|receipts| json!({"receipts":receipts}))
+                .map_err(|e| (e.rpc_code(), e.to_string())),
+            "provider" => self
+                .run_fact_store
+                .read_provider_history(&scope, run)
+                .await
+                .map(|value| json!(value))
+                .map_err(|e| (e.rpc_code(), e.to_string())),
+            _ => Err((INVALID_PARAMS, "run视图必须为fact/tools/provider".into())),
+        }
+    }
+    async fn run_event_readback(
+        &self,
+        params: &RunEventsParams,
+    ) -> Result<agent_core::RunEventPage, agent_core::CoordinationError> {
+        let limit = u32::try_from(params.limit.unwrap_or(200))
+            .map_err(|_| agent_core::CoordinationError::InvalidRequest)?;
+        self.event_store
+            .read_run_events(
+                &self.scope(),
+                &params.run_id,
+                params.after_seq.unwrap_or(EventSeq(0)),
+                limit,
+            )
+            .await
+    }
+    async fn commit_session_authorized(
+        &self,
+        command: &agent_core::SessionCommand,
+        expected: Option<&agent_core::SessionLifetimeId>,
+        operation: &str,
+    ) -> Result<agent_core::SessionMetadata, agent_core::RepositoryError> {
+        let authorization = self
+            .authorize_local_request(
+                RequestId::String(operation.into()),
+                agent_core::session_command_action(command),
+            )
+            .await
+            .map_err(RuntimeError::repository_error)?;
+        self.lifecycle_store
+            .commit_session_authorized(
+                &authorization,
+                command,
+                expected,
+                operation,
+                Arc::new(agent_policy::PolicyEngine),
+            )
+            .await
+    }
+    async fn local_identity(&self) -> Result<agent_core::IdentityReadback, RuntimeError> {
+        let subject = self.request_identity().principal.subject_id;
+        self.identity_store
+            .read_identity(&self.scope(), &subject)
+            .await
+            .map_err(Into::into)
+    }
+    pub(super) async fn authorize_local_request(
+        &self,
+        request_id: RequestId,
+        action: agent_core::Action,
+    ) -> Result<agent_core::AuthorizationRequest, RuntimeError> {
+        use agent_core::AuthorizationVerifier;
+        let identity = self.local_identity().await?;
+        let context =
+            agent_identity::bound_context(&self.request_identity(), &identity, request_id)?;
+        let timestamp_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| RuntimeError::Internal("系统时钟早于 Unix epoch".into()))?
+            .as_millis()
+            .min(i64::MAX as u128) as i64;
+        let request = agent_core::AuthorizationRequest {
+            context,
+            expected_policy: identity.policy.version.clone(),
+            action,
+            attributes: agent_core::AuthorizationAttributes {
+                workspace: self.safety.as_ref().map_or_else(
+                    || ".".into(),
+                    |s| s.workspace().to_string_lossy().into_owned(),
+                ),
+                entry_channel: REQUEST_CHANNEL
+                    .try_with(|channel| *channel)
+                    .unwrap_or(agent_core::HookChannel::DaemonRpc),
+                tool_effect: None,
+                timestamp_ms,
+                network: agent_core::NetworkBoundary::None,
+            },
+        };
+        agent_policy::PolicyEngine.verify(&request, &identity)?;
+        Ok(request)
+    }
+
+    /// 网络凭据先验证，随后沿原 handler/准入事务执行；内部恢复仍使用固定 workload。
+    pub(crate) async fn handle_transport_request(
+        self: Arc<Self>,
+        mut request: JsonRpcRequest,
+        frames: super::frames::FrameSender,
+    ) {
+        let channel = if let Some(gateway) = request.gateway.take() {
+            if self.verify_gateway(&gateway, &request.id).await.is_err() {
+                send_authorization_error(
+                    &frames,
+                    request.id,
+                    agent_core::AuthorizationError::Unauthenticated.into(),
+                );
+                return;
+            }
+            gateway.channel
+        } else {
+            agent_core::HookChannel::DaemonRpc
+        };
+        if matches!(
+            request.method.as_str(),
+            "chat.send" | "compact.start" | "slash.execute"
+        ) {
+            request.params["entry_channel"] = json!(channel);
+        }
+        let binding = match (&self.oidc, request.authorization.take()) {
+            (Some(_), Some(token)) => match self.verify_transport_token(token.as_str()).await {
+                Ok(binding) => Some(binding),
+                Err(_) => {
+                    send_authorization_error(
+                        &frames,
+                        request.id,
+                        agent_core::AuthorizationError::Unauthenticated.into(),
+                    );
+                    return;
+                }
+            },
+            (Some(_), None) | (None, Some(_)) => {
+                send_authorization_error(
+                    &frames,
+                    request.id,
+                    agent_core::AuthorizationError::Unauthenticated.into(),
+                );
+                return;
+            }
+            (None, None) => None,
+        };
+        let dispatch = async {
+            match binding {
+                Some(binding) => {
+                    CREDENTIAL_EXPIRY
+                        .scope(
+                            binding.expires_at,
+                            AUTHENTICATED_IDENTITY
+                                .scope(binding.identity, self.handle_request(request, frames)),
+                        )
+                        .await
+                }
+                None => self.handle_request(request, frames).await,
+            }
+        };
+        REQUEST_CHANNEL.scope(channel, dispatch).await;
+    }
+    async fn verify_transport_token(
+        &self,
+        token: &str,
+    ) -> Result<agent_identity::VerifiedToken, RuntimeError> {
+        let binding = if token.starts_with("ak.") {
+            let meta = self
+                .credential_store
+                .authenticate_api_credential(
+                    &self.scope(),
+                    &agent_core::SecretToken::new(token.into())?,
+                )
+                .await?;
+            agent_identity::VerifiedToken {
+                identity: agent_core::RuntimeIdentity {
+                    scope: meta.scope,
+                    principal: meta.principal,
+                },
+                expires_at: meta.expires_at_ms.max(0) as u64 / 1000,
+            }
+        } else {
+            self.oidc
+                .as_ref()
+                .ok_or(agent_core::AuthorizationError::Unauthenticated)?
+                .verify(token)
+                .await?
+        };
+        if binding.identity.scope != self.scope() {
+            return Err(agent_core::AuthorizationError::Unauthenticated.into());
+        }
+        Ok(binding)
+    }
+    async fn verify_gateway(
+        &self,
+        gateway: &agent_daemon_protocol::GatewayCredential,
+        id: &RequestId,
+    ) -> Result<(), RuntimeError> {
+        use agent_core::AuthorizationVerifier;
+        let verifier = self
+            .oidc
+            .as_ref()
+            .ok_or(agent_core::AuthorizationError::Unauthenticated)?;
+        if !matches!(
+            gateway.channel,
+            agent_core::HookChannel::Http | agent_core::HookChannel::WebSocket
+        ) {
+            return Err(agent_core::AuthorizationError::Unauthenticated.into());
+        }
+        let primary = self
+            .verify_transport_token(gateway.token.as_str())
+            .await?
+            .identity;
+        if primary.principal.kind == agent_core::SubjectKind::Human
+            || verifier.gateway_subject() != Some(&primary.principal.subject_id)
+        {
+            return Err(agent_core::AuthorizationError::Unauthenticated.into());
+        }
+        let identity = self
+            .identity_store
+            .read_identity(&primary.scope, &primary.principal.subject_id)
+            .await?;
+        let context = agent_identity::bound_context(&primary, &identity, id.clone())?;
+        let authorization = agent_core::AuthorizationRequest {
+            context,
+            expected_policy: identity.policy.version.clone(),
+            action: agent_core::Action::GatewayDelegate,
+            attributes: agent_core::AuthorizationAttributes {
+                workspace: self.safety.as_ref().map_or_else(
+                    || ".".into(),
+                    |s| s.workspace().to_string_lossy().into_owned(),
+                ),
+                entry_channel: gateway.channel,
+                tool_effect: None,
+                timestamp_ms: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(0, |t| t.as_millis().min(i64::MAX as u128) as i64),
+                network: agent_core::NetworkBoundary::None,
+            },
+        };
+        agent_policy::PolicyEngine.verify(&authorization, &identity)?;
+        Ok(())
+    }
+
     pub(crate) async fn handle_request(
+        self: Arc<Self>,
+        request: JsonRpcRequest,
+        frames: super::frames::FrameSender,
+    ) {
+        let channel = REQUEST_CHANNEL
+            .try_with(|channel| *channel)
+            .unwrap_or_else(|_| {
+                request
+                    .params
+                    .get("entry_channel")
+                    .and_then(|value| serde_json::from_value(value.clone()).ok())
+                    .unwrap_or(agent_core::HookChannel::DaemonRpc)
+            });
+        REQUEST_CHANNEL
+            .scope(channel, self.handle_request_inner(request, frames))
+            .await;
+    }
+    async fn handle_request_inner(
         self: Arc<Self>,
         request: JsonRpcRequest,
         frames: super::frames::FrameSender,
@@ -67,40 +354,389 @@ impl DaemonState {
                 return;
             }
         };
+        let Some(action) = agent_policy::action_for_rpc(&request.method) else {
+            send_result(
+                &frames,
+                request.id,
+                Err((
+                    METHOD_NOT_FOUND,
+                    format!("未知 RPC 方法: {}", request.method),
+                )),
+            );
+            return;
+        };
+        if let Err(error) = self
+            .authorize_local_request(request.id.clone(), action)
+            .await
+        {
+            send_authorization_error(&frames, request.id, error);
+            return;
+        }
         match request.method.as_str() {
+            "runtime.endpoint" => {
+                send_result(&frames,request.id,Ok(json!({"scope":self.scope(),"runtime_endpoint":self.oidc.as_ref().map_or("runtime-default",|v|v.runtime_endpoint())})));
+            }
+            "credential.status" => {
+                let result = async {
+                let expires_at = CREDENTIAL_EXPIRY.try_with(|expiry| *expiry).unwrap_or(0);
+                    Ok(json!(agent_identity::VerifiedToken {
+                        identity: self.request_identity(),
+                        expires_at
+                    }))
+                }.await;
+                send_result(&frames,request.id,result);
+            }
+            "credential.issue" | "credential.revoke" => {
+                let result = async {
+                    let auth = self
+                        .authorize_local_request(
+                            request.id.clone(),
+                            agent_core::Action::IdentityManage,
+                        )
+                        .await
+                        .map_err(|e| {
+                            let e = e.repository_error();
+                            (e.rpc_code(), e.to_string())
+                        })?;
+                    let verifier: Arc<dyn agent_core::AuthorizationVerifier> =
+                        Arc::new(agent_policy::PolicyEngine);
+                    let result = if request.method == "credential.issue" {
+                        let p: agent_daemon_protocol::params::CredentialIssueParams =
+                            parse_params(&request.params).map_err(|e| (INVALID_PARAMS, e))?;
+                        self.credential_store
+                            .issue_api_credential(
+                                &auth,
+                                &p.subject_id,
+                                p.ttl_secs,
+                                &p.operation_id,
+                                verifier,
+                            )
+                            .await
+                            .map(|v| json!(v))
+                    } else {
+                        let p: agent_daemon_protocol::params::CredentialRevokeParams =
+                            parse_params(&request.params).map_err(|e| (INVALID_PARAMS, e))?;
+                        self.credential_store
+                            .revoke_api_credential(&auth, &p.key_id, &p.operation_id, verifier)
+                            .await
+                            .map(|v| json!(v))
+                    };
+                    result.map_err(|e| (e.rpc_code(), e.to_string()))
+                }
+                .await;
+                send_result(&frames, request.id, result);
+            }
+            "directory.find" => {
+                let result=async {
+                    let p:agent_daemon_protocol::params::DirectoryCreateParams=parse_params(&request.params).map_err(|e|(INVALID_PARAMS,e))?;
+                    let auth=self.authorize_local_request(request.id.clone(),agent_core::Action::AgentRead).await.map_err(|e|{let e=e.repository_error();(e.rpc_code(),e.to_string())})?;
+                    let result=self.access_store.find_directory_session(&auth,&p.operation_id,Arc::new(agent_policy::PolicyEngine)).await.map_err(|e|(e.rpc_code(),e.to_string()))?;
+                    Ok(json!(result))
+                }.await;
+                send_result(&frames,request.id,result);
+            }
+            "oauth.begin" | "oauth.consume" => {
+                let result = async {
+                    let proof: agent_core::OAuthLoginProof = parse_params(&request.params).map_err(|e| (INVALID_PARAMS,e))?;
+                    let auth = self.authorize_local_request(request.id.clone(),agent_core::Action::GatewayDelegate).await.map_err(|e| {let e=e.repository_error();(e.rpc_code(),e.to_string())})?;
+                    self.access_store.oauth_login(&auth,&proof,request.method=="oauth.consume",Arc::new(agent_policy::PolicyEngine)).await.map_err(|e|(e.rpc_code(),e.to_string()))?;
+                    Ok(json!({"accepted":true}))
+                }.await;
+                send_result(&frames,request.id,result);
+            }
+            "directory.create" | "directory.resolve" | "access.acquire" | "access.release" => {
+                let result = async {
+                    use agent_daemon_protocol::params::*;
+                    let auth = self
+                        .authorize_local_request(request.id.clone(), action)
+                        .await
+                        .map_err(|e| {
+                            let error = e.repository_error();
+                            (error.rpc_code(), error.to_string())
+                        })?;
+                    let verifier: Arc<dyn agent_core::AuthorizationVerifier> =
+                        Arc::new(agent_policy::PolicyEngine);
+                    let result: Result<Value, agent_core::RepositoryError> =
+                        match request.method.as_str() {
+                            "directory.create" => {
+                                let p: DirectoryCreateParams = parse_params(&request.params)
+                                    .map_err(|e| (INVALID_PARAMS, e))?;
+                                let binding = serde_json::to_string(&(
+                                    &auth.context.scope,
+                                    &auth.context.principal.subject_id,
+                                    &p.operation_id,
+                                ))
+                                .map_err(|_| (INVALID_PARAMS, "目录操作无效".into()))?;
+                                let key = agent_core::SessionKey(
+                                    self.session.session_key_for_operation(&binding),
+                                );
+                                self.access_store
+                                    .create_directory_session(
+                                        &auth,
+                                        &key,
+                                        self.oidc.as_ref().map_or("runtime-default",|v|v.runtime_endpoint()),
+                                        &p.operation_id,
+                                        verifier,
+                                    )
+                                    .await
+                                    .map(|v| json!(v))
+                            }
+                            "directory.resolve" => {
+                                let p: DirectoryResolveParams = parse_params(&request.params)
+                                    .map_err(|e| (INVALID_PARAMS, e))?;
+                                self.access_store
+                                    .resolve_directory_session(&auth, &p.session_id, verifier)
+                                    .await
+                                    .map(|v| json!(v))
+                            }
+                            "access.acquire" => {
+                                let p: AccessAcquireParams = parse_params(&request.params)
+                                    .map_err(|e| (INVALID_PARAMS, e))?;
+                                self.access_store
+                                    .acquire_access_at(&auth, p.class,&p.endpoint, &p.operation_id, verifier)
+                                    .await
+                                    .map(|v| json!(v))
+                            }
+                            _ => {
+                                let p: AccessReleaseParams = parse_params(&request.params)
+                                    .map_err(|e| (INVALID_PARAMS, e))?;
+                                self.access_store
+                                    .release_access(&auth, &p.operation_id, verifier)
+                                    .await
+                                    .map(|_| json!({"released":true}))
+                            }
+                        };
+                    result.map_err(|e| (e.rpc_code(), e.to_string()))
+                }
+                .await;
+                send_result(&frames, request.id, result);
+            }
+            "identity.manage" => {
+                let result = async {
+                    let p: agent_daemon_protocol::params::IdentityManageParams =
+                        parse_params(&request.params).map_err(|e| (INVALID_PARAMS, e))?;
+                    let auth = self
+                        .authorize_local_request(
+                            request.id.clone(),
+                            agent_core::Action::IdentityManage,
+                        )
+                        .await
+                        .map_err(|e| {
+                            let e = e.repository_error();
+                            (e.rpc_code(), e.to_string())
+                        })?;
+                    let receipt = self
+                        .identity_management
+                        .manage_identity(
+                            &auth,
+                            &p.command,
+                            &p.operation_id,
+                            Arc::new(agent_policy::PolicyEngine),
+                        )
+                        .await
+                        .map_err(|e| (e.rpc_code(), e.to_string()))?;
+                    Ok(json!(receipt))
+                }
+                .await;
+                send_result(&frames, request.id, result);
+            }
+            "audit.readback" => {
+                let result = match parse_params::<AuditReadParams>(&request.params) {
+                    Ok(p) => self
+                        .audit_store
+                        .read_audit_entries(&self.scope(), p.after, p.limit)
+                        .await
+                        .map(|entries| json!({"entries":entries}))
+                        .map_err(|e| (e.rpc_code(), e.to_string())),
+                    Err(e) => Err((INVALID_PARAMS, e)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "quota.readback" => {
+                let result = match parse_params::<QuotaReadParams>(&request.params) {
+                    Ok(p) => self
+                        .quota_store
+                        .read_quota_account(&self.scope(), &p.metric, p.window_start_ms)
+                        .await
+                        .map(|q| json!(q))
+                        .map_err(|e| (e.rpc_code(), e.to_string())),
+                    Err(e) => Err((INVALID_PARAMS, e)),
+                };
+                send_result(&frames, request.id, result);
+            }
+            "workflow.message" => {let result=async {let c:agent_core::WorkflowMessage=parse_params(&request.params).map_err(|e|(INVALID_PARAMS,e))?;let auth=self.authorize_local_request(request.id.clone(),agent_core::Action::SessionPrompt).await.map_err(|e|{let e=e.repository_error();(e.rpc_code(),e.to_string())})?;self.workflow_store.submit_workflow_message(&auth,&c,Arc::new(agent_policy::PolicyEngine)).await.map(|v|json!(v)).map_err(|e|(e.rpc_code(),e.to_string()))}.await;send_result(&frames,request.id,result);}
+            "workflow.publish" => {let result=async {let command:agent_core::WorkflowPublish=parse_params(&request.params).map_err(|e|(INVALID_PARAMS,e))?;let auth=self.authorize_local_request(request.id.clone(),agent_core::Action::AgentConfigure).await.map_err(|e|{let e=e.repository_error();(e.rpc_code(),e.to_string())})?;self.workflow_store.publish_workflow(&auth,&command,Arc::new(agent_policy::PolicyEngine)).await.map(|v|json!(v)).map_err(|e|(e.rpc_code(),e.to_string()))}.await;send_result(&frames,request.id,result);}
+            "workflow.start" => {let result=async {let command:agent_core::WorkflowStart=parse_params(&request.params).map_err(|e|(INVALID_PARAMS,e))?;let auth=self.authorize_local_request(request.id.clone(),agent_core::Action::SessionPrompt).await.map_err(|e|{let e=e.repository_error();(e.rpc_code(),e.to_string())})?;self.workflow_store.start_workflow(&auth,&command,Arc::new(agent_policy::PolicyEngine)).await.map(|v|json!(v)).map_err(|e|(e.rpc_code(),e.to_string()))}.await;send_result(&frames,request.id,result);}
+            "workflow.control" => {let result=async {let command:agent_core::WorkflowControl=parse_params(&request.params).map_err(|e|(INVALID_PARAMS,e))?;let auth=self.authorize_local_request(request.id.clone(),agent_core::Action::SessionManage).await.map_err(|e|{let e=e.repository_error();(e.rpc_code(),e.to_string())})?;self.workflow_store.control_workflow(&auth,&command,Arc::new(agent_policy::PolicyEngine)).await.map(|v|json!(v)).map_err(|e|(e.rpc_code(),e.to_string()))}.await;send_result(&frames,request.id,result);}
+            "workflow.read" => {let result=async {let p:agent_daemon_protocol::params::WorkflowReadParams=parse_params(&request.params).map_err(|e|(INVALID_PARAMS,e))?;self.workflow_store.read_workflow(&self.scope(),&p.id,p.after,p.limit).await.map(|v|json!(v)).map_err(|e|(e.rpc_code(),e.to_string()))}.await;send_result(&frames,request.id,result);}
+            "registry.mutate" => {
+                let result=async {
+                    let mutation:agent_core::RegistryMutation=parse_params(&request.params).map_err(|e|(INVALID_PARAMS,e))?;
+                    let action=match &mutation.command {agent_core::RegistryCommand::ConfigureTrust{..}=>agent_core::Action::IdentityManage,agent_core::RegistryCommand::Publish{..}=>agent_core::Action::PluginInstall,_=>agent_core::Action::AgentConfigure};
+                    let auth=self.authorize_local_request(request.id.clone(),action).await.map_err(|e|{let e=e.repository_error();(e.rpc_code(),e.to_string())})?;
+                    let receipt=self.registry_store.mutate_registry(&auth,&mutation,Arc::new(agent_policy::PolicyEngine)).await.map_err(|e|(e.rpc_code(),e.to_string()))?;
+                    Ok(json!(receipt))
+                }.await;send_result(&frames,request.id,result);
+            }
+            "registry.generation" => {
+                let result=async {let params:agent_daemon_protocol::params::RegistryGenerationParams=parse_params(&request.params).map_err(|e|(INVALID_PARAMS,e))?;
+                    if params.digest.len()!=64{return Err((INVALID_PARAMS,"发行代digest无效".into()))}
+                    let read=self.registry_store.read_registry(&self.scope()).await.map_err(|e|(e.rpc_code(),e.to_string()))?;
+                    let generation=read.generations.into_iter().find(|g|g.pack_digest==params.digest).ok_or((agent_core::AuthorizationError::Forbidden.rpc_code(),"资源不可访问".into()))?;Ok(json!(generation))
+                }.await;send_result(&frames,request.id,result);
+            }
+            "registry.readback" => {
+                let result=self.registry_store.read_registry(&self.scope()).await.map(|v|json!({"state":v.state,"generations":v.generations.into_iter().map(|g|json!({"digest":g.pack_digest,"version":g.manifest.definition.version,"effective_config_digest":g.effective.digest,"trust_digest":g.trust_digest,"scan_digest":g.scan_digest})).collect::<Vec<_>>()})).map_err(|e|(e.rpc_code(),e.to_string()));send_result(&frames,request.id,result);
+            }
+            "billing.configure" => {
+                let result=async {
+                    let p=parse_params::<BillingConfigureParams>(&request.params).map_err(|e|(INVALID_PARAMS,e))?;
+                    let auth=self.authorize_local_request(request.id.clone(),agent_core::Action::IdentityManage).await.map_err(|e|(INTERNAL_ERROR,e.to_string()))?;
+                    self.billing_store.configure_billing(&auth,&p.policy,&p.operation_id,Arc::new(agent_policy::PolicyEngine)).await.map(|p|json!(p)).map_err(|e|(e.rpc_code(),e.to_string()))
+                }.await;send_result(&frames,request.id,result);
+            }
+            "billing.accounts" => {
+                let result=self.billing_store.read_billing_accounts(&self.scope()).await.map(|p|json!({"accounts":p})).map_err(|e|(e.rpc_code(),e.to_string()));
+                send_result(&frames,request.id,result);
+            }
+            "billing.readback" => {
+                let result=self.billing_store.read_billing_policy(&self.scope()).await.map(|p|json!(p)).map_err(|e|(e.rpc_code(),e.to_string()));
+                send_result(&frames,request.id,result);
+            }
+            "billing.usage" => {
+                let result=async {let p=parse_params::<BillingUsageParams>(&request.params).map_err(|e|(INVALID_PARAMS,e))?;
+                    self.billing_store.read_billing_usage(&self.scope(),p.after,p.limit).await.map(|p|json!(p)).map_err(|e|(e.rpc_code(),e.to_string()))
+                }.await;send_result(&frames,request.id,result);
+            }
+            "quota.configure" => {
+                let result = async {
+                    let p = parse_params::<QuotaConfigureParams>(&request.params)
+                        .map_err(|e| (INVALID_PARAMS, e))?;
+                    let auth = self
+                        .authorize_local_request(
+                            request.id.clone(),
+                            agent_core::Action::AgentConfigure,
+                        )
+                        .await
+                        .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+                    self.quota_management
+                        .configure_quota_window(
+                            &auth,
+                            &agent_core::QuotaAccount {
+                                scope: auth.context.scope.clone(),
+                                metric: p.metric,
+                                window_start_ms: p.window_start_ms,
+                                window_end_ms: p.window_end_ms,
+                                budget: p.budget,
+                                consumed: 0,
+                                reserved: 0,
+                                revision: 0,
+                            },
+                            Arc::new(agent_policy::PolicyEngine),
+                        )
+                        .await
+                        .map_err(|e| (e.rpc_code(), e.to_string()))?;
+                    Ok(json!({"configured":true}))
+                }
+                .await;
+                send_result(&frames, request.id, result);
+            }
+
+            "outbox.readback" => {
+                let result = match parse_params::<OutboxReadParams>(&request.params) {
+                    Ok(params) if (1..=64).contains(&params.limit) => self
+                        .publication_store
+                        .read_publications(&self.scope(), params.after, params.limit + 1)
+                        .await
+                        .map(|mut records| {
+                            let has_more = records.len() > params.limit as usize;
+                            records.truncate(params.limit as usize);
+                            let cursor = records.last().map_or(params.after, |r| r.cursor);
+                            json!(agent_core::OutboxReadback {
+                                records: records.into_iter().map(Into::into).collect(),
+                                cursor,
+                                has_more
+                            })
+                        }),
+                    _ => Err(agent_core::CoordinationError::InvalidRequest),
+                };
+                let response = match result {
+                    Ok(value) => JsonRpcResponse::success(request.id, value),
+                    Err(error) => JsonRpcResponse::failure_data(
+                        request.id,
+                        error.rpc_code(),
+                        error.to_string(),
+                        json!({"kind":error,"retryable":error.retryable(),"safe_auto_retry":error.retryable(),"recovery_action":error.recovery_action()}),
+                    ),
+                };
+                let _ = frames.send(ServerFrame::Response(response));
+            }
+            "identity.readback" => match self.local_identity().await {
+                Ok(identity) => send_result(&frames, request.id, Ok(json!(identity))),
+                Err(error) => send_authorization_error(&frames, request.id, error),
+            },
+            "run.authorization" => {
+                let params = match parse_params::<AuthorizationReadParams>(&request.params) {
+                    Ok(params) => params,
+                    Err(error) => {
+                        send_result(&frames, request.id, Err((INVALID_PARAMS, error)));
+                        return;
+                    }
+                };
+                match self
+                    .identity_store
+                    .read_authorization(&agent_core::EnterpriseOwnerEnvelope {
+                        scope: self.scope(),
+                        owner: params.owner,
+                    })
+                    .await
+                {
+                    Ok(snapshot) => {
+                        send_result(&frames, request.id, Ok(json!({"snapshot":snapshot})))
+                    }
+                    Err(error) => send_authorization_error(&frames, request.id, error.into()),
+                }
+            }
+
             "context.readback" => {
                 let result = parse_params::<ContextReadParams>(&request.params)
-                    .map_err(|error| (INVALID_PARAMS, error))
-                    .and_then(|params| self.context_readback(params));
+                    .map_err(|error| (INVALID_PARAMS, error));
+                let result = match result {
+                    Ok(params) => self.context_readback(params).await,
+                    Err(error) => Err(error),
+                };
                 send_result(&frames, request.id, result);
             }
             "hooks.readback" => {
-                let result = parse_params::<HookReadParams>(&request.params)
-                    .map_err(|e| (INVALID_PARAMS, e))
-                    .and_then(|p| {
-                        self.run_store
-                            .hook_readback(
-                                &SessionId(p.session_id),
-                                &p.expected_lifetime,
-                                p.after_cursor,
-                                p.limit,
-                            )
-                            .map(|readback| json!(readback))
-                            .map_err(|e| (REQUEST_CONFLICT, e.to_string()))
-                    });
+                let result = match parse_params::<HookReadParams>(&request.params) {
+                    Ok(p) => self
+                        .hook_observation_store
+                        .read_hook_history(
+                            &self.scope(),
+                            &SessionId(p.session_id),
+                            &p.expected_lifetime,
+                            p.after_cursor,
+                            p.limit,
+                        )
+                        .await
+                        .map(|readback| json!(readback))
+                        .map_err(|error| (error.rpc_code(), error.to_string())),
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
                 send_result(&frames, request.id, result);
             }
             "sessions.plan.readback" => {
-                let result = parse_params::<PlanReadParams>(&request.params)
-                    .map_err(|e| (INVALID_PARAMS, e))
-                    .and_then(|p| {
-                        self.run_store
-                            .plan_readback(&SessionId(p.session_id))
-                            .map_err(|e| (REQUEST_CONFLICT, e.to_string()))
-                    })
-                    .and_then(|v| {
-                        serde_json::to_value(v).map_err(|e| (INTERNAL_ERROR, e.to_string()))
-                    });
+                let result = match parse_params::<PlanReadParams>(&request.params) {
+                    Ok(params) => self
+                        .plan_control_store
+                        .read_session_plan(&self.scope(), &SessionId(params.session_id))
+                        .await
+                        .map_err(|e| (e.rpc_code(), e.to_string()))
+                        .and_then(|v| {
+                            serde_json::to_value(v).map_err(|e| (INTERNAL_ERROR, e.to_string()))
+                        }),
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
                 send_result(&frames, request.id, result);
             }
             "sessions.plan.discard" => {
@@ -118,19 +754,29 @@ impl DaemonState {
             "resources.reconcile" => {
                 let result = match parse_params::<ResourceReconcileParams>(&request.params) {
                     Ok(params) => {
-                        let owner = self.run_store.run_owner(&params.owner_run_id);
-                        match owner {
-                            Ok(owner) if owner.session_key.0 == params.session_id => self
-                                .run_store
-                                .reconcile_resource(
-                                    &owner,
-                                    params.resource_id,
-                                    &params.terminal_state,
-                                    &params.evidence,
-                                )
-                                .map(|r| json!({"resource":r,"kill_sent":false}))
-                                .map_err(|e| (REQUEST_CONFLICT, e.to_string())),
-                            _ => Err((REQUEST_CONFLICT, "resource reconcile owner 不匹配".into())),
+                        let scope = self.scope();
+                        match self
+                            .run_fact_store
+                            .read_exact_run_owner(&scope, &params.owner_run_id)
+                            .await
+                        {
+                            Ok(owner) if owner.session_key.0 == params.session_id => {
+                                let envelope = agent_core::EnterpriseOwnerEnvelope { scope, owner };
+                                self.resource_store
+                                    .reconcile_run_resource(
+                                        &envelope,
+                                        params.resource_id,
+                                        &params.terminal_state,
+                                        &params.evidence,
+                                    )
+                                    .await
+                                    .map(|r| json!({"resource":r,"kill_sent":false}))
+                                    .map_err(|e| (e.rpc_code(), e.to_string()))
+                            }
+                            Ok(_) => {
+                                Err((REQUEST_CONFLICT, "resource reconcile owner不匹配".into()))
+                            }
+                            Err(error) => Err(lifecycle_rpc_error(error)),
                         }
                     }
                     Err(e) => Err((INVALID_PARAMS, e)),
@@ -146,21 +792,30 @@ impl DaemonState {
                 send_result(&frames, request.id, result);
             }
             "artifacts.read" => {
-                use base64::Engine;
-                let result = match parse_params::<ArtifactReadParams>(&request.params) {
-                    Ok(params) => {
-                        let owner = self.run_store.run_owner(&params.run_id);
-                        match owner {
-                            Ok(owner) if owner.session_key.0==params.session_id=>self.run_store.read_run_artifact(&owner,&params.artifact_ref,params.offset,params.limit).map(|bytes|json!({"data_base64":base64::engine::general_purpose::STANDARD.encode(&bytes),"offset":params.offset,"cursor":params.offset+bytes.len() as u64,"has_more":bytes.len()==params.limit.clamp(1,16384)})).map_err(|e|(REQUEST_CONFLICT,e.to_string())),
-                            _=>Err((REQUEST_CONFLICT,"artifact owner 不匹配".into())),
-                        }
+                let params = match parse_params::<ArtifactReadParams>(&request.params) {
+                    Ok(params) => params,
+                    Err(error) => {
+                        send_result(&frames, request.id, Err((INVALID_PARAMS, error)));
+                        return;
                     }
-                    Err(error) => Err((INVALID_PARAMS, error)),
                 };
-                send_result(&frames, request.id, result);
+                let result = self.artifact_readback(&params).await;
+                match result {
+                    Ok(value) => send_result(&frames, request.id, Ok(value)),
+                    Err(RuntimeError::Artifact(reason)) => {
+                        let response = JsonRpcResponse::failure_data(
+                            request.id,
+                            reason.rpc_code(),
+                            reason.to_string(),
+                            json!({"domain":"artifact","kind":reason,"retryable":matches!(reason,agent_core::ArtifactError::StorageUnavailable),"safe_auto_retry":matches!(reason,agent_core::ArtifactError::StorageUnavailable),"recovery_action":reason.recovery_action()}),
+                        );
+                        let _ = frames.send(ServerFrame::Response(response));
+                    }
+                    Err(error) => send_authorization_error(&frames, request.id, error),
+                }
             }
             "runtime.doctor" => {
-                let result=self.maintenance_store.health_report().map_err(|e|(INTERNAL_ERROR,e.to_string())).map(|storage| {
+                let result=self.daemon_maintenance_store.read_storage_health(&self.scope()).await.map_err(|e|(e.rpc_code(),e.to_string())).map(|storage| {
                     let profiles=self.config_store.load().map(|c|c.profiles.iter().map(ProfileSummary::from_profile).collect::<Vec<_>>()).unwrap_or_default();
                     json!({"storage":storage,"profiles":profiles,"native_boundary":"soft","mcp_pending_limit":64,"mcp_response_bytes":262144,"remote_mcp":"HTTPS, DNS pinning, redirects disabled"})
                 });
@@ -306,25 +961,27 @@ impl DaemonState {
                 send_result(&frames, request.id, result);
             }
             "interaction.read" => {
-                let result = parse_params::<InteractionReadParams>(&request.params)
-                    .map_err(|error| (INVALID_PARAMS, error))
-                    .and_then(|params| {
-                        self.run_store
-                            .read_interaction(&params.interaction_id)
-                            .map(|interaction| json!({"interaction": interaction}))
-                            .map_err(|error| (INTERNAL_ERROR, error.to_string()))
-                    });
+                let result = match parse_params::<InteractionReadParams>(&request.params) {
+                    Ok(params) => self
+                        .interaction_store
+                        .read_interaction_record(&self.scope(), &params.interaction_id)
+                        .await
+                        .map(|interaction| json!({"interaction":interaction}))
+                        .map_err(|e| (e.rpc_code(), e.to_string())),
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
                 send_result(&frames, request.id, result);
             }
             "interaction.list" => {
-                let result = parse_params::<SessionResumeParams>(&request.params)
-                    .map_err(|error| (INVALID_PARAMS, error))
-                    .and_then(|params| {
-                        self.run_store
-                            .list_interactions(&params.session_id)
-                            .map(|interactions| json!({"interactions": interactions}))
-                            .map_err(|error| (INTERNAL_ERROR, error.to_string()))
-                    });
+                let result = match parse_params::<SessionResumeParams>(&request.params) {
+                    Ok(params) => self
+                        .interaction_store
+                        .read_interaction_list(&self.scope(), &SessionId(params.session_id))
+                        .await
+                        .map(|interactions| json!({"interactions":interactions}))
+                        .map_err(|e| (e.rpc_code(), e.to_string())),
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
                 send_result(&frames, request.id, result);
             }
             "agent.cancel" => {
@@ -342,23 +999,25 @@ impl DaemonState {
                 send_result(&frames, request.id, result);
             }
             "list_subagents" => {
-                let result = parse_params::<SubagentListParams>(&request.params)
-                    .map_err(|error| (INVALID_PARAMS, error))
-                    .and_then(|params| {
-                        self.run_store
-                            .list_delegations(&params.root_run_id)
-                            .map(|children| json!({"children": children}))
-                            .map_err(|error| (INTERNAL_ERROR, error.to_string()))
-                    });
+                let result = match parse_params::<SubagentListParams>(&request.params) {
+                    Ok(params) => self
+                        .delegation_store
+                        .read_delegation_list(&self.scope(), &params.root_run_id)
+                        .await
+                        .map(|children| json!({"children":children}))
+                        .map_err(|e| (e.rpc_code(), e.to_string())),
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
                 send_result(&frames, request.id, result);
             }
             "read_subagent" => {
-                let result = parse_params::<SubagentScopeParams>(&request.params)
-                    .map_err(|error| (INVALID_PARAMS, error))
-                    .and_then(|params| {
-                        self.scoped_delegation(&params)
-                            .map(|child| json!({"child": child}))
-                    });
+                let result = match parse_params::<SubagentScopeParams>(&request.params) {
+                    Ok(params) => self
+                        .scoped_delegation(&params)
+                        .await
+                        .map(|child| json!({"child":child})),
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
                 send_result(&frames, request.id, result);
             }
             "wait_subagents" => {
@@ -371,7 +1030,7 @@ impl DaemonState {
             "cancel_subagent" => {
                 let result = match parse_params::<SubagentScopeParams>(&request.params) {
                     Ok(params) => {
-                        let child = self.scoped_delegation(&params);
+                        let child = self.scoped_delegation(&params).await;
                         match child {
                             Ok(child) => {
                                 self.cancel(CancelParams {
@@ -390,55 +1049,87 @@ impl DaemonState {
                 send_result(&frames, request.id, result);
             }
             "subagent.result.reserve" | "subagent.result.release" | "subagent.result.commit" => {
-                let result = parse_params::<SubagentResultParams>(&request.params)
-                    .map_err(|error| (INVALID_PARAMS, error))
-                    .and_then(|params| {
-                        self.scoped_delegation(&SubagentScopeParams {
-                            parent_run_id: params.parent_run_id,
-                            child_run_id: params.child_run_id.clone(),
-                        })?;
-                        let child = match request.method.as_str() {
-                            "subagent.result.reserve" => self.run_store.reserve_delegation_result(
-                                &params.child_run_id,
-                                &params.owner,
-                                params.revision,
-                            ),
-                            "subagent.result.release" => self.run_store.release_delegation_result(
-                                &params.child_run_id,
-                                &params.owner,
-                                params.revision,
-                            ),
-                            _ => self.run_store.deliver_delegation_result(
-                                &params.child_run_id,
-                                &params.owner,
-                                params.revision,
-                            ),
+                let result = match parse_params::<SubagentResultParams>(&request.params) {
+                    Ok(params) => {
+                        let scope = self.scope();
+                        match self
+                            .run_fact_store
+                            .read_exact_run_owner(&scope, &params.parent_run_id)
+                            .await
+                        {
+                            Ok(owner) => {
+                                let envelope = agent_core::EnterpriseOwnerEnvelope { scope, owner };
+                                let child = match request.method.as_str() {
+                                    "subagent.result.reserve" => {
+                                        self.delegation_store
+                                            .reserve_child_result(
+                                                &envelope,
+                                                &params.child_run_id,
+                                                &params.owner,
+                                                params.revision,
+                                            )
+                                            .await
+                                    }
+                                    "subagent.result.release" => {
+                                        self.delegation_store
+                                            .transition_child_result(
+                                                &envelope,
+                                                &params.child_run_id,
+                                                &params.owner,
+                                                params.revision,
+                                                "unconsumed",
+                                            )
+                                            .await
+                                    }
+                                    _ => {
+                                        self.delegation_store
+                                            .transition_child_result(
+                                                &envelope,
+                                                &params.child_run_id,
+                                                &params.owner,
+                                                params.revision,
+                                                "delivered",
+                                            )
+                                            .await
+                                    }
+                                };
+                                child
+                                    .map(|child| json!({"child":child}))
+                                    .map_err(|e| (e.rpc_code(), e.to_string()))
+                            }
+                            Err(error) => Err(lifecycle_rpc_error(error)),
                         }
-                        .map_err(|error| (REQUEST_CONFLICT, error.to_string()))?;
-                        Ok(json!({"child": child}))
-                    });
+                    }
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
                 send_result(&frames, request.id, result);
             }
             "queue.list" => {
-                let result = parse_params::<SessionResumeParams>(&request.params)
-                    .map_err(|error| (INVALID_PARAMS, error))
-                    .and_then(|params| {
-                        self.run_store
-                            .queued_messages(&params.session_id)
-                            .map(|items| json!({"items": items}))
-                            .map_err(|error| (INTERNAL_ERROR, error.to_string()))
-                    });
+                let result = match parse_params::<SessionResumeParams>(&request.params) {
+                    Ok(params) => self
+                        .queue_store
+                        .read_queued_messages(&self.scope(), &SessionId(params.session_id))
+                        .await
+                        .map(|items| json!({"items":items}))
+                        .map_err(|e| (e.rpc_code(), e.to_string())),
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
                 send_result(&frames, request.id, result);
             }
             "queue.read" => {
-                let result = parse_params::<QueueItemParams>(&request.params)
-                    .map_err(|error| (INVALID_PARAMS, error))
-                    .and_then(|params| {
-                        self.run_store
-                            .queued_message(&params.session_id, &params.run_id)
-                            .map(|item| json!({"item": item}))
-                            .map_err(|error| (INTERNAL_ERROR, error.to_string()))
-                    });
+                let result = match parse_params::<QueueItemParams>(&request.params) {
+                    Ok(params) => self
+                        .queue_store
+                        .read_queued_message(
+                            &self.scope(),
+                            &SessionId(params.session_id),
+                            &params.run_id,
+                        )
+                        .await
+                        .map(|item| json!({"item":item}))
+                        .map_err(|e| (e.rpc_code(), e.to_string())),
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
                 send_result(&frames, request.id, result);
             }
             "queue.remove" => {
@@ -471,92 +1162,34 @@ impl DaemonState {
                 send_result(&frames, request.id, result);
             }
             "run.read" => {
-                let result = parse_params::<RunReadParams>(&request.params)
-                    .map_err(|error| (INVALID_PARAMS, error))
-                    .and_then(|params| {
-                        self.run_store
-                            .run_view_readback(&params.run_id)
-                            .map_err(|error| (INTERNAL_ERROR, error.to_string()))
-                            .and_then(|run| {
-                                let (run, view_stamp) =
-                                    run.ok_or((INVALID_PARAMS, "run 不存在".into()))?;
-                                let snapshot = self
-                                    .run_store
-                                    .run_snapshot(&run.run_id)
-                                    .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
-                                let mut fact = if run.kind == agent_core::RunKind::Compact {
-                                    let (record, compact) = self
-                                        .run_store
-                                        .compact_snapshot(&run.run_id)
-                                        .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
-                                    let mut fact = json!(record);
-                                    fact["compact"] = json!(compact);
-                                    fact
-                                } else {
-                                    json!(run)
-                                };
-                                if let Some(stamp) = view_stamp {
-                                    fact["_my_agent_view"] = json!(stamp);
-                                }
-                                fact["snapshot"] = json!(snapshot);
-                                fact["continuation_parent_run_id"] = json!(
-                                    self.run_store
-                                        .hook_continuation_parent(&run.run_id)
-                                        .map_err(|e| (INTERNAL_ERROR, e.to_string()))?
-                                );
-                                fact["continuation_run_id"] = json!(
-                                    self.run_store
-                                        .hook_continuation_child(&run.run_id)
-                                        .map_err(|e| (INTERNAL_ERROR, e.to_string()))?
-                                );
-                                Ok(fact)
-                            })
-                    });
+                let result = match parse_params::<RunReadParams>(&request.params) {
+                    Ok(params) => self.run_fact_value(&params.run_id, "fact").await,
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
                 send_result(&frames, request.id, result);
             }
             "run.discovery" => {
-                let result = parse_params::<RunReadParams>(&request.params)
-                    .map_err(|error| (INVALID_PARAMS, error))
-                    .and_then(|params| {
-                        self.run_store
-                            .discoveries(&params.run_id)
-                            .map(|receipts| json!({"receipts":receipts}))
-                            .map_err(|error| (INTERNAL_ERROR, error.to_string()))
-                    });
+                let result = match parse_params::<RunReadParams>(&request.params) {
+                    Ok(params) => self
+                        .run_discovery_store
+                        .read_run_discoveries(&self.scope(), &params.run_id)
+                        .await
+                        .map(|receipts| json!({"receipts":receipts}))
+                        .map_err(|error| (error.rpc_code(), error.to_string())),
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
                 send_result(&frames, request.id, result);
             }
-            "run.tools" => {
-                let result = parse_params::<RunReadParams>(&request.params)
-                    .map_err(|error| (INVALID_PARAMS, error))
-                    .and_then(|params| {
-                        self.run_store
-                            .tool_receipts(&params.run_id)
-                            .map(|receipts| json!({"receipts": receipts}))
-                            .map_err(|error| (INTERNAL_ERROR, error.to_string()))
-                    });
-                send_result(&frames, request.id, result);
-            }
-            "run.provider_attempts" => {
-                let result = parse_params::<RunReadParams>(&request.params)
-                    .map_err(|error| (INVALID_PARAMS, error))
-                    .and_then(|params| {
-                        let attempts = self
-                            .run_store
-                            .provider_attempts(&params.run_id)
-                            .map_err(|error| (INTERNAL_ERROR, error.to_string()))?;
-                        let usage = self
-                            .run_store
-                            .provider_usage(&params.run_id)
-                            .map_err(|error| (INTERNAL_ERROR, error.to_string()))?;
-                        let route = self
-                            .run_store
-                            .route_snapshot(&params.run_id)
-                            .map_err(|error| (INTERNAL_ERROR, error.to_string()))?;
-                        let final_candidate_index =
-                            attempts.last().map(|attempt| attempt.candidate_index);
-                        Ok(json!({"route": route, "attempts": attempts, "usage": usage,
-                            "final_candidate_index": final_candidate_index}))
-                    });
+            "run.tools" | "run.provider_attempts" => {
+                let view = if request.method == "run.tools" {
+                    "tools"
+                } else {
+                    "provider"
+                };
+                let result = match parse_params::<RunReadParams>(&request.params) {
+                    Ok(params) => self.run_fact_value(&params.run_id, view).await,
+                    Err(error) => Err((INVALID_PARAMS, error)),
+                };
                 send_result(&frames, request.id, result);
             }
             "run.audit" => {
@@ -579,17 +1212,31 @@ impl DaemonState {
                         if active {
                             Err((REQUEST_CONFLICT, "run 仍有活动执行体".into()))
                         } else {
-                            self.maintenance_store
-                                .reconcile_unknown(
-                                    &params.run_id,
-                                    &params.session_id,
-                                    params.expected_last_seq,
-                                    params.status,
-                                    params.content.as_deref(),
-                                    &params.evidence,
-                                )
-                                .map(|run| json!({"run": run}))
-                                .map_err(|error| (REQUEST_CONFLICT, error.to_string()))
+                            match self
+                                .run_fact_store
+                                .read_exact_run_owner(&self.scope(), &params.run_id)
+                                .await
+                            {
+                                Ok(owner) if owner.session_key == params.session_id => {
+                                    let envelope = agent_core::EnterpriseOwnerEnvelope {
+                                        scope: self.scope(),
+                                        owner,
+                                    };
+                                    self.daemon_maintenance_store
+                                        .reconcile_run_outcome(
+                                            &envelope,
+                                            params.expected_last_seq,
+                                            params.status,
+                                            params.content.as_deref(),
+                                            &params.evidence,
+                                        )
+                                        .await
+                                        .map(|run| json!({"run":run}))
+                                        .map_err(|e| (e.rpc_code(), e.to_string()))
+                                }
+                                Ok(_) => Err((REQUEST_CONFLICT, "run不属于指定session".into())),
+                                Err(error) => Err((error.rpc_code(), error.to_string())),
+                            }
                         }
                     }
                     Err(error) => Err((INVALID_PARAMS, error)),
@@ -597,19 +1244,17 @@ impl DaemonState {
                 send_result(&frames, request.id, result);
             }
             "run.events" => {
-                let result = parse_params::<RunEventsParams>(&request.params)
-                    .map_err(|error| (INVALID_PARAMS, error))
-                    .and_then(|params| {
-                        self.run_store
-                            .events_after(
-                                &params.run_id,
-                                params.after_seq.unwrap_or(EventSeq(0)),
-                                params.limit.unwrap_or(200),
-                            )
-                            .map(|events| json!({"events": events}))
-                            .map_err(|error| (INTERNAL_ERROR, error.to_string()))
-                    });
-                send_result(&frames, request.id, result);
+                let params = match parse_params::<RunEventsParams>(&request.params) {
+                    Ok(params) => params,
+                    Err(error) => {
+                        send_result(&frames, request.id, Err((INVALID_PARAMS, error)));
+                        return;
+                    }
+                };
+                match self.run_event_readback(&params).await {
+                    Ok(page) => send_result(&frames, request.id, Ok(json!(page))),
+                    Err(error) => send_authorization_error(&frames, request.id, error.into()),
+                }
             }
             "slash.execute" => {
                 let result = match parse_params::<SlashExecuteParams>(&request.params) {
@@ -656,10 +1301,11 @@ impl DaemonState {
         tools: Option<Vec<String>>,
     ) -> Result<Value, (i64, String)> {
         let parent = self
-            .run_store
-            .read_run(&parent_run_id)
-            .map_err(|error| (INTERNAL_ERROR, error.to_string()))?
-            .ok_or((INVALID_PARAMS, "父 run 不存在".into()))?;
+            .run_fact_store
+            .read_run_fact(&self.scope(), &parent_run_id)
+            .await
+            .map_err(|e| (e.rpc_code(), e.to_string()))?
+            .run;
         let response = self
             .spawn_subagent(SpawnSubagentParams {
                 parent_session_id: parent.session_id,
@@ -698,10 +1344,12 @@ impl DaemonState {
         parent_run_id: RunId,
         child_run_id: RunId,
     ) -> Result<Value, (i64, String)> {
-        let child = self.scoped_delegation(&SubagentScopeParams {
-            parent_run_id,
-            child_run_id,
-        })?;
+        let child = self
+            .scoped_delegation(&SubagentScopeParams {
+                parent_run_id,
+                child_run_id,
+            })
+            .await?;
         self.cancel(CancelParams {
             exact_owner: None,
             request_id: None,
@@ -716,17 +1364,39 @@ impl DaemonState {
         params: SpawnSubagentParams,
     ) -> Result<Value, (i64, String)> {
         let parent = self
-            .run_store
-            .read_run(&params.parent_run_id)
-            .map_err(|error| (INTERNAL_ERROR, error.to_string()))?
-            .ok_or((INVALID_PARAMS, "父 run 不存在".into()))?;
+            .run_fact_store
+            .read_run_fact(&self.scope(), &params.parent_run_id)
+            .await
+            .map_err(|e| (e.rpc_code(), e.to_string()))?
+            .run;
         if parent.session_id != params.parent_session_id {
             return Err((REQUEST_CONFLICT, "父 run 不属于指定 session".into()));
         }
+        let scope = self.scope();
+        let parent_owner =
+            if let Some(envelope) = agent_runtime::loop_engine::current_execution_envelope() {
+                if envelope.scope != scope
+                    || envelope.owner.run_id != params.parent_run_id
+                    || envelope.owner.session_key != params.parent_session_id
+                {
+                    return Err((REQUEST_CONFLICT, "委派工具的固定parent proof不匹配".into()));
+                }
+                envelope.owner
+            } else {
+                self.run_fact_store
+                    .read_exact_run_owner(&scope, &params.parent_run_id)
+                    .await
+                    .map_err(lifecycle_rpc_error)?
+            };
+        let envelope = agent_core::EnterpriseOwnerEnvelope {
+            scope: scope.clone(),
+            owner: parent_owner,
+        };
         let parent_delegation = self
-            .run_store
-            .delegation(&params.parent_run_id)
-            .map_err(|error| (INTERNAL_ERROR, error.to_string()))?;
+            .delegation_store
+            .read_delegation_record(&scope, &params.parent_run_id)
+            .await
+            .map_err(|e| (e.rpc_code(), e.to_string()))?;
         let requested_tools = params.tools.unwrap_or_else(|| vec!["read_file".into()]);
         // This first durable slice only grants the read-only capability. A child of a
         // child must also inherit it from its own immutable capability snapshot.
@@ -799,9 +1469,10 @@ impl DaemonState {
             .map_or(deadline_ms, |record| deadline_ms.min(record.deadline_ms));
         let guard = self.session_supervisor.control_lock.lock().await;
         let duplicate = self
-            .run_store
-            .delegation_by_spawn_key(&params.parent_run_id, &params.spawn_key)
-            .map_err(|error| (INTERNAL_ERROR, error.to_string()))?
+            .delegation_store
+            .read_spawned_delegation(&scope, &params.parent_run_id, &params.spawn_key)
+            .await
+            .map_err(|e| (e.rpc_code(), e.to_string()))?
             .is_some();
         if !duplicate {
             let key = ActiveKey {
@@ -816,23 +1487,27 @@ impl DaemonState {
             }
         }
         let child = self
-            .run_store
-            .admit_delegation(DelegationRequest {
-                parent_session_id: params.parent_session_id,
-                parent_run_id: params.parent_run_id,
-                child_session_id: SessionId(child_session_id),
-                spawn_key: params.spawn_key,
-                task: params.task.clone(),
-                context_source_ids: params.context_source_ids,
-                tools: requested_tools,
-                permission_mode,
-                cwd,
-                max_rounds,
-                max_tokens,
-                max_tool_calls,
-                deadline_ms,
-            })
-            .map_err(|error| (REQUEST_CONFLICT, error.to_string()))?;
+            .delegation_store
+            .admit_child_delegation(
+                &envelope,
+                &DelegationRequest {
+                    parent_session_id: params.parent_session_id,
+                    parent_run_id: params.parent_run_id,
+                    child_session_id: SessionId(child_session_id),
+                    spawn_key: params.spawn_key,
+                    task: params.task.clone(),
+                    context_source_ids: params.context_source_ids,
+                    tools: requested_tools,
+                    permission_mode,
+                    cwd,
+                    max_rounds,
+                    max_tokens,
+                    max_tool_calls,
+                    deadline_ms,
+                },
+            )
+            .await
+            .map_err(|e| (e.rpc_code(), e.to_string()))?;
         drop(guard);
         self.notify_delegation_parent(&child, EventKind::DelegationSpawned)
             .await;
@@ -858,20 +1533,15 @@ impl DaemonState {
             "child_run_id": child.child_run_id, "status": child.status, "child": child}))
     }
 
-    fn scoped_delegation(
+    async fn scoped_delegation(
         &self,
         params: &SubagentScopeParams,
     ) -> Result<DelegationRecord, (i64, String)> {
-        let child = self
-            .run_store
-            .delegation(&params.child_run_id)
-            .map_err(|error| (INTERNAL_ERROR, error.to_string()))?
-            .ok_or((INVALID_PARAMS, "子 Agent 不存在".into()))?;
-        if child.parent_run_id != params.parent_run_id && child.root_run_id != params.parent_run_id
-        {
-            return Err((REQUEST_CONFLICT, "child 不属于指定委派作用域".into()));
-        }
-        Ok(child)
+        self.delegation_store
+            .read_scoped_delegation(&self.scope(), &params.parent_run_id, &params.child_run_id)
+            .await
+            .map_err(|e| (e.rpc_code(), e.to_string()))?
+            .ok_or((INVALID_PARAMS, "子Agent不存在".into()))
     }
 
     async fn wait_subagents(&self, params: WaitSubagentsParams) -> Result<Value, (i64, String)> {
@@ -887,16 +1557,19 @@ impl DaemonState {
             let mut children = Vec::with_capacity(params.child_run_ids.len());
             let mut checkpoints = Vec::new();
             for child_run_id in &params.child_run_ids {
-                let child = self.scoped_delegation(&SubagentScopeParams {
-                    parent_run_id: params.parent_run_id.clone(),
-                    child_run_id: child_run_id.clone(),
-                })?;
+                let child = self
+                    .scoped_delegation(&SubagentScopeParams {
+                        parent_run_id: params.parent_run_id.clone(),
+                        child_run_id: child_run_id.clone(),
+                    })
+                    .await?;
                 if let Some(after_seq) = params.after_seq {
                     let run = self
-                        .run_store
-                        .read_run(child_run_id)
-                        .map_err(|error| (INTERNAL_ERROR, error.to_string()))?
-                        .ok_or((INVALID_PARAMS, "child run 不存在".into()))?;
+                        .run_fact_store
+                        .read_run_fact(&self.scope(), child_run_id)
+                        .await
+                        .map_err(|e| (e.rpc_code(), e.to_string()))?
+                        .run;
                     if run.last_seq.0 > after_seq.0 {
                         checkpoints
                             .push(json!({"child_run_id": child_run_id, "last_seq": run.last_seq}));
@@ -920,9 +1593,14 @@ impl DaemonState {
     }
 
     async fn notify_delegation_parent(&self, child: &DelegationRecord, kind: EventKind) {
-        let Ok(Some(parent)) = self.run_store.read_run(&child.parent_run_id) else {
+        let Ok(fact) = self
+            .run_fact_store
+            .read_run_fact(&self.scope(), &child.parent_run_id)
+            .await
+        else {
             return;
         };
+        let parent = fact.run;
         let key = ActiveKey {
             session_id: parent.session_id.0,
             request_id: parent.request_id.clone(),
@@ -934,11 +1612,16 @@ impl DaemonState {
             Some(name) => name,
             None => return,
         };
-        let event = match self.run_store.latest_view_event(
-            &child.parent_run_id,
-            &name,
-            Some(&child.child_run_id),
-        ) {
+        let event = match self
+            .event_store
+            .read_run_view_event(
+                &self.scope(),
+                &child.parent_run_id,
+                &name,
+                Some(&child.child_run_id),
+            )
+            .await
+        {
             Ok(Some(event)) => event,
             _ => return,
         };
@@ -965,7 +1648,7 @@ impl DaemonState {
         Ok(ReadFileTool::new(policy))
     }
 
-    fn handle_chat_send(
+    pub(crate) fn handle_chat_send(
         self: Arc<Self>,
         request: JsonRpcRequest,
         frames: super::frames::FrameSender,
@@ -1009,8 +1692,9 @@ impl DaemonState {
                 params.expected_lifetime.as_ref(),
             ) {
                 (Some(key), Some(lifetime)) => self
-                    .run_store
-                    .session_metadata(&SessionId(key.clone()))
+                    .session_control_store
+                    .read_session_metadata(&self.scope(), &SessionId(key.clone()))
+                    .await
                     .is_ok_and(|meta| meta.is_some_and(|m| !m.deleted && m.lifetime == *lifetime)),
                 _ => false,
             };
@@ -1034,7 +1718,11 @@ impl DaemonState {
             }
         };
         let session_id = session.id.clone();
-        let delegation = match self.run_store.delegation_for_session(&session_id) {
+        let delegation = match self
+            .delegation_store
+            .read_session_delegation(&self.scope(), &SessionId(session_id.clone()))
+            .await
+        {
             Ok(record) => record,
             Err(error) => {
                 send_result(
@@ -1094,17 +1782,21 @@ impl DaemonState {
                 return;
             }
         };
-        let frozen_route = self
-            .provider_manager
-            .as_ref()
-            .map(|manager| manager.freeze(session.engine.token_budget()));
-        let frozen_engine = match session.engine.freeze_tools() {
+        let installed_generation=match self.registry_store.read_session_generation(&self.scope(),&SessionId(session_id.clone()),&session.lifetime).await {
+            Ok(g)=>g,Err(e)=>{send_result(&frames,request.id,Err((e.rpc_code(),e.to_string())));return;}
+        };
+        let frozen_route = match self.provider_manager.as_ref().map(|manager| manager.freeze(installed_generation.as_ref().map_or(session.engine.token_budget(),|g|session.engine.token_budget().min(g.effective.config.resources.context_tokens as usize)))).map(|r|installed_generation.as_ref().map_or(Ok(r.clone()),|g|r.restrict_models(&g.effective.config.models))).transpose() {
+            Ok(route)=>route,Err(e)=>{send_result(&frames,request.id,Err((INVALID_PARAMS,e.to_string())));return;}
+        };
+        let workflow_engine=if WORKFLOW_DIRECTIVE.try_with(|d|matches!(d.definition.kind,agent_core::WorkflowNodeKind::Webhook{..})).unwrap_or(false){match self.safety.clone(){Some(safety)=>session.engine.with_tool(agent_runtime::tools::WorkflowWebhookTool{safety}),None=>{send_result(&frames,request.id,Err((INVALID_PARAMS,"Webhook缺少安全策略".into())));return;}}}else{(*session.engine).clone()};
+        let frozen_engine = match workflow_engine.freeze_tools() {
             Ok(engine) => engine,
             Err(e) => {
                 send_result(&frames, request.id, Err((INTERNAL_ERROR, e.to_string())));
                 return;
             }
         };
+        let frozen_engine=match installed_generation.as_ref().map(|g|frozen_engine.with_installed_generation(g)).transpose() {Ok(Some(e))=>e,Ok(None)=>frozen_engine,Err(e)=>{send_result(&frames,request.id,Err((INVALID_PARAMS,e.to_string())));return;}};
         let requested = params.sandbox.as_deref().unwrap_or("native");
         let (effective, notice) = match requested {
             "native" => ("native", None),
@@ -1137,7 +1829,21 @@ impl DaemonState {
                 return;
             }
         };
+        let billing_policy=match self.billing_store.read_billing_policy(&self.scope()).await {
+            Ok(policy)=>policy,
+            Err(error)=>{send_result(&frames,request.id,Err((error.rpc_code(),error.to_string())));return;}
+        };
+        let mut max_tool_calls=match (delegation.as_ref().map(|d|d.max_tool_calls as u64),billing_policy.as_ref()) {
+            (Some(a),Some(b))=>Some(a.min(b.policy.limits.max_tool_calls)),
+            (None,Some(b))=>Some(b.policy.limits.max_tool_calls),
+            (a,None)=>a,
+        };
+        if let Some(g)=&installed_generation {max_tool_calls=Some(max_tool_calls.map_or(g.effective.config.resources.max_tool_calls,|n|n.min(g.effective.config.resources.max_tool_calls)));}
         let snapshot = agent_core::RunSnapshot {
+            workflow: WORKFLOW_DIRECTIVE.try_with(Clone::clone).ok(),
+            installed_generation,
+            billing_policy,
+            artifact_store_id: frozen_engine.artifact_store_id(),
             entry_channel: params.entry_channel,
             route: frozen_route.as_ref().map(|r| r.snapshot.clone()),
             tools: frozen_engine.tool_specs(),
@@ -1168,37 +1874,69 @@ impl DaemonState {
             ),
             memory_entry_budget: 8,
             memory_token_budget: 1024,
-            max_tool_calls: delegation.as_ref().map(|d| d.max_tool_calls as u64),
+            max_tool_calls,
             config_generation: frozen_route
                 .as_ref()
                 .map_or(0, |r| r.snapshot.config_generation),
         };
-        let admitted = match self.run_store.admit_run(
-            &agent_core::RunAdmission {
-                plan_execution: params.plan_execution.clone(),
-                session_key: SessionId(session_id.clone()),
-                expected_lifetime: Some(
-                    params
-                        .expected_lifetime
-                        .clone()
-                        .unwrap_or_else(|| session.lifetime.clone()),
-                ),
-                request_id: request.id.clone(),
-                input: params.message.clone(),
-                mode,
-            },
-            &snapshot,
-        ) {
-            Ok(admitted) => admitted,
+        if let Some(g)=&snapshot.installed_generation {
+            let c=&g.effective.config;
+            if !c.secret_refs.is_empty() && !c.sandbox.secrets {send_result(&frames,request.id,Err((INVALID_PARAMS,"发行代secret策略拒绝".into())));return;}
+        }
+        let authorization = match self
+            .authorize_local_request(request.id.clone(), agent_core::Action::SessionPrompt)
+            .await
+        {
+            Ok(request) => request,
             Err(error) => {
-                let code = if matches!(error, RuntimeError::Protocol(_)) {
-                    REQUEST_CONFLICT
-                } else {
-                    INTERNAL_ERROR
-                };
-                send_result(&frames, request.id, Err((code, error.to_string())));
+                send_authorization_error(&frames, request.id, error);
                 return;
             }
+        };
+        let (admitted, owner) = match self
+            .run_execution_store
+            .admit_run_authorized(
+                &agent_core::RunAdmission {
+                    workflow_node: WORKFLOW_LEASE.try_with(Clone::clone).ok(),
+                    plan_execution: params.plan_execution.clone(),
+                    session_key: SessionId(session_id.clone()),
+                    expected_lifetime: Some(
+                        params
+                            .expected_lifetime
+                            .clone()
+                            .unwrap_or_else(|| session.lifetime.clone()),
+                    ),
+                    request_id: request.id.clone(),
+                    input: params.message.clone(),
+                    mode,
+                },
+                &snapshot,
+                &authorization,
+                std::sync::Arc::new(agent_policy::PolicyEngine),
+            )
+            .await
+        {
+            Ok(admitted) => admitted,
+            Err(error) => {
+                if error
+                    == agent_core::RepositoryError::Coordination(
+                        agent_core::CoordinationError::Conflict,
+                    )
+                {
+                    send_result(
+                        &frames,
+                        request.id,
+                        Err((REQUEST_CONFLICT, error.to_string())),
+                    );
+                } else {
+                    send_authorization_error(&frames, request.id, error.into());
+                }
+                return;
+            }
+        };
+        let execution_envelope = agent_core::EnterpriseOwnerEnvelope {
+            scope: authorization.context.scope.clone(),
+            owner: owner.clone(),
         };
         let run_record = match admitted {
             Admission::New(run) => {
@@ -1218,11 +1956,22 @@ impl DaemonState {
             }
             Admission::Existing(run) => {
                 if run.status == RunStatus::Completed {
+                    let child = match self
+                        .hook_continuation_store
+                        .read_hook_child(&authorization.context.scope, &run.run_id)
+                        .await
+                    {
+                        Ok(child) => child,
+                        Err(error) => {
+                            send_authorization_error(&frames, request.id, error.into());
+                            return;
+                        }
+                    };
                     send_result(
                         &frames,
                         request.id,
                         Ok(
-                            json!({"content": run.content, "run_id": run.run_id, "turn_id": run.turn_id,"continuation_run_id":self.run_store.hook_continuation_child(&run.run_id).ok().flatten()}),
+                            json!({"content": run.content, "run_id": run.run_id, "turn_id": run.turn_id,"continuation_run_id":child}),
                         ),
                     );
                     return;
@@ -1294,16 +2043,16 @@ impl DaemonState {
                 );
                 return;
             }
-            match self.run_store.try_start_queued(&run_record.run_id) {
+            match self
+                .run_execution_store
+                .start_queued_run(&execution_envelope)
+                .await
+            {
                 Ok(true) => break,
                 Ok(false) => {}
                 Err(error) => {
                     self.run_coordinator.active.lock().await.remove(&active_key);
-                    send_result(
-                        &frames,
-                        request.id,
-                        Err((INTERNAL_ERROR, error.to_string())),
-                    );
+                    send_authorization_error(&frames, request.id, error.into());
                     return;
                 }
             }
@@ -1326,7 +2075,12 @@ impl DaemonState {
         {
             Some(route)
         } else {
-            match self.run_store.route_snapshot(&run_record.run_id) {
+            match self
+                .run_fact_store
+                .read_provider_history(&self.scope(), &run_record.run_id)
+                .await
+                .map(|read| read.route)
+            {
                 Ok(Some(snapshot)) => {
                     let restore = self
                         .provider_manager
@@ -1340,12 +2094,14 @@ impl DaemonState {
                     match restore {
                         Ok(route) => Some(route),
                         Err(error) => {
-                            let _ = self.run_store.finish(
-                                &run_record.run_id,
-                                RunStatus::Failed,
-                                None,
-                                Some((-32002, "冻结 Provider 配置无法恢复")),
-                            );
+                            let _ = self
+                                .finish_frozen_run(
+                                    &execution_envelope,
+                                    RunStatus::Failed,
+                                    None,
+                                    Some((-32002, "冻结 Provider 配置无法恢复")),
+                                )
+                                .await;
                             self.run_coordinator.active.lock().await.remove(&active_key);
                             send_result(
                                 &frames,
@@ -1381,12 +2137,14 @@ impl DaemonState {
         let engine = match engine.freeze_tools() {
             Ok(engine) => engine,
             Err(error) => {
-                let _ = self.run_store.finish(
-                    &run_record.run_id,
-                    RunStatus::Failed,
-                    None,
-                    Some((INTERNAL_ERROR, &error.to_string())),
-                );
+                let _ = self
+                    .finish_frozen_run(
+                        &execution_envelope,
+                        RunStatus::Failed,
+                        None,
+                        Some((INTERNAL_ERROR, &error.to_string())),
+                    )
+                    .await;
                 send_result(
                     &frames,
                     request.id,
@@ -1400,7 +2158,12 @@ impl DaemonState {
         let mut run_engine = route
             .map(|route| engine.with_route(route))
             .unwrap_or(engine);
-        let run_snapshot = match self.run_store.run_snapshot(&run_record.run_id) {
+        let run_snapshot = match self
+            .hook_execution_store
+            .read_hook_snapshot(&execution_envelope)
+            .await
+            .map(Some)
+        {
             Ok(value) => value,
             Err(e) => {
                 send_result(&frames, request.id, Err((INTERNAL_ERROR, e.to_string())));
@@ -1408,15 +2171,21 @@ impl DaemonState {
                 return;
             }
         };
+        if run_snapshot.as_ref().and_then(|s|s.workflow.as_ref()).is_some_and(|d|matches!(d.definition.kind,agent_core::WorkflowNodeKind::Webhook{..})){if let Some(safety)=self.safety.clone(){run_engine=run_engine.with_tool(agent_runtime::tools::WorkflowWebhookTool{safety});}}
+        if let Some(g)=run_snapshot.as_ref().and_then(|s|s.installed_generation.as_ref()) {
+            match run_engine.with_installed_generation(g) {Ok(engine)=>run_engine=engine,Err(error)=>{let _=self.finish_frozen_run(&execution_envelope,RunStatus::Failed,None,Some((INTERNAL_ERROR,&error.to_string()))).await;send_result(&frames,request.id,Err((INTERNAL_ERROR,error.to_string())));self.run_coordinator.active.lock().await.remove(&active_key);self.run_coordinator.queue_notify.notify_waiters();return;}}
+        }
         if let Some(snapshot) = &run_snapshot
             && snapshot.tools != run_engine.tool_specs()
         {
-            let _ = self.run_store.finish(
-                &run_record.run_id,
-                RunStatus::Failed,
-                None,
-                Some((INTERNAL_ERROR, "冻结 tool catalog 无法恢复")),
-            );
+            let _ = self
+                .finish_frozen_run(
+                    &execution_envelope,
+                    RunStatus::Failed,
+                    None,
+                    Some((INTERNAL_ERROR, "冻结 tool catalog 无法恢复")),
+                )
+                .await;
             send_result(
                 &frames,
                 request.id,
@@ -1433,12 +2202,14 @@ impl DaemonState {
             match run_engine.with_frozen_context(fingerprint) {
                 Ok(engine) => run_engine = engine,
                 Err(error) => {
-                    let _ = self.run_store.finish(
-                        &run_record.run_id,
-                        RunStatus::Failed,
-                        None,
-                        Some((INTERNAL_ERROR, "冻结 context policy 无法恢复")),
-                    );
+                    let _ = self
+                        .finish_frozen_run(
+                            &execution_envelope,
+                            RunStatus::Failed,
+                            None,
+                            Some((INTERNAL_ERROR, "冻结 context policy 无法恢复")),
+                        )
+                        .await;
                     self.run_coordinator.active.lock().await.remove(&active_key);
                     self.run_coordinator.queue_notify.notify_waiters();
                     send_result(
@@ -1459,15 +2230,21 @@ impl DaemonState {
                     .and_then(|child| SafetyMode::parse(&child.permission_mode))
             })
             .unwrap_or(SafetyMode::RiskApproval);
-        let continuation = match self.run_store.hook_continuation_parent(&run_record.run_id) {
+        let continuation = match self
+            .hook_continuation_store
+            .read_hook_parent(&execution_envelope.scope, &run_record.run_id)
+            .await
+        {
             Ok(parent) => parent.is_some(),
             Err(error) => {
-                let _ = self.run_store.finish(
-                    &run_record.run_id,
-                    RunStatus::Failed,
-                    None,
-                    Some((INTERNAL_ERROR, "continuation 身份无法恢复")),
-                );
+                let _ = self
+                    .finish_frozen_run(
+                        &execution_envelope,
+                        RunStatus::Failed,
+                        None,
+                        Some((INTERNAL_ERROR, "continuation 身份无法恢复")),
+                    )
+                    .await;
                 self.run_coordinator.active.lock().await.remove(&active_key);
                 self.run_coordinator.queue_notify.notify_waiters();
                 send_result(
@@ -1496,12 +2273,14 @@ impl DaemonState {
             ) {
                 Ok(engine) => engine,
                 Err(error) => {
-                    let _ = self.run_store.finish(
-                        &run_record.run_id,
-                        RunStatus::Failed,
-                        None,
-                        Some((INTERNAL_ERROR, "子 Agent 能力无法恢复")),
-                    );
+                    let _ = self
+                        .finish_frozen_run(
+                            &execution_envelope,
+                            RunStatus::Failed,
+                            None,
+                            Some((INTERNAL_ERROR, "子 Agent 能力无法恢复")),
+                        )
+                        .await;
                     self.run_coordinator.active.lock().await.remove(&active_key);
                     send_result(
                         &frames,
@@ -1522,27 +2301,35 @@ impl DaemonState {
         );
         let run = agent_runtime::safety::with_frozen_mode(
             frozen_mode,
-            agent_runtime::loop_engine::with_tool_audit(
-                self.run_store.clone(),
-                run_record.run_id.clone(),
+            agent_runtime::loop_engine::with_native_execution(
+                execution_envelope.clone(),
+                agent_runtime::loop_engine::NativeExecutionPorts {
+                    attempts: self.run_attempt_store.clone(),
+                    tools: self.run_tool_store.clone(),
+                    turns: self.run_turn_store.clone(),
+                    requests: self.run_request_store.clone(),
+                    discoveries: self.run_discovery_store.clone(),
+                    memories: self.memory_store.clone(),
+                },
                 self.approvals.with_session_context(
                     session_id.clone(),
                     run_record.request_id.clone(),
                     approval_events,
                     async {
                         let _writer = session.writer.lock().await;
-                        let owner = self.run_store.run_owner(&run_record.run_id)?;
-                        self.run_store.start_plan_execution(&owner)?;
+                        self.run_turn_store
+                            .start_run_plan(&execution_envelope)
+                            .await
+                            .map_err(agent_storage::RuntimeError::from)?;
                         let mut history = self
-                            .run_store
-                            .session_snapshot(&SessionId(session.id.clone()))?
+                            .run_request_store
+                            .read_execution_context(&execution_envelope)
+                            .await
+                            .map_err(agent_storage::RuntimeError::from)?
+                            .snapshot
                             .messages;
                         agent_runtime::hooks::with_scope(
-                            agent_runtime::hooks::HookScope {
-                                dispatcher: self.hooks.clone(),
-                                store: self.run_store.clone(),
-                                owner,
-                            },
+                            self.hook_scope(&execution_envelope),
                             async {
                                 if delegation.is_some() {
                                     agent_runtime::hooks::current(
@@ -1553,6 +2340,12 @@ impl DaemonState {
                                     )
                                     .await?;
                                 }
+                                if let Some(directive)=run_snapshot.as_ref().and_then(|s|s.workflow.as_ref()) {match &directive.definition.kind{
+                                    agent_core::WorkflowNodeKind::ToolCall{call}=>return run_engine.run_direct_tool(&mut history,params.message,call.clone(),Some(agent_events),cancellation.clone(),Some(trace_request_id)).await,
+                                    agent_core::WorkflowNodeKind::Approval{prompt}=>{use agent_runtime::safety::Approval;tokio::select!{_=cancellation.cancelled()=>return Err(agent_storage::RuntimeError::Cancelled.into()),result=self.approvals.request(prompt)=>{anyhow::ensure!(result?,"人工节点拒绝");return Ok("人工节点已批准".into())}}},
+                                    agent_core::WorkflowNodeKind::Webhook{url,body,idempotency_key}=>return run_engine.run_direct_tool(&mut history,params.message,agent_core::ToolCall{id:format!("wf-webhook-{}",directive.key.occurrence),name:"workflow_webhook".into(),arguments:json!({"url":url,"body":body,"idempotency_key":idempotency_key})},Some(agent_events),cancellation.clone(),Some(trace_request_id)).await,
+                                    agent_core::WorkflowNodeKind::AgentRun{..}=>{},_=>return Err(anyhow::anyhow!("纯节点不进入native执行"))
+                                }}
                                 run_engine
                                     .run_turn_with_events_for_request(
                                         &mut history,
@@ -1570,44 +2363,64 @@ impl DaemonState {
             ),
         )
         .instrument(turn_span);
-        tokio::pin!(run);
-
-        let result = loop {
-            tokio::select! {
-                result = &mut run => break result,
-                event = event_receiver.recv() => {
-                    if let Some(event) = event {
-                        self.publish_update(
-                            &frames,
-                            &active_key,
-                            agent_event_update(event),
-                        ).await;
+        // 执行 future 与事件写入同时获得 poll；PG 事务不能因消费事件而暂停。
+        // 完成信号只停止下一次接收，已接收的事件写入仍完成后才提交 run 终态。
+        let producer_done = CancellationToken::new();
+        let (result, ()) = tokio::join!(
+            async {
+                let result = run.await;
+                producer_done.cancel();
+                result
+            },
+            async {
+                let mut events_open = true;
+                let mut approvals_open = true;
+                while !producer_done.is_cancelled() && (events_open || approvals_open) {
+                    tokio::select! {
+                        _ = producer_done.cancelled() => break,
+                        event = event_receiver.recv(), if events_open => {
+                            if let Some(event) = event {
+                                self.publish_update(
+                                    &frames,
+                                    &active_key,
+                                    &execution_envelope,
+                                    agent_event_update(event),
+                                ).await;
+                            } else { events_open = false; }
+                        }
+                        approval = approval_receiver.recv(), if approvals_open => {
+                            if let Some(ServerFrame::Event(event)) = approval {
+                                self.publish_update(
+                                    &frames,
+                                    &active_key,
+                                    &execution_envelope,
+                                    ActiveRequestUpdate::Event {
+                                        kind: event.event,
+                                        data: event.data,
+                                        run_id: None,
+                                        seq: None,
+                                    },
+                                ).await;
+                            } else if approval.is_none() { approvals_open = false; }
+                        }
                     }
                 }
-                approval = approval_receiver.recv() => {
-                    if let Some(ServerFrame::Event(event)) = approval {
-                        self.publish_update(
-                            &frames,
-                            &active_key,
-                            ActiveRequestUpdate::Event {
-                                kind: event.event,
-                                data: event.data,
-                                run_id: None,
-                                seq: None,
-                            },
-                        ).await;
-                    }
-                }
-            }
-        };
+            },
+        );
         while let Ok(event) = event_receiver.try_recv() {
-            self.publish_update(&frames, &active_key, agent_event_update(event))
-                .await;
+            self.publish_update(
+                &frames,
+                &active_key,
+                &execution_envelope,
+                agent_event_update(event),
+            )
+            .await;
         }
         while let Ok(ServerFrame::Event(event)) = approval_receiver.try_recv() {
             self.publish_update(
                 &frames,
                 &active_key,
+                &execution_envelope,
                 ActiveRequestUpdate::Event {
                     kind: event.event,
                     data: event.data,
@@ -1657,33 +2470,32 @@ impl DaemonState {
             .as_ref()
             .err()
             .map(|(code, message)| (*code, message.as_str()));
-        let owner = match self.run_store.run_owner(&run_record.run_id) {
-            Ok(owner) => owner,
-            Err(e) => {
-                send_result(&frames, request.id, Err((INTERNAL_ERROR, e.to_string())));
-                return;
-            }
-        };
-        let committed = match self.run_store.commit_turn(&agent_core::TurnCommit {
-            owner: owner.clone(),
-            status: terminal_status,
-            content: content.map(str::to_owned),
-            error: error.map(|(code, msg)| (code, msg.to_owned())),
-        }) {
+        let committed = match self
+            .run_execution_store
+            .commit_run_turn(
+                &execution_envelope,
+                &agent_core::TurnCommit {
+                    owner: owner.clone(),
+                    status: terminal_status,
+                    content: content.map(str::to_owned),
+                    error: error.map(|(code, msg)| (code, msg.to_owned())),
+                },
+            )
+            .await
+        {
             Ok(committed) => committed,
             Err(storage_error) => {
                 tracing::error!(run_id = %run_record.run_id.0, error = %storage_error, "提交 run 终态失败");
-                send_result(
-                    &frames,
-                    request.id,
-                    Err((INTERNAL_ERROR, format!("持久化终态失败: {storage_error}"))),
-                );
+                send_authorization_error(&frames, request.id, storage_error.into());
                 self.run_coordinator.active.lock().await.remove(&active_key);
                 return;
             }
         };
         if delegation.is_some()
-            && let Ok(Some(child)) = self.run_store.delegation(&run_record.run_id)
+            && let Ok(Some(child)) = self
+                .delegation_store
+                .read_delegation_record(&execution_envelope.scope, &run_record.run_id)
+                .await
         {
             self.notify_delegation_parent(&child, EventKind::DelegationTerminal)
                 .await;
@@ -1693,7 +2505,7 @@ impl DaemonState {
         } else {
             response
         };
-        let hook_result=agent_runtime::hooks::with_scope(agent_runtime::hooks::HookScope {dispatcher:self.hooks.clone(),store:self.run_store.clone(),owner:owner.clone()},async {
+        let hook_result=agent_runtime::hooks::with_scope(self.hook_scope(&execution_envelope),async {
             if let Some(content)=committed.content.as_deref() {
                 agent_runtime::hooks::current(agent_core::HookEvent::AssistantReply,"reply",json!({"content_bytes":content.len(),"content_sha256":format!("{:x}",Sha256::digest(content.as_bytes()))}),&cancellation).await?;
             }
@@ -1707,10 +2519,12 @@ impl DaemonState {
         if let Ok(agent_core::HookEffect::Continue { prompt }) = hook_result {
             let operation = format!("hook:Stop:{}:stop", owner.run_id.0);
             let launch = match run_snapshot.as_ref() {
-                Some(snapshot) => self
-                    .run_store
-                    .admit_hook_continuation(&owner, &operation, &prompt, snapshot),
-                None => Err(RuntimeError::Protocol("continuation 缺冻结快照".into())),
+                Some(snapshot) => {
+                    self.hook_continuation_store
+                        .admit_stop_continuation(&execution_envelope, &operation, &prompt, snapshot)
+                        .await
+                }
+                None => Err(agent_core::CoordinationError::Corrupt.into()),
             };
             match launch {
                 Ok(Admission::New(child)) | Ok(Admission::Existing(child)) => {
@@ -1761,37 +2575,42 @@ impl DaemonState {
         self.publish_update(
             &frames,
             &active_key,
-            self.terminal_update(&run_record.run_id, response),
+            &execution_envelope,
+            self.terminal_update(&run_record.run_id, response).await,
         )
         .await;
         self.run_coordinator.active.lock().await.remove(&active_key);
         self.run_coordinator.queue_notify.notify_waiters();
-        // 完成后维护是单独成功位；失败不能修改已发布 terminal。单次最多摄入一个 turn。
+        // 维护不能改写已发布terminal，固定准入proof覆盖原摄入与诊断事务。
         if committed.status == RunStatus::Completed {
-            if let Ok(owner) = self.run_store.run_owner(&committed.run_id) {
-                let readonly = self
-                    .run_store
-                    .run_snapshot(&owner.run_id)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|s| s.context_read_only);
-                let outcome = if readonly {
-                    "skipped_read_only"
-                } else {
-                    match self.run_store.ingest_committed_turn(&owner) {
-                        Ok(()) => "completed",
-                        Err(error) => {
-                            tracing::warn!(run_id=%committed.run_id.0,error=%error,"完成后 memory 维护未写入");
-                            "failed"
-                        }
-                    }
-                };
-                if let Err(error) =
-                    self.maintenance_store
-                        .record_maintenance(&owner, "memory_ingest", outcome)
+            let outcome = match self
+                .memory_store
+                .read_memory_settings(&execution_envelope)
+                .await
+            {
+                Ok(snapshot) if snapshot.context_read_only => "skipped_read_only",
+                Ok(_) => match self
+                    .memory_store
+                    .ingest_run_memory(&execution_envelope)
+                    .await
                 {
-                    tracing::warn!(error=%error,"维护诊断已被 lifetime fence 拒绝");
+                    Ok(()) => "completed",
+                    Err(error) => {
+                        tracing::warn!(run_id=%committed.run_id.0,%error,"完成后memory维护未写入");
+                        "failed"
+                    }
+                },
+                Err(error) => {
+                    tracing::warn!(%error,"memory维护无法确认冻结设置");
+                    "failed"
                 }
+            };
+            if let Err(error) = self
+                .memory_store
+                .record_memory_maintenance(&execution_envelope, outcome)
+                .await
+            {
+                tracing::warn!(%error,"memory维护诊断被事务fence拒绝");
             }
         }
     }
@@ -1801,37 +2620,47 @@ impl DaemonState {
         method: &str,
         params: ResourceParams,
     ) -> Result<Value, (i64, String)> {
-        let session = self.query_session_metadata(&params.session_id)?;
-        let fail = |e: RuntimeError| (REQUEST_CONFLICT, e.to_string());
+        let scope = self.scope();
+        let key = SessionId(params.session_id.clone());
+        let session = self
+            .readback_store
+            .read_session(&scope, &key, agent_core::HistoryReadMode::Omitted)
+            .await
+            .map_err(lifecycle_rpc_error)?;
+        let life = &session.session_lifetime_id;
+        let fail = |e: agent_core::RepositoryError| (e.rpc_code(), e.to_string());
         if method == "resources.list" {
             let entries = self
-                .run_store
-                .list_resources(
-                    &session.lifetime,
+                .resource_store
+                .read_resource_page(
+                    &scope,
+                    &key,
+                    life,
                     agent_core::ResourceId(params.after_cursor),
                     params.limit,
                 )
+                .await
                 .map_err(fail)?;
             return Ok(json!({"cursor":entries.last().map(|r|r.id),"resources":entries}));
         }
         let id = params
             .resource_id
-            .ok_or_else(|| (INVALID_PARAMS, "缺少 resource_id".into()))?;
-        let record = self.run_store.read_resource(id).map_err(fail)?;
-        if record.owner.session_key.0 != params.session_id
-            || record.owner.session_lifetime_id != session.lifetime
-        {
-            return Err((REQUEST_CONFLICT, "resource stale owner".into()));
-        }
-        match method {
+            .ok_or_else(|| (INVALID_PARAMS, "缺少resource_id".into()))?;
+        let record = self
+            .resource_store
+            .read_resource_record(&scope, &key, life, id)
+            .await
+            .map_err(fail)?;
+        match method{
             "resources.read"=>Ok(json!({"resource":record})),
-            "resources.logs"=>Ok(json!({"logs":self.run_store.resource_logs(id,params.after_cursor,params.limit).map_err(fail)?,"cursor":record.log_cursor})),
-            "resources.wait"=>self.wait_resource(id,std::time::Duration::from_millis(params.timeout_ms.min(60000))).await.map(|r|json!({"resource":r,"timed_out":matches!(r.state.as_str(),"starting"|"running"|"stopping")})).map_err(|e|(INTERNAL_ERROR,e.to_string())),
+            "resources.logs"=>Ok(json!({"logs":self.resource_store.read_resource_log_page(&scope,&key,life,id,params.after_cursor,params.limit).await.map_err(fail)?,"cursor":record.log_cursor})),
+            "resources.wait"=>self.wait_resource_scoped(&scope,&key,life,id,std::time::Duration::from_millis(params.timeout_ms.min(60000))).await.map(|r|json!({"resource":r,"timed_out":matches!(r.state.as_str(),"starting"|"running"|"stopping")})).map_err(|e|(INTERNAL_ERROR,e.to_string())),
             "resources.stop"=>{
-                if params.owner_run_id.as_ref()!=Some(&record.owner.run_id){return Err((REQUEST_CONFLICT,"stop 要求 exact owner_run_id".into()));}
-                self.stop_resource(&record.owner,id).await.map(|r|json!({"resource":r})).map_err(|e|(INTERNAL_ERROR,e.to_string()))
-            }
-            _=>Err((METHOD_NOT_FOUND,"未知 resources 方法".into())),
+                if params.owner_run_id.as_ref()!=Some(&record.owner.run_id){return Err((REQUEST_CONFLICT,"stop要求exact owner_run_id".into()));}
+                let envelope=agent_core::EnterpriseOwnerEnvelope{scope,owner:record.owner};
+                self.stop_resource_execution(&envelope,id).await.map(|r|json!({"resource":r})).map_err(|e|(INTERNAL_ERROR,e.to_string()))
+            },
+            _=>Err((METHOD_NOT_FOUND,"未知resources方法".into()))
         }
     }
 
@@ -1840,51 +2669,64 @@ impl DaemonState {
             .get("session_id")
             .and_then(Value::as_str)
             .ok_or_else(|| (INVALID_PARAMS, "缺少 session_id".into()))?;
-        let session = self.query_session_metadata(session_id)?;
+        let scope = self.scope();
+        let key = SessionId(session_id.to_owned());
+        let session = self
+            .readback_store
+            .read_session(&scope, &key, agent_core::HistoryReadMode::Omitted)
+            .await
+            .map_err(lifecycle_rpc_error)?;
         let project = self.safety.as_ref().map_or_else(
             || "".into(),
             |s| s.workspace().to_string_lossy().into_owned(),
         );
         let visibility = agent_core::MemoryVisibility {
-            lifetime: session.lifetime.clone(),
+            lifetime: session.session_lifetime_id.clone(),
             project: project.clone(),
             allow_confirmed_global: true,
         };
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |time| time.as_secs());
-        let fail = |e: RuntimeError| (REQUEST_CONFLICT, e.to_string());
+        let fail = |e: agent_core::RepositoryError| (e.rpc_code(), e.to_string());
         match method {
             "memory.evidence" => {
                 let params: MemoryEvidenceParams =
                     parse_params(value).map_err(|e| (INVALID_PARAMS, e))?;
                 Ok(
-                    json!({"evidence":self.run_store.memory_evidence(&visibility,&params.memory_id,params.after_source,params.limit).map_err(fail)?}),
+                    json!({"evidence":self.memory_store.read_memory_evidence(&scope,&key,&visibility,&params.memory_id,params.after_source,params.limit).await.map_err(fail)?}),
                 )
             }
             "memory.flywheel" => self
-                .run_store
-                .flywheel_report(&visibility.lifetime)
+                .memory_store
+                .read_memory_flywheel(&scope, &key, &visibility.lifetime)
+                .await
                 .map_err(fail),
             "memory.feedback" => {
                 let params: MemoryFeedbackParams =
                     parse_params(value).map_err(|e| (INVALID_PARAMS, e))?;
                 let owner = self
-                    .run_store
-                    .run_owner(&params.owner_run_id)
-                    .map_err(fail)?;
+                    .run_fact_store
+                    .read_exact_run_owner(&scope, &params.owner_run_id)
+                    .await
+                    .map_err(lifecycle_rpc_error)?;
                 if owner.session_key.0 != session_id
                     || owner.session_lifetime_id != visibility.lifetime
                 {
                     return Err((REQUEST_CONFLICT, "feedback owner session 不匹配".into()));
                 }
-                self.run_store
-                    .memory_feedback(
-                        &owner,
+                let envelope = agent_core::EnterpriseOwnerEnvelope {
+                    scope: scope.clone(),
+                    owner: owner.clone(),
+                };
+                self.memory_store
+                    .record_run_memory_feedback(
+                        &envelope,
                         &params.operation_id,
                         &params.memory_id,
                         params.feedback,
                     )
+                    .await
                     .map_err(fail)?;
                 Ok(
                     json!({"accepted":true,"policy":agent_memory::RECALL_POLICY,"scope":"session_lifetime"}),
@@ -1897,25 +2739,30 @@ impl DaemonState {
                 let params: MemoryReadParams =
                     parse_params(value).map_err(|e| (INVALID_PARAMS, e))?;
                 let mut entries = if method == "memory.list" {
-                    self.run_store
-                        .memory_page(
+                    self.memory_store
+                        .read_memory_page(
+                            &scope,
+                            &key,
                             &visibility,
                             params.after_id.as_deref(),
                             params.limit.clamp(1, 100) + 1,
                         )
+                        .await
                         .map_err(fail)?
                 } else {
                     agent_memory::rank_with_feedback(
-                        self.run_store
-                            .memory_candidates(&visibility)
+                        self.memory_store
+                            .read_memory_candidates(&scope, &key, &visibility)
+                            .await
                             .map_err(fail)?,
                         &visibility,
                         &params.query,
                         params.limit.clamp(1, 100) + 1,
                         now,
                         &self
-                            .run_store
-                            .memory_assessments(&visibility)
+                            .memory_store
+                            .read_memory_assessments(&scope, &key, &visibility)
+                            .await
                             .map_err(fail)?,
                     )
                 };
@@ -1945,16 +2792,19 @@ impl DaemonState {
                 let params: MemoryStoreParams =
                     parse_params(value).map_err(|e| (INVALID_PARAMS, e))?;
                 let owner = self
-                    .run_store
-                    .run_owner(&params.owner_run_id)
-                    .map_err(fail)?;
+                    .run_fact_store
+                    .read_exact_run_owner(&scope, &params.owner_run_id)
+                    .await
+                    .map_err(lifecycle_rpc_error)?;
                 if owner.session_key.0 != session_id
-                    || owner.session_lifetime_id != session.lifetime
+                    || owner.session_lifetime_id != session.session_lifetime_id
                 {
                     return Err((REQUEST_CONFLICT, "memory stale owner".into()));
                 }
-                let scope = match params.scope.as_deref().unwrap_or("session") {
-                    "session" => agent_core::MemoryScope::Session(session.lifetime.clone()),
+                let memory_scope = match params.scope.as_deref().unwrap_or("session") {
+                    "session" => {
+                        agent_core::MemoryScope::Session(session.session_lifetime_id.clone())
+                    }
                     "project" if params.confirmed_by_user => {
                         agent_core::MemoryScope::Project(project)
                     }
@@ -1967,7 +2817,7 @@ impl DaemonState {
                 let entry = agent_core::MemoryRecord {
                     id: format!("rpc:{}:{}", owner.run_id.0, params.operation_id),
                     layer: agent_core::MemoryLayer::Semantic,
-                    scope,
+                    scope: memory_scope,
                     kind: agent_core::MemoryKind::Explicit,
                     content_digest: format!("{:x}", Sha256::digest(params.content.as_bytes())),
                     content: params.content,
@@ -1983,43 +2833,57 @@ impl DaemonState {
                     confirmed_by_user: params.confirmed_by_user,
                     revision: 0,
                 };
-                let saved = self.run_store.store_memory(&owner, &entry).map_err(fail)?;
+                let envelope = agent_core::EnterpriseOwnerEnvelope {
+                    scope: scope.clone(),
+                    owner: owner.clone(),
+                };
+                let saved = self
+                    .memory_store
+                    .store_run_memory(&envelope, &entry)
+                    .await
+                    .map_err(fail)?;
                 Ok(json!({"entry":saved}))
             }
             "memory.forget" => {
                 let params: MemoryForgetParams =
                     parse_params(value).map_err(|e| (INVALID_PARAMS, e))?;
                 let owner = self
-                    .run_store
-                    .run_owner(&params.owner_run_id)
-                    .map_err(fail)?;
+                    .run_fact_store
+                    .read_exact_run_owner(&scope, &params.owner_run_id)
+                    .await
+                    .map_err(lifecycle_rpc_error)?;
                 if owner.session_key.0 != session_id {
                     return Err((REQUEST_CONFLICT, "memory owner session 不匹配".into()));
                 }
+                let envelope = agent_core::EnterpriseOwnerEnvelope {
+                    scope: scope.clone(),
+                    owner: owner.clone(),
+                };
                 Ok(
-                    json!({"forgotten":self.run_store.forget_memory(&owner,&visibility,&params.memory_id,params.revision).map_err(fail)?}),
+                    json!({"forgotten":self.memory_store.forget_run_memory(&envelope,&visibility,&params.memory_id,params.revision).await.map_err(fail)?}),
                 )
             }
             _ => Err((METHOD_NOT_FOUND, "未知 memory 方法".into())),
         }
     }
 
-    fn query_session_metadata(
+    async fn query_session_metadata(
         &self,
         session_id: &str,
     ) -> Result<agent_core::SessionMetadata, (i64, String)> {
-        self.run_store
-            .session_metadata(&SessionId(session_id.to_owned()))
-            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?
+        self.session_control_store
+            .read_session_metadata(&self.scope(), &SessionId(session_id.to_owned()))
+            .await
+            .map_err(|e| (e.rpc_code(), e.to_string()))?
             .filter(|m| !m.deleted)
             .ok_or_else(|| (INVALID_PARAMS, "session 已删除或不存在".into()))
     }
 
-    fn query_session_trace_store(
+    async fn query_session_trace_store(
         &self,
         session_id: &str,
     ) -> Result<agent_runtime::session::SessionStore, (i64, String)> {
-        let metadata = self.query_session_metadata(session_id)?;
+        let metadata = self.query_session_metadata(session_id).await?;
         self.session
             .open_known_session(session_id)
             .and_then(|s| s.with_trace_lifetime(&metadata.lifetime))
@@ -2040,9 +2904,10 @@ impl DaemonState {
                 .clone(),
         };
         let metadata = self
-            .run_store
-            .session_metadata(&SessionId(session_id.clone()))
-            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+            .session_control_store
+            .read_session_metadata(&self.scope(), &SessionId(session_id.clone()))
+            .await
+            .map_err(|e| (e.rpc_code(), e.to_string()))?;
         if metadata.as_ref().is_some_and(|m| m.deleted) {
             return Err((INVALID_PARAMS, "session 已删除".into()));
         }
@@ -2069,11 +2934,7 @@ impl DaemonState {
         let store = match self.session.open_session(&session_id) {
             Ok(store) => store,
             Err(open_error) => {
-                if !self
-                    .run_store
-                    .session_exists(&session_id)
-                    .map_err(|error| (INTERNAL_ERROR, error.to_string()))?
-                {
+                if metadata.is_none() {
                     return Err((INVALID_PARAMS, format!("{open_error:#}")));
                 }
                 self.session
@@ -2082,22 +2943,35 @@ impl DaemonState {
             }
         };
         let store = Arc::new(store);
-        if metadata.as_ref().is_none_or(|m| !m.legacy_imported) {
+        if self.scope() == TenantContext::local()
+            && metadata.as_ref().is_none_or(|m| !m.legacy_imported)
+        {
             let history = store
                 .load()
                 .await
                 .map_err(|e| (INTERNAL_ERROR, format!("{e:#}")))?;
-            self.run_store
-                .import_legacy(&SessionId(session_id.clone()), &history)
-                .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+            self.session_control_store
+                .import_legacy_session(
+                    &self.scope(),
+                    &SessionId(session_id.clone()),
+                    metadata.as_ref().map(|m| &m.lifetime),
+                    &history,
+                )
+                .await
+                .map_err(|e| (e.rpc_code(), e.to_string()))?;
         }
         let snapshot = self
-            .run_store
-            .session_snapshot(&SessionId(session_id.clone()))
-            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+            .readback_store
+            .read_session(
+                &self.scope(),
+                &SessionId(session_id.clone()),
+                agent_core::HistoryReadMode::Omitted,
+            )
+            .await
+            .map_err(|e| (e.rpc_code(), e.to_string()))?;
         let store = Arc::new(
             store
-                .with_trace_lifetime(&snapshot.lifetime)
+                .with_trace_lifetime(&snapshot.session_lifetime_id)
                 .map_err(|e| (INTERNAL_ERROR, e.to_string()))?,
         );
         let mut engine = self
@@ -2106,8 +2980,9 @@ impl DaemonState {
             .engine
             .for_session(store.clone());
         if let Some(child) = self
-            .run_store
-            .delegation_for_session(&session_id)
+            .delegation_store
+            .read_session_delegation(&self.scope(), &SessionId(session_id.clone()))
+            .await
             .map_err(|error| (INTERNAL_ERROR, error.to_string()))?
         {
             engine = engine
@@ -2122,7 +2997,7 @@ impl DaemonState {
         let runtime = Arc::new(SessionRuntime {
             id: session_id.clone(),
             engine: Arc::new(engine),
-            lifetime: snapshot.lifetime,
+            lifetime: snapshot.session_lifetime_id,
             writer: Arc::new(Mutex::new(())),
             store,
         });
@@ -2131,11 +3006,14 @@ impl DaemonState {
         Ok(runtime)
     }
 
-    async fn session_new(&self) -> Result<Value, (i64, String)> {
+    async fn session_new(self: &Arc<Self>) -> Result<Value, (i64, String)> {
         self.session_create(SessionCreateParams::default()).await
     }
 
-    async fn session_create(&self, params: SessionCreateParams) -> Result<Value, (i64, String)> {
+    async fn session_create(
+        self: &Arc<Self>,
+        params: SessionCreateParams,
+    ) -> Result<Value, (i64, String)> {
         let _barrier = self.session_supervisor.control_lock.lock().await;
         let (session_id, _) = match params.session_id {
             Some(key) => (
@@ -2164,31 +3042,38 @@ impl DaemonState {
             .operation_id
             .unwrap_or_else(|| format!("create:{session_id}"));
         let created = self
-            .run_store
-            .execute_lifecycle(
+            .commit_session_authorized(
                 &agent_core::SessionCommand::Create {
                     key: SessionId(session_id.clone()),
                 },
                 None,
                 &operation,
             )
-            .map_err(|e| (REQUEST_CONFLICT, e.to_string()))?;
+            .await
+            .map_err(lifecycle_rpc_error)?;
         let current = self
-            .run_store
-            .session_metadata(&SessionId(session_id.clone()))
-            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+            .session_control_store
+            .read_session_metadata(&self.scope(), &SessionId(session_id.clone()))
+            .await
+            .map_err(|e| (e.rpc_code(), e.to_string()))?;
         if current.is_none_or(|m| m.deleted || m.lifetime != created.lifetime) {
             return Err((
                 REQUEST_CONFLICT,
                 "create receipt 属于旧 lifetime；请读回当前会话".into(),
             ));
         }
-        self.run_store
-            .set_preferred_session(&SessionId(session_id.clone()))
-            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+        self.session_control_store
+            .select_session(
+                &self.scope(),
+                &SessionId(session_id.clone()),
+                &created.lifetime,
+            )
+            .await
+            .map_err(|e| (e.rpc_code(), e.to_string()))?;
         *self.session_supervisor.legacy_session_id.lock().await = session_id.clone();
-        let mut snapshot =
-            self.session_readback_value(&session_id, agent_core::HistoryReadMode::Canonical)?;
+        let mut snapshot = self
+            .session_readback_value(&session_id, agent_core::HistoryReadMode::Canonical)
+            .await?;
         snapshot["created"] = json!(true);
         self.dispatch_hook_publications()
             .await
@@ -2196,26 +3081,31 @@ impl DaemonState {
         Ok(snapshot)
     }
 
-    async fn session_close(&self, params: SessionEndParams) -> Result<Value, (i64, String)> {
+    async fn session_close(
+        self: &Arc<Self>,
+        params: SessionEndParams,
+    ) -> Result<Value, (i64, String)> {
         let key = SessionId(params.session_id.clone());
         let life = params
             .expected_lifetime
             .as_ref()
             .ok_or((INVALID_PARAMS, "close 缺少 expected lifetime".into()))?;
-        let fail = |error: agent_storage::RuntimeError| (REQUEST_CONFLICT, error.to_string());
+
         let owners = {
             let _barrier = self.session_supervisor.control_lock.lock().await;
             let snapshot = self
-                .run_store
-                .session_readback(&key, agent_core::HistoryReadMode::Omitted)
-                .map_err(fail)?;
+                .readback_store
+                .read_session(&self.scope(), &key, agent_core::HistoryReadMode::Omitted)
+                .await
+                .map_err(lifecycle_rpc_error)?;
             if &snapshot.session_lifetime_id != life {
                 return Err((REQUEST_CONFLICT, "close stale lifetime".into()));
             }
             if let Some(receipt) = self
-                .run_store
-                .close_receipt(&key, life, &params.operation_id)
-                .map_err(fail)?
+                .lifecycle_store
+                .read_close_receipt(&self.scope(), &key, life, &params.operation_id)
+                .await
+                .map_err(lifecycle_rpc_error)?
             {
                 return Ok(json!({"closed":true,"metadata":receipt,"duplicate":true}));
             }
@@ -2244,11 +3134,19 @@ impl DaemonState {
             tokio::pin!(notified);
             notified.as_mut().enable();
             let barrier = self.session_supervisor.control_lock.lock().await;
-            let settled = owners.iter().all(|owner| {
-                self.run_store
-                    .read_run(&owner.run_id)
-                    .is_ok_and(|run| run.is_some_and(|run| run.status.terminal()))
-            });
+            let mut settled = true;
+            for owner in &owners {
+                let run = self
+                    .queue_store
+                    .read_run_record(&self.scope(), &owner.run_id)
+                    .await
+                    .map_err(|e| (e.rpc_code(), e.to_string()))?
+                    .ok_or((INTERNAL_ERROR, "关闭期间run事实丢失".into()))?;
+                if !run.status.terminal() {
+                    settled = false;
+                    break;
+                }
+            }
             let attached = self
                 .run_coordinator
                 .active
@@ -2259,13 +3157,13 @@ impl DaemonState {
             if settled && !attached {
                 // 新准入不会被旧 close 取消；repository busy/lifetime CAS 决定是否关闭。
                 let receipt = self
-                    .run_store
-                    .execute_lifecycle(
+                    .commit_session_authorized(
                         &agent_core::SessionCommand::Close { key: key.clone() },
                         Some(life),
                         &params.operation_id,
                     )
-                    .map_err(fail)?;
+                    .await
+                    .map_err(lifecycle_rpc_error)?;
                 if !self
                     .run_coordinator
                     .active
@@ -2288,16 +3186,12 @@ impl DaemonState {
     }
 
     async fn session_end(
-        &self,
+        self: &Arc<Self>,
         params: SessionEndParams,
         delete: bool,
     ) -> Result<Value, (i64, String)> {
         let _barrier = self.session_supervisor.control_lock.lock().await;
         let key = SessionId(params.session_id.clone());
-        self.run_store
-            .session_metadata(&key)
-            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?
-            .ok_or((INVALID_PARAMS, "session 不存在".into()))?;
         if self
             .run_coordinator
             .active
@@ -2311,16 +3205,16 @@ impl DaemonState {
                 "session 正在执行，必须先精确 cancel 并等待结算".into(),
             ));
         }
-        self.run_store
-            .execute_lifecycle(
-                &agent_core::SessionCommand::End {
-                    key: key.clone(),
-                    delete,
-                },
-                params.expected_lifetime.as_ref(),
-                &params.operation_id,
-            )
-            .map_err(|e| (REQUEST_CONFLICT, e.to_string()))?;
+        self.commit_session_authorized(
+            &agent_core::SessionCommand::End {
+                key: key.clone(),
+                delete,
+            },
+            params.expected_lifetime.as_ref(),
+            &params.operation_id,
+        )
+        .await
+        .map_err(lifecycle_rpc_error)?;
         self.session_supervisor
             .sessions
             .lock()
@@ -2337,15 +3231,21 @@ impl DaemonState {
         params: SessionCompactParams,
     ) -> Result<Value, (i64, String)> {
         let snapshot = self
-            .run_store
-            .session_snapshot(&SessionId(params.session_id.clone()))
-            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+            .readback_store
+            .read_session(
+                &self.scope(),
+                &SessionId(params.session_id.clone()),
+                agent_core::HistoryReadMode::Omitted,
+            )
+            .await
+            .map_err(lifecycle_rpc_error)?;
         let owner = self
-            .run_store
-            .run_owner(&params.owner_run_id)
-            .map_err(|e| (INVALID_PARAMS, e.to_string()))?;
+            .run_fact_store
+            .read_exact_run_owner(&self.scope(), &params.owner_run_id)
+            .await
+            .map_err(lifecycle_rpc_error)?;
         if owner.session_key.0 != params.session_id
-            || owner.session_lifetime_id != snapshot.lifetime
+            || owner.session_lifetime_id != snapshot.session_lifetime_id
         {
             return Err((REQUEST_CONFLICT, "compact owner 不匹配".into()));
         }
@@ -2353,12 +3253,14 @@ impl DaemonState {
             return Err((INVALID_PARAMS, "compact operation_id 无效".into()));
         }
         if let Some(stored) = self
-            .run_store
-            .compact_request(
+            .run_request_store
+            .read_compact_request(
+                &self.scope(),
                 &owner.session_key,
                 &owner.session_lifetime_id,
                 &params.operation_id,
             )
+            .await
             .map_err(|e| (REQUEST_CONFLICT, e.to_string()))?
         {
             if stored.expected_revision != params.expected_revision
@@ -2373,15 +3275,23 @@ impl DaemonState {
             return Ok(response);
         }
         if let Some(generation) = self
-            .run_store
-            .compact_result(&owner, &params.operation_id, Some(params.expected_revision))
+            .run_request_store
+            .read_compaction_result(
+                &agent_core::EnterpriseOwnerEnvelope {
+                    scope: self.scope(),
+                    owner: owner.clone(),
+                },
+                &params.operation_id,
+                Some(params.expected_revision),
+            )
+            .await
             .map_err(|e| (REQUEST_CONFLICT, e.to_string()))?
         {
             return Ok(
                 json!({"session_id":params.session_id,"projection_generation":generation,"transcript_revision":params.expected_revision,"replayed":true}),
             );
         }
-        if snapshot.revision != params.expected_revision {
+        if snapshot.transcript_revision != params.expected_revision {
             return Err((REQUEST_CONFLICT, "compact source revision 已变化".into()));
         }
         self.start_compact_command(
@@ -2399,24 +3309,27 @@ impl DaemonState {
         .await
     }
 
-    async fn session_fork(&self, params: SessionForkParams) -> Result<Value, (i64, String)> {
+    async fn session_fork(
+        self: &Arc<Self>,
+        params: SessionForkParams,
+    ) -> Result<Value, (i64, String)> {
         let _barrier = self.session_supervisor.control_lock.lock().await;
         self.session
             .open_known_session(&params.target_session_id)
             .map_err(|e| (INVALID_PARAMS, e.to_string()))?;
         let source = SessionId(params.session_id);
         let target = SessionId(params.target_session_id);
-        self.run_store
-            .execute_lifecycle(
-                &agent_core::SessionCommand::Fork {
-                    source,
-                    target: target.clone(),
-                    revision: params.expected_revision,
-                },
-                params.expected_lifetime.as_ref(),
-                &params.operation_id,
-            )
-            .map_err(|e| (REQUEST_CONFLICT, e.to_string()))?;
+        self.commit_session_authorized(
+            &agent_core::SessionCommand::Fork {
+                source,
+                target: target.clone(),
+                revision: params.expected_revision,
+            },
+            params.expected_lifetime.as_ref(),
+            &params.operation_id,
+        )
+        .await
+        .map_err(lifecycle_rpc_error)?;
         self.dispatch_hook_publications()
             .await
             .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
@@ -2437,17 +3350,19 @@ impl DaemonState {
                 .await
                 .clone(),
         };
-        self.session_readback_value(&key, mode)
+        self.session_readback_value(&key, mode).await
     }
 
     async fn session_load_page(&self, params: SessionPageParams) -> Result<Value, (i64, String)> {
         let mut snapshot = self
-            .run_store
-            .session_readback(
+            .readback_store
+            .read_session(
+                &self.scope(),
                 &SessionId(params.session_id.clone()),
                 agent_core::HistoryReadMode::Canonical,
             )
-            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+            .await
+            .map_err(|e| (e.rpc_code(), e.to_string()))?;
         let history = std::mem::take(&mut snapshot.messages);
         let batch_ranges = std::mem::take(&mut snapshot.batch_ranges);
         let total_messages = history.len();
@@ -2523,17 +3438,19 @@ impl DaemonState {
 
     async fn session_snapshot(&self, session_id: &str) -> Result<Value, (i64, String)> {
         self.session_readback_value(session_id, agent_core::HistoryReadMode::Canonical)
+            .await
     }
 
-    fn session_readback_value(
+    async fn session_readback_value(
         &self,
         session_id: &str,
         mode: agent_core::HistoryReadMode,
     ) -> Result<Value, (i64, String)> {
         let snapshot = self
-            .run_store
-            .session_readback(&SessionId(session_id.to_owned()), mode)
-            .map_err(|e| (INVALID_PARAMS, e.to_string()))?;
+            .readback_store
+            .read_session(&self.scope(), &SessionId(session_id.to_owned()), mode)
+            .await
+            .map_err(|e| (e.rpc_code(), e.to_string()))?;
         self.decorate_session_readback(snapshot)
     }
 
@@ -2592,19 +3509,24 @@ impl DaemonState {
     async fn session_list(&self, params: SessionListParams) -> Result<Value, (i64, String)> {
         let limit = params.limit.clamp(1, 1000);
         let mut metadata = self
-            .run_store
-            .session_metadata_page(params.after_id.as_deref(), limit + 1)
-            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+            .readback_store
+            .list_sessions(
+                &self.scope(),
+                params.after_id.as_deref(),
+                (limit + 1) as u32,
+            )
+            .await
+            .map_err(|e| (e.rpc_code(), e.to_string()))?;
         let has_more = metadata.len() > limit;
         metadata.truncate(limit);
-        let cursor = metadata.last().map(|m| m.key.0.clone());
+        let cursor = metadata.last().map(|m| m.metadata.key.0.clone());
         Ok(
             json!({"sessions": self.session_infos_from(metadata).await?,"cursor":cursor,"has_more":has_more}),
         )
     }
 
     async fn session_trace(&self, session_id: &str) -> Result<Value, (i64, String)> {
-        let store = self.query_session_trace_store(session_id)?;
+        let store = self.query_session_trace_store(session_id).await?;
         let records = store
             .load_trace()
             .await
@@ -2616,7 +3538,7 @@ impl DaemonState {
     }
 
     async fn session_trace_page(&self, params: SessionPageParams) -> Result<Value, (i64, String)> {
-        let store = self.query_session_trace_store(&params.session_id)?;
+        let store = self.query_session_trace_store(&params.session_id).await?;
         let records = store
             .load_trace()
             .await
@@ -2796,34 +3718,33 @@ impl DaemonState {
         &self,
     ) -> Result<Vec<agent_runtime::session::SessionInfo>, (i64, String)> {
         let metadata = self
-            .run_store
-            .session_metadata_list()
-            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+            .readback_store
+            .list_sessions(&self.scope(), None, 1000)
+            .await
+            .map_err(|e| (e.rpc_code(), e.to_string()))?;
         self.session_infos_from(metadata).await
     }
     async fn session_infos_from(
         &self,
-        metadata: Vec<agent_core::SessionMetadata>,
+        metadata: Vec<agent_core::SessionListEntry>,
     ) -> Result<Vec<agent_runtime::session::SessionInfo>, (i64, String)> {
         let mut sessions = metadata
             .into_iter()
-            .map(|meta| {
-                Ok(agent_runtime::session::SessionInfo {
+            .map(|entry| {
+                let meta = entry.metadata;
+                agent_runtime::session::SessionInfo {
                     id: meta.key.0.clone(),
                     path: self.session.path_for_session(&meta.key.0),
                     active: false,
                     message_count: meta.revision.0 as usize,
                     modified_at: Some((meta.updated_at_ms / 1000).max(0) as u64),
-                    preview: self
-                        .run_store
-                        .session_preview(&meta.key, &meta.lifetime)
-                        .map_err(|e| (INTERNAL_ERROR, e.to_string()))?,
-                    status: SessionStatus::Idle,
-                    active_requests: 0,
+                    preview: entry.preview,
+                    status: entry.status,
+                    active_requests: entry.active_requests,
                     updated_at: Some((meta.updated_at_ms / 1000).max(0) as u64),
-                })
+                }
             })
-            .collect::<Result<Vec<_>, (i64, String)>>()?;
+            .collect::<Vec<_>>();
         let current_id = self
             .session_supervisor
             .legacy_session_id
@@ -2832,24 +3753,6 @@ impl DaemonState {
             .clone();
         for session in &mut sessions {
             session.active = session.id == current_id;
-        }
-        for session in &mut sessions {
-            let snapshot = self
-                .run_store
-                .session_readback(
-                    &SessionId(session.id.clone()),
-                    agent_core::HistoryReadMode::Omitted,
-                )
-                .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
-            session.active_requests = snapshot.active_runs.len();
-            session.status = if !snapshot.pending_interactions.is_empty() {
-                SessionStatus::Waiting
-            } else if !snapshot.active_runs.is_empty() {
-                SessionStatus::Running
-            } else {
-                SessionStatus::Idle
-            };
-            session.updated_at = session.modified_at;
         }
         sessions.sort_by(|left, right| {
             right
@@ -2873,13 +3776,15 @@ impl DaemonState {
     ) -> Result<Value, (i64, String)> {
         let _barrier = self.session_supervisor.control_lock.lock().await;
         let receipt = self
-            .run_store
-            .discard_plan(
+            .plan_control_store
+            .discard_session_plan(
+                &self.scope(),
                 &SessionId(params.session_id),
                 &params.expected_lifetime,
                 &params.identity,
             )
-            .map_err(|e| (REQUEST_CONFLICT, e.to_string()))?;
+            .await
+            .map_err(|e| (e.rpc_code(), e.to_string()))?;
         if let Some(run) = &receipt.run_id {
             for active in self
                 .run_coordinator
@@ -2894,6 +3799,40 @@ impl DaemonState {
             self.run_coordinator.queue_notify.notify_waiters();
         }
         serde_json::to_value(receipt).map_err(|e| (INTERNAL_ERROR, e.to_string()))
+    }
+
+    async fn artifact_readback(&self, params: &ArtifactReadParams) -> Result<Value, RuntimeError> {
+        use base64::Engine as _;
+        let owner = self
+            .run_fact_store
+            .read_exact_run_owner(&self.scope(), &params.run_id)
+            .await
+            .map_err(|error| RuntimeError::Coordination(error))?;
+        if owner.session_key.0 != params.session_id {
+            return Err(agent_core::ArtifactError::Forbidden.into());
+        }
+        let bytes = if params.artifact_ref.starts_with("artifact:v1:") {
+            self.artifact_service
+                .as_ref()
+                .ok_or(agent_core::ArtifactError::StorageUnavailable)?
+                .read(&owner, &params.artifact_ref, params.offset, params.limit)
+                .await?
+                .data
+        } else {
+            self.observation_store
+                .read_legacy_artifact(
+                    &self.scope(),
+                    &owner,
+                    &params.artifact_ref,
+                    params.offset,
+                    params.limit.clamp(1, 16384),
+                )
+                .await
+                .map_err(RuntimeError::from)?
+        };
+        Ok(
+            json!({"data_base64":base64::engine::general_purpose::STANDARD.encode(&bytes),"offset":params.offset,"cursor":params.offset+bytes.len() as u64,"has_more":bytes.len()==params.limit.clamp(1,16384)}),
+        )
     }
 
     async fn execute_slash(
@@ -2943,9 +3882,9 @@ impl DaemonState {
                     let content = match invocation.args.as_slice() {
                         [action] if action == "read" => {
                             let key = session_id.ok_or_else(||(INVALID_PARAMS,"缺少 session".into()))?;
-                            serde_json::to_string(&self.run_store.plan_readback(&SessionId(key.into())).map_err(|e|(REQUEST_CONFLICT,e.to_string()))?).map_err(|e|(INTERNAL_ERROR,e.to_string()))?
+                            serde_json::to_string(&self.plan_control_store.read_session_plan(&self.scope(),&SessionId(key.into())).await.map_err(|e|(e.rpc_code(),e.to_string()))?).map_err(|e|(INTERNAL_ERROR,e.to_string()))?
                         },
-                        [action,key] if action == "read" => serde_json::to_string(&self.run_store.plan_readback(&SessionId(key.clone())).map_err(|e|(REQUEST_CONFLICT,e.to_string()))?).map_err(|e|(INTERNAL_ERROR,e.to_string()))?,
+                        [action,key] if action == "read" => serde_json::to_string(&self.plan_control_store.read_session_plan(&self.scope(),&SessionId(key.clone())).await.map_err(|e|(e.rpc_code(),e.to_string()))?).map_err(|e|(INTERNAL_ERROR,e.to_string()))?,
                         [action,key,lifetime,plan_id,revision,digest,operation] if action == "discard" => {
                             let identity=agent_core::PlanExecution { plan_id:plan_id.clone(), revision:revision.parse().map_err(|_|(INVALID_PARAMS,"revision 无效".into()))?, content_digest:digest.clone(), operation_id:operation.clone() };
                             serde_json::to_string(&self.discard_plan_command(PlanDiscardParams { session_id:key.clone(),expected_lifetime:agent_core::SessionLifetimeId(lifetime.clone()),identity }).await?).map_err(|e|(INTERNAL_ERROR,e.to_string()))?
@@ -2971,38 +3910,40 @@ impl DaemonState {
                             .await?
                         }
                         SlashAction::Context => {
-                            let snapshot = self
-                                .run_store
-                                .session_snapshot(&SessionId(key.clone()))
-                                .map_err(|e| (INVALID_PARAMS, e.to_string()))?;
-                            let projection = self
-                                .run_store
-                                .context_projection(&snapshot)
-                                .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
-                            let full = self.context_readback(ContextReadParams {
-                                session_id: key.clone(),
-                                expected_lifetime: snapshot.lifetime.clone(),
-                                run_id: invocation.args.get(1).map(|id| RunId(id.clone())),
-                                capture_id: None,
-                                local_diagnostics: invocation
-                                    .args
-                                    .get(2)
-                                    .is_some_and(|option| option == "--local"),
-                            });
+                            let summary = self
+                                .observation_store
+                                .read_context_summary(&self.scope(), &SessionId(key.clone()))
+                                .await
+                                .map_err(|e| (e.rpc_code(), e.to_string()))?;
+                            let full = self
+                                .context_readback(ContextReadParams {
+                                    session_id: key.clone(),
+                                    expected_lifetime: summary.lifetime.clone(),
+                                    run_id: invocation.args.get(1).map(|id| RunId(id.clone())),
+                                    capture_id: None,
+                                    local_diagnostics: invocation
+                                        .args
+                                        .get(2)
+                                        .is_some_and(|option| option == "--local"),
+                                })
+                                .await;
                             match full {
                                 Ok(full) => full,
                                 Err(error) if invocation.args.len() <= 1 => {
-                                    json!({"session_id":key,"lifetime":snapshot.lifetime,"transcript_revision":snapshot.revision,"projection_generation":projection.generation,"projected_messages":projection.messages.len(),"full_provider":{"availability":"unavailable","reason":error.1}})
+                                    json!({"session_id":key,"lifetime":summary.lifetime,"transcript_revision":summary.transcript_revision,"projection_generation":summary.projection_generation,"projected_messages":summary.projected_messages,"full_provider":{"availability":"unavailable","reason":error.1}})
                                 }
                                 Err(error) => return Err(error),
                             }
                         }
                         _ => {
+                            let scope = self.scope();
+                            let id = SessionId(key.clone());
                             let snapshot = self
-                                .run_store
-                                .session_snapshot(&SessionId(key.clone()))
-                                .map_err(|e| (INVALID_PARAMS, e.to_string()))?;
-                            json!({"session_id":key,"resources":self.run_store.list_resources(&snapshot.lifetime, agent_core::ResourceId(0), 100).map_err(|e|(INTERNAL_ERROR,e.to_string()))?})
+                                .readback_store
+                                .read_session(&scope, &id, agent_core::HistoryReadMode::Omitted)
+                                .await
+                                .map_err(lifecycle_rpc_error)?;
+                            json!({"session_id":key,"resources":self.resource_store.read_resource_page(&scope,&id,&snapshot.session_lifetime_id,agent_core::ResourceId(0),100).await.map_err(|e|(e.rpc_code(),e.to_string()))?})
                         }
                     };
                     SlashResponse::Text {
@@ -3019,15 +3960,131 @@ impl DaemonState {
                             .session_readback_value(
                                 &invocation.args[0],
                                 agent_core::HistoryReadMode::Omitted,
-                            )?
+                            )
+                            .await?
                             .to_string(),
                     }
                 }
+                SlashAction::Artifact => {
+                    self.authorize_local_request(
+                        RequestId::Number(0),
+                        agent_core::Action::ArtifactRead,
+                    )
+                    .await
+                    .map_err(|e| match e {
+                        RuntimeError::Authorization(reason) => {
+                            (reason.rpc_code(), reason.to_string())
+                        }
+                        RuntimeError::Coordination(reason) => {
+                            (reason.rpc_code(), reason.to_string())
+                        }
+                        _ => (INTERNAL_ERROR, "artifact 授权失败".into()),
+                    })?;
+                    let args = &invocation.args;
+                    if !(3..=5).contains(&args.len()) {
+                        return Err((
+                            INVALID_PARAMS,
+                            "用法：/artifact <session> <run> <reference> [offset limit]".into(),
+                        ));
+                    }
+                    let params = ArtifactReadParams {
+                        session_id: args[0].clone(),
+                        run_id: RunId(args[1].clone()),
+                        artifact_ref: args[2].clone(),
+                        offset: args
+                            .get(3)
+                            .map(|v| v.parse())
+                            .transpose()
+                            .map_err(|_| (INVALID_PARAMS, "offset 无效".into()))?
+                            .unwrap_or(0),
+                        limit: args
+                            .get(4)
+                            .map(|v| v.parse())
+                            .transpose()
+                            .map_err(|_| (INVALID_PARAMS, "limit 无效".into()))?
+                            .unwrap_or(16384),
+                    };
+                    let result = self.artifact_readback(&params).await.map_err(|e| match e {
+                        RuntimeError::Artifact(reason) => (reason.rpc_code(), reason.to_string()),
+                        RuntimeError::Authorization(reason) => {
+                            (reason.rpc_code(), reason.to_string())
+                        }
+                        _ => (INTERNAL_ERROR, "artifact 读回失败".into()),
+                    })?;
+                    SlashResponse::Text {
+                        content: serde_json::to_string(&result)
+                            .map_err(|_| (INTERNAL_ERROR, "artifact 编码失败".into()))?,
+                    }
+                }
+                SlashAction::Events => {
+                    if !(1..=3).contains(&invocation.args.len()) {
+                        return Err((
+                            INVALID_PARAMS,
+                            "/events <run_id> [after_seq] [limit]".into(),
+                        ));
+                    }
+                    let params = RunEventsParams {
+                        run_id: RunId(invocation.args[0].clone()),
+                        after_seq: invocation
+                            .args
+                            .get(1)
+                            .map(|v| v.parse::<u64>().map(EventSeq))
+                            .transpose()
+                            .map_err(|_| (INVALID_PARAMS, "after_seq 无效".into()))?,
+                        limit: invocation
+                            .args
+                            .get(2)
+                            .map(|v| v.parse::<usize>())
+                            .transpose()
+                            .map_err(|_| (INVALID_PARAMS, "limit 无效".into()))?,
+                    };
+                    let page = self
+                        .run_event_readback(&params)
+                        .await
+                        .map_err(|error| (error.rpc_code(), error.to_string()))?;
+                    SlashResponse::Text {
+                        content: serde_json::to_string(&page)
+                            .map_err(|_| (INTERNAL_ERROR, "事件页编码失败".into()))?,
+                    }
+                }
+                SlashAction::Outbox => {
+                    let mut records = self
+                        .publication_store
+                        .read_publications(&self.scope(), 0, 33)
+                        .await
+                        .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+                    let has_more = records.len() > 32;
+                    records.truncate(32);
+                    let cursor = records.last().map_or(0, |r| r.cursor);
+                    SlashResponse::Text {
+                        content: serde_json::to_string(&agent_core::OutboxReadback {
+                            records: records.into_iter().map(Into::into).collect(),
+                            cursor,
+                            has_more,
+                        })
+                        .map_err(|e| (INTERNAL_ERROR, e.to_string()))?,
+                    }
+                }
+                SlashAction::Identity => SlashResponse::Text {
+                    content: serde_json::to_string(&self.local_identity().await.map_err(
+                        |e| match e {
+                            RuntimeError::Authorization(error) => {
+                                (error.rpc_code(), error.to_string())
+                            }
+                            RuntimeError::Coordination(error) => {
+                                (error.rpc_code(), error.to_string())
+                            }
+                            _ => (INTERNAL_ERROR, "身份读取失败".into()),
+                        },
+                    )?)
+                    .map_err(|e| (INTERNAL_ERROR, e.to_string()))?,
+                },
                 SlashAction::Doctor => SlashResponse::Text {
                     content: self
-                        .maintenance_store
-                        .health_report()
-                        .map_err(|e| (INTERNAL_ERROR, e.to_string()))?
+                        .daemon_maintenance_store
+                        .read_storage_health(&self.scope())
+                        .await
+                        .map_err(|e| (e.rpc_code(), e.to_string()))?
                         .to_string(),
                 },
                 SlashAction::Status => {
@@ -3051,36 +4108,43 @@ impl DaemonState {
                     }
                 }
                 SlashAction::Run => {
-                    let id = RunId(invocation.args.join(" "));
-                    let run = self
-                        .run_store
-                        .read_run(&id)
-                        .map_err(|error| (INTERNAL_ERROR, error.to_string()))?
-                        .ok_or_else(|| (INVALID_PARAMS, format!("找不到 run: {}", id.0)))?;
-                    if run.kind == agent_core::RunKind::Compact {
-                        let compact = self
-                            .compact_response(&run)
-                            .map_err(|error| (INTERNAL_ERROR, error.to_string()))?;
-                        return serde_json::to_value(SlashResponse::Text {
-                            content: compact.to_string(),
-                        })
-                        .map_err(|e| (INTERNAL_ERROR, e.to_string()));
+                    if !(1..=2).contains(&invocation.args.len()) {
+                        return Err((INVALID_PARAMS, "/run <run_id> [fact|tools|provider]".into()));
                     }
-                    SlashResponse::Text {
-                        content: format!(
-                            "run_id={} · session_id={} · status={} · seq={} · terminal={}",
-                            run.run_id.0,
-                            run.session_id.0,
-                            serde_json::to_value(run.status)
-                                .unwrap_or_default()
-                                .as_str()
-                                .unwrap_or("unknown"),
-                            run.last_seq.0,
-                            run.content
-                                .as_deref()
-                                .or(run.error_message.as_deref())
-                                .unwrap_or("")
-                        ),
+                    let id = RunId(invocation.args[0].clone());
+                    if let Some(view) = invocation.args.get(1) {
+                        let value = self.run_fact_value(&id, view).await?;
+                        SlashResponse::Text {
+                            content: serde_json::to_string(&value)
+                                .map_err(|_| (INTERNAL_ERROR, "run投影编码失败".into()))?,
+                        }
+                    } else {
+                        let read = self
+                            .run_fact_store
+                            .read_run_fact(&self.scope(), &id)
+                            .await
+                            .map_err(|e| (e.rpc_code(), e.to_string()))?;
+                        let run = read.run;
+                        if let Some(compact) = read.compact {
+                            SlashResponse::Text {
+                                content: Self::compact_projection(&run, &compact, read.view_stamp)
+                                    .to_string(),
+                            }
+                        } else {
+                            SlashResponse::Text {
+                                content: format!(
+                                    "run_id={} · session_id={} · status={} · seq={} · terminal={}",
+                                    run.run_id.0,
+                                    run.session_id.0,
+                                    run.status.as_str(),
+                                    run.last_seq.0,
+                                    run.content
+                                        .as_deref()
+                                        .or(run.error_message.as_deref())
+                                        .unwrap_or("")
+                                ),
+                            }
+                        }
                     }
                 }
                 SlashAction::Subagents => {
@@ -3088,8 +4152,9 @@ impl DaemonState {
                         return Err((INVALID_PARAMS, "用法：/subagents <root_run_id>".into()));
                     }
                     let children = self
-                        .run_store
-                        .list_delegations(&RunId(invocation.args[0].clone()))
+                        .delegation_store
+                        .read_delegation_list(&self.scope(), &RunId(invocation.args[0].clone()))
+                        .await
                         .map_err(|error| (INTERNAL_ERROR, error.to_string()))?;
                     let content = if children.is_empty() {
                         "暂无子 Agent".to_owned()
@@ -3124,7 +4189,7 @@ impl DaemonState {
                         parent_run_id: RunId(invocation.args[0].clone()),
                         child_run_id: RunId(invocation.args[1].clone()),
                     };
-                    let child = self.scoped_delegation(&scope)?;
+                    let child = self.scoped_delegation(&scope).await?;
                     match invocation.action {
                         SlashAction::Subagent => SlashResponse::Text {
                             content: format!(
@@ -3183,9 +4248,13 @@ impl DaemonState {
                         return Err((INVALID_PARAMS, "/tools <run_id>".into()));
                     }
                     let receipts = self
-                        .run_store
-                        .discoveries(&agent_core::RunId(invocation.args[0].clone()))
-                        .map_err(|error| (INTERNAL_ERROR, error.to_string()))?;
+                        .run_discovery_store
+                        .read_run_discoveries(
+                            &self.scope(),
+                            &agent_core::RunId(invocation.args[0].clone()),
+                        )
+                        .await
+                        .map_err(|error| (error.rpc_code(), error.to_string()))?;
                     SlashResponse::Text {
                         content: json!({"receipts":receipts}).to_string(),
                     }
@@ -3212,14 +4281,16 @@ impl DaemonState {
                         .map_err(|_| (INVALID_PARAMS, "hook limit 非法".into()))?
                         .unwrap_or(32);
                     let readback = self
-                        .run_store
-                        .hook_readback(
+                        .hook_observation_store
+                        .read_hook_history(
+                            &self.scope(),
                             &SessionId(invocation.args[0].clone()),
                             &agent_core::SessionLifetimeId(invocation.args[1].clone()),
                             cursor,
                             limit,
                         )
-                        .map_err(|e| (REQUEST_CONFLICT, e.to_string()))?;
+                        .await
+                        .map_err(|error| (error.rpc_code(), error.to_string()))?;
                     SlashResponse::Text {
                         content: json!(readback).to_string(),
                     }
@@ -3625,9 +4696,17 @@ impl DaemonState {
         }
         let active_match = matches.into_iter().next();
         let run = if let Some((_, run_id, _)) = &active_match {
-            self.run_store.read_run(run_id)
+            self.queue_store
+                .read_run_record(&self.scope(), run_id)
+                .await
         } else if let Some(session_id) = params.session_id.as_deref() {
-            self.run_store.find_request(session_id, &params.request_id)
+            self.queue_store
+                .lookup_request_run(
+                    &self.scope(),
+                    Some(&SessionId(session_id.into())),
+                    &params.request_id,
+                )
+                .await
         } else {
             Ok(None)
         };
@@ -3660,28 +4739,29 @@ impl DaemonState {
             .into_iter()
             .map(|item| item.id)
             .collect::<HashSet<_>>();
-        let events = match self.run_store.events_after(&run.run_id, cursor, 1000) {
-            Ok(events) => events,
+        let page = match self
+            .event_store
+            .read_run_events(&self.scope(), &run.run_id, cursor, 1000)
+            .await
+        {
+            Ok(page) => page,
             Err(error) => {
-                send_result(
-                    &frames,
-                    request.id,
-                    Err((INTERNAL_ERROR, error.to_string())),
-                );
+                send_authorization_error(&frames, request.id, error.into());
                 return;
             }
         };
-        if events.len() == 1000 && events.last().is_some_and(|event| event.seq < run.last_seq) {
-            let next = events.last().map_or(cursor, |event| event.seq);
+        if page.has_more {
+            // 这一页尚未发送；cursor 只能指向已经交付的历史，避免重连跳过事实。
             let _ = frames.send(ServerFrame::Response(JsonRpcResponse::failure_data(
                 request.id,
                 REQUEST_CONFLICT,
                 "resync_required",
                 json!({"kind": "resync_required", "snapshot": run,
-                    "last_seq": run.last_seq, "cursor": next, "next_method": "run.events"}),
+                    "last_seq": run.last_seq, "cursor": cursor, "next_method": "run.events"}),
             )));
             return;
         }
+        let events = page.events;
         for event in events {
             cursor = event.seq;
             if let Some(update) = stored_event_update(event)
@@ -3694,9 +4774,11 @@ impl DaemonState {
         if run.kind == agent_core::RunKind::Compact && run.status.terminal() {
             let response = self
                 .compact_response(&run)
+                .await
                 .map_err(|error| (INTERNAL_ERROR, error.to_string()));
             let _ = frames.send(
                 self.terminal_update(&run.run_id, response)
+                    .await
                     .to_frame(request.id),
             );
             return;
@@ -3706,6 +4788,7 @@ impl DaemonState {
                 Ok(json!({"content":run.content,"run_id":run.run_id,"turn_id":run.turn_id}));
             let _ = frames.send(
                 self.terminal_update(&run.run_id, response)
+                    .await
                     .to_frame(request.id),
             );
             return;
@@ -3722,6 +4805,7 @@ impl DaemonState {
             ));
             let _ = frames.send(
                 self.terminal_update(&run.run_id, response)
+                    .await
                     .to_frame(request.id),
             );
             return;
@@ -3761,7 +4845,21 @@ impl DaemonState {
                     return;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    let snapshot = self.run_store.read_run(&run.run_id).ok().flatten();
+                    let snapshot = match self
+                        .queue_store
+                        .read_run_record(&self.scope(), &run.run_id)
+                        .await
+                    {
+                        Ok(record) => record,
+                        Err(error) => {
+                            send_result(
+                                &frames,
+                                request.id,
+                                Err((error.rpc_code(), error.to_string())),
+                            );
+                            return;
+                        }
+                    };
                     let last_seq = snapshot.as_ref().map(|item| item.last_seq);
                     let _ = frames.send(ServerFrame::Response(JsonRpcResponse::failure_data(
                         request.id,
@@ -3776,12 +4874,16 @@ impl DaemonState {
         }
     }
 
-    pub(super) fn terminal_update(
+    pub(super) async fn terminal_update(
         &self,
         run: &RunId,
         response: Result<Value, (i64, String)>,
     ) -> ActiveRequestUpdate {
-        match self.run_store.latest_view_event(run, "terminal", None) {
+        match self
+            .event_store
+            .read_run_view_event(&self.scope(), run, "terminal", None)
+            .await
+        {
             Ok(Some(event)) if event.data.get("_my_agent_view").is_none() => {
                 ActiveRequestUpdate::Terminal {
                     response,
@@ -3805,16 +4907,17 @@ impl DaemonState {
                 view: None,
             },
             Err(error) => ActiveRequestUpdate::Terminal {
-                response: Err((INTERNAL_ERROR, error.to_string())),
+                response: Err((error.rpc_code(), error.to_string())),
                 view: None,
             },
         }
     }
 
     async fn publish_update(
-        &self,
+        self: &Arc<Self>,
         frames: &super::frames::FrameSender,
         active_key: &ActiveKey,
+        execution: &agent_core::EnterpriseOwnerEnvelope,
         mut update: ActiveRequestUpdate,
     ) {
         if matches!(
@@ -3826,22 +4929,23 @@ impl DaemonState {
         ) {
             return; // The final content and terminal become visible after one SQLite commit.
         }
-        let run_id = self
+        let Some(run_id) = self
             .run_coordinator
             .active
             .lock()
             .await
             .get(active_key)
-            .map(|active| active.run_id.clone());
-        if let (
-            Some(run_id),
-            ActiveRequestUpdate::Event {
-                kind,
-                data,
-                run_id: field_id,
-                seq,
-            },
-        ) = (&run_id, &mut update)
+            .filter(|active| active.run_id == execution.owner.run_id)
+            .map(|active| active.run_id.clone())
+        else {
+            return;
+        };
+        if let ActiveRequestUpdate::Event {
+            kind,
+            data,
+            run_id: field_id,
+            seq,
+        } = &mut update
         {
             let name = serde_json::to_value(&*kind)
                 .ok()
@@ -3854,16 +4958,43 @@ impl DaemonState {
                     "owner_run_id": run_id, "kind": "approval", "status": "pending", "revision": 0,
                     "payload": data["approval"]});
             }
-            match self.run_store.append_event(run_id, &name, data) {
+            match self
+                .event_store
+                .append_run_live_event(execution, &name, data)
+                .await
+            {
                 Ok(next_seq) => {
                     *field_id = Some(run_id.clone());
                     *seq = Some(next_seq);
-                    match self.run_store.event_view_stamp(run_id, next_seq) {
-                        Ok(Some(stamp)) => data["_my_agent_view"] = json!(stamp),
-                        Ok(None) => {}
+                    match self
+                        .event_store
+                        .read_run_events(
+                            &execution.scope,
+                            &run_id,
+                            EventSeq(next_seq.0.saturating_sub(1)),
+                            1,
+                        )
+                        .await
+                        .and_then(|page| {
+                            page.events
+                                .into_iter()
+                                .next()
+                                .filter(|event| event.seq == next_seq)
+                                .ok_or(CoordinationError::Corrupt)
+                        }) {
+                        Ok(event) => {
+                            if let Some(stamp) = event.data.get("_my_agent_view") {
+                                data["_my_agent_view"] = stamp.clone();
+                            }
+                        }
                         Err(error) => {
-                            if let Some(active) =
-                                self.run_coordinator.active.lock().await.get_mut(active_key)
+                            if let Some(active) = self
+                                .run_coordinator
+                                .active
+                                .lock()
+                                .await
+                                .get_mut(active_key)
+                                .filter(|active| active.run_id == execution.owner.run_id)
                             {
                                 active.storage_error = Some(error.to_string());
                                 active.cancellation.cancel();
@@ -3876,14 +5007,9 @@ impl DaemonState {
                             .hooks
                             .configured(agent_core::HookEvent::ApprovalRequested)
                         && let Some(id) = data["approval"]["id"].as_str()
-                        && let Ok(owner) = self.run_store.run_owner(run_id)
                     {
                         let outcome = agent_runtime::hooks::with_scope(
-                            agent_runtime::hooks::HookScope {
-                                dispatcher: self.hooks.clone(),
-                                store: self.run_store.clone(),
-                                owner,
-                            },
+                            self.hook_scope(execution),
                             agent_runtime::hooks::current(
                                 agent_core::HookEvent::ApprovalRequested,
                                 id,
@@ -3899,8 +5025,13 @@ impl DaemonState {
                 }
                 Err(error) => {
                     tracing::error!(run_id = %run_id.0, %error, "持久化事件失败");
-                    if let Some(active) =
-                        self.run_coordinator.active.lock().await.get_mut(active_key)
+                    if let Some(active) = self
+                        .run_coordinator
+                        .active
+                        .lock()
+                        .await
+                        .get_mut(active_key)
+                        .filter(|active| active.run_id == execution.owner.run_id)
                     {
                         active.storage_error = Some(error.to_string());
                         active.cancellation.cancel();
@@ -3909,8 +5040,17 @@ impl DaemonState {
                 }
             }
         }
-        if let Some(active) = self.run_coordinator.active.lock().await.get_mut(active_key) {
+        if let Some(active) = self
+            .run_coordinator
+            .active
+            .lock()
+            .await
+            .get_mut(active_key)
+            .filter(|active| active.run_id == execution.owner.run_id)
+        {
             active.publish(update.clone());
+        } else {
+            return;
         }
         let _ = frames.send(update.to_frame(active_key.request_id.clone()));
     }
@@ -3932,8 +5072,9 @@ impl DaemonState {
             return;
         };
         let event = match self
-            .run_store
-            .latest_view_event(&active, "assistant_content", None)
+            .event_store
+            .read_run_view_event(&self.scope(), &active, "assistant_content", None)
+            .await
         {
             Ok(Some(event)) => event,
             _ => return,
@@ -3953,6 +5094,26 @@ impl DaemonState {
     }
 
     async fn resolve_interaction(
+        self: &Arc<Self>,
+        params: ApprovalRespondParams,
+        rejected: bool,
+    ) -> Result<Value, (i64, String)> {
+        // 仅交付句柄，持久回答仍由原interaction事务唯一发布；连接Drop不能detach已接受的claim。
+        let (completed, result) = tokio::sync::oneshot::channel();
+        let state = self.clone();
+        if !self
+            .spawn_effect_job(Box::pin(async move {
+                let _ = completed.send(state.resolve_interaction_owned(params, rejected).await);
+            }))
+            .await
+        {
+            return Err((REQUEST_CONFLICT, "daemon已经停止审批回答准入".into()));
+        }
+        result
+            .await
+            .map_err(|_| (INTERNAL_ERROR, "审批回答任务未确认结果".into()))?
+    }
+    async fn resolve_interaction_owned(
         &self,
         params: ApprovalRespondParams,
         rejected: bool,
@@ -3962,15 +5123,18 @@ impl DaemonState {
         } else {
             params
                 .approved
-                .ok_or((INVALID_PARAMS, "缺少 approved".into()))?
+                .ok_or((INVALID_PARAMS, "缺少approved".into()))?
         };
         let _guard = self.session_supervisor.control_lock.lock().await;
+        let scope = self.scope();
         let id = InteractionId(params.approval_id);
+        let fail = |error: agent_core::RepositoryError| (error.rpc_code(), error.to_string());
         let current = self
-            .run_store
-            .read_interaction(&id)
-            .map_err(|error| (INTERNAL_ERROR, error.to_string()))?
-            .ok_or((INVALID_PARAMS, "interaction 不存在".into()))?;
+            .interaction_store
+            .read_interaction_record(&scope, &id)
+            .await
+            .map_err(fail)?
+            .ok_or((INVALID_PARAMS, "interaction不存在".into()))?;
         if params
             .session_id
             .as_deref()
@@ -3980,52 +5144,99 @@ impl DaemonState {
                 .as_ref()
                 .is_some_and(|run| run != &current.owner_run_id)
         {
-            return Err((REQUEST_CONFLICT, "interaction owner 不匹配".into()));
+            return Err((REQUEST_CONFLICT, "interaction owner不匹配".into()));
         }
-        if let Some(expected) = params.exact_owner.as_ref() {
-            let owner = self
-                .run_store
-                .run_owner(&current.owner_run_id)
-                .map_err(|error| (REQUEST_CONFLICT, error.to_string()))?;
-            if &owner != expected {
-                return Err((REQUEST_CONFLICT, "interaction exact owner 不匹配".into()));
-            }
+        let owner = self
+            .run_fact_store
+            .read_exact_run_owner(&scope, &current.owner_run_id)
+            .await
+            .map_err(lifecycle_rpc_error)?;
+        if params
+            .exact_owner
+            .as_ref()
+            .is_some_and(|expected| expected != &owner)
+        {
+            return Err((REQUEST_CONFLICT, "interaction exact owner不匹配".into()));
         }
+        let envelope = agent_core::EnterpriseOwnerEnvelope {
+            scope: scope.clone(),
+            owner,
+        };
         let revision = params.revision.unwrap_or(current.revision);
-        let claim = || {
-            self.run_store.claim_interaction(
-                &id,
-                &current.session_id,
-                &current.owner_run_id,
-                revision,
-                approved,
+        let authorization = self
+            .authorize_local_request(
+                RequestId::String(format!("interaction:{}:{}:{}", id.0, revision, approved)),
+                agent_core::Action::InteractionRespond,
             )
+            .await
+            .map_err(|e| {
+                let e = e.repository_error();
+                (e.rpc_code(), e.to_string())
+            })?;
+        let claim = async {
+            Ok(self
+                .interaction_store
+                .respond_interaction_authorized(
+                    &authorization,
+                    &envelope,
+                    &id,
+                    revision,
+                    approved,
+                    Arc::new(agent_policy::PolicyEngine),
+                )
+                .await?)
         };
         let record = if current.status == "pending" {
-            match self.approvals.respond_claimed(&id.0, approved, claim).await {
+            match self
+                .approvals
+                .respond_claimed_async(&id.0, approved, claim)
+                .await
+            {
                 Ok(record) => record,
                 Err(error) => {
-                    if let Ok(Some(after)) = self.run_store.read_interaction(&id)
-                        && matches!(after.status.as_str(), "answered" | "rejected")
+                    if let Ok(Some(after)) = self
+                        .interaction_store
+                        .read_interaction_record(&scope, &id)
+                        .await
                     {
-                        let _ = self.run_store.finish(
-                            &after.owner_run_id,
-                            RunStatus::UnknownAfterRestart,
-                            None,
-                            Some((-32002, "审批执行体已消失")),
-                        );
+                        if matches!(after.status.as_str(), "answered" | "rejected") {
+                            let commit = agent_core::TurnCommit {
+                                owner: envelope.owner.clone(),
+                                status: RunStatus::UnknownAfterRestart,
+                                content: None,
+                                error: Some((-32002, "审批执行体已消失".into())),
+                            };
+                            if let Err(failure) = self
+                                .run_execution_store
+                                .commit_run_turn(&envelope, &commit)
+                                .await
+                            {
+                                tracing::warn!(%failure,"审批交付未确认，unknown结算被fence拒绝");
+                            }
+                        }
                     }
                     return Err((REQUEST_CONFLICT, format!("{error:#}")));
                 }
             }
         } else {
-            claim().map_err(|error| (REQUEST_CONFLICT, error.to_string()))?
+            self.interaction_store
+                .respond_interaction_authorized(
+                    &authorization,
+                    &envelope,
+                    &id,
+                    revision,
+                    approved,
+                    Arc::new(agent_policy::PolicyEngine),
+                )
+                .await
+                .map_err(fail)?
         };
         let mut value = json!({"accepted":true,"interaction":record});
         if let Some(stamp) = self
-            .run_store
-            .interaction_view_stamp(&id)
-            .map_err(|error| (INTERNAL_ERROR, error.to_string()))?
+            .interaction_store
+            .read_interaction_stamp(&scope, &id)
+            .await
+            .map_err(fail)?
         {
             value["_my_agent_view"] = json!(stamp);
         }
@@ -4034,22 +5245,28 @@ impl DaemonState {
 
     async fn audit_run(&self, run_id: &RunId) -> Result<Value, (i64, String)> {
         let run = self
-            .run_store
-            .read_run(run_id)
-            .map_err(|error| (INTERNAL_ERROR, error.to_string()))?
+            .queue_store
+            .read_run_record(&self.scope(), run_id)
+            .await
+            .map_err(|error| (error.rpc_code(), error.to_string()))?
             .ok_or((INVALID_PARAMS, "run 不存在".into()))?;
         let store = self
             .session
             .open_known_session(&run.session_id.0)
             .map_err(|error| (INTERNAL_ERROR, format!("JSONL 读取失败: {error:#}")))?;
         let owner = self
-            .run_store
-            .run_owner(run_id)
-            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+            .run_fact_store
+            .read_exact_run_owner(&self.scope(), run_id)
+            .await
+            .map_err(|e| (e.rpc_code(), e.to_string()))?;
         let store = store
             .with_trace_lifetime(&owner.session_lifetime_id)
             .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
-        let (messages, jsonl_error) = match self.run_store.run_messages(run_id) {
+        let (messages, jsonl_error) = match self
+            .observation_store
+            .read_run_transcript(&self.scope(), run_id)
+            .await
+        {
             Ok(messages) => (messages, None),
             Err(e) => (Vec::new(), Some(e.to_string())),
         };
@@ -4071,9 +5288,10 @@ impl DaemonState {
             Err(error) => (0, 0, Some(format!("{error:#}"))),
         };
         let receipts = self
-            .run_store
-            .tool_receipts(run_id)
-            .map_err(|error| (INTERNAL_ERROR, error.to_string()))?;
+            .run_fact_store
+            .read_tool_receipts(&self.scope(), run_id)
+            .await
+            .map_err(|error| (error.rpc_code(), error.to_string()))?;
         let incomplete = receipts
             .iter()
             .filter(|receipt| receipt.status != "terminal")
@@ -4088,7 +5306,23 @@ impl DaemonState {
                 .receipt
                 .as_ref()
                 .and_then(|value| value["output_sha256"].as_str());
-            match artifact_sha256(path).await {
+            let actual = if path.starts_with("artifact:v1:") {
+                match &self.artifact_service {
+                    Some(service) => service
+                        .read(&owner, path, 0, 1)
+                        .await
+                        .map(|page| page.identity.sha256)
+                        .map_err(RuntimeError::from),
+                    None => Err(agent_core::ArtifactError::StorageUnavailable.into()),
+                }
+            } else {
+                self.observation_store
+                    .read_legacy_artifact(&self.scope(), &owner, path, 0, 1)
+                    .await
+                    .map(|_| expected.unwrap_or_default().to_owned())
+                    .map_err(RuntimeError::from)
+            };
+            match actual {
                 Ok(actual) if expected.is_some_and(|expected| expected != actual) => {
                     corrupt_artifacts
                         .push(json!({"round": receipt.round, "call_id": receipt.call_id}))
@@ -4112,7 +5346,7 @@ impl DaemonState {
         Ok(
             json!({"run_id": run_id, "session_id": run.session_id, "control_status": run.status,
             "last_seq": run.last_seq, "diagnostic": diagnostic,
-            "snapshot":self.run_store.run_snapshot(run_id).map_err(|e|(INTERNAL_ERROR,e.to_string()))?,
+            "snapshot":self.run_fact_store.read_run_fact(&self.scope(),run_id).await.map_err(|e|(e.rpc_code(),e.to_string()))?.snapshot,
             "jsonl_matching_assistant": matching_assistant,
             "incomplete_tool_receipts": incomplete,
             "jsonl_is_authoritative": false,
@@ -4131,16 +5365,19 @@ impl DaemonState {
             return Ok(result);
         };
         let run_id = RunId(run_id.to_owned());
+        let scope = self.scope();
         let root = self
-            .run_store
-            .delegation(&run_id)
-            .map_err(|error| (INTERNAL_ERROR, error.to_string()))?
+            .delegation_store
+            .read_delegation_record(&scope, &run_id)
+            .await
+            .map_err(|e| (e.rpc_code(), e.to_string()))?
             .map(|record| record.root_run_id)
             .unwrap_or_else(|| run_id.clone());
         let descendants = self
-            .run_store
-            .list_delegations(&root)
-            .map_err(|error| (INTERNAL_ERROR, error.to_string()))?;
+            .delegation_store
+            .read_delegation_list(&scope, &root)
+            .await
+            .map_err(|e| (e.rpc_code(), e.to_string()))?;
         let mut owned = HashSet::from([run_id]);
         let mut targets = Vec::new();
         loop {
@@ -4156,17 +5393,28 @@ impl DaemonState {
             }
         }
         for run in &owned {
-            if let Ok(owner) = self.run_store.run_owner(run) {
-                if let Ok(resources) = self.run_store.list_resources(
-                    &owner.session_lifetime_id,
-                    agent_core::ResourceId(0),
-                    100,
-                ) {
+            let scope = self.scope();
+            if let Ok(owner) = self.run_fact_store.read_exact_run_owner(&scope, run).await {
+                if let Ok(resources) = self
+                    .resource_store
+                    .read_resource_page(
+                        &scope,
+                        &owner.session_key,
+                        &owner.session_lifetime_id,
+                        agent_core::ResourceId(0),
+                        100,
+                    )
+                    .await
+                {
                     for resource in resources.into_iter().filter(|r| {
                         &r.owner.run_id == run
                             && matches!(r.state.as_str(), "starting" | "running" | "stopping")
                     }) {
-                        let _ = self.stop_resource(&resource.owner, resource.id).await;
+                        let envelope = agent_core::EnterpriseOwnerEnvelope {
+                            scope: scope.clone(),
+                            owner: resource.owner,
+                        };
+                        let _ = self.stop_resource_execution(&envelope, resource.id).await;
                     }
                 }
             }
@@ -4184,16 +5432,38 @@ impl DaemonState {
         Ok(result)
     }
 
-    async fn cancel_one(&self, params: CancelParams) -> Result<Value, (i64, String)> {
+    async fn finish_frozen_run(
+        &self,
+        envelope: &agent_core::EnterpriseOwnerEnvelope,
+        status: RunStatus,
+        content: Option<&str>,
+        error: Option<(i64, &str)>,
+    ) -> Result<agent_core::RunRecord, RuntimeError> {
+        self.run_execution_store
+            .commit_run_turn(
+                envelope,
+                &agent_core::TurnCommit {
+                    owner: envelope.owner.clone(),
+                    status,
+                    content: content.map(str::to_owned),
+                    error: error.map(|(code, message)| (code, message.to_owned())),
+                },
+            )
+            .await
+            .map_err(Into::into)
+    }
+
+    pub(crate) async fn cancel_one(&self, params: CancelParams) -> Result<Value, (i64, String)> {
         let _guard = self.session_supervisor.control_lock.lock().await;
         let mut run = if let Some(run_id) = params.run_id {
             let session_id = params
                 .session_id
                 .ok_or((INVALID_PARAMS, "exact cancel 需要 session_id".into()))?;
             let run = self
-                .run_store
-                .read_run(&run_id)
-                .map_err(|error| (INTERNAL_ERROR, error.to_string()))?
+                .queue_store
+                .read_run_record(&self.scope(), &run_id)
+                .await
+                .map_err(|error| (error.rpc_code(), error.to_string()))?
                 .ok_or((INVALID_PARAMS, "run 不存在".into()))?;
             if run.session_id.0 != session_id {
                 return Err((REQUEST_CONFLICT, "run 不属于指定 session".into()));
@@ -4201,9 +5471,13 @@ impl DaemonState {
             run
         } else if let Some(request_id) = params.request_id {
             let result = if let Some(session_id) = params.session_id {
-                self.run_store.find_request(&session_id, &request_id)
+                self.queue_store
+                    .lookup_request_run(&self.scope(), Some(&SessionId(session_id)), &request_id)
+                    .await
             } else {
-                self.run_store.find_request_unique(&request_id)
+                self.queue_store
+                    .lookup_request_run(&self.scope(), None, &request_id)
+                    .await
             };
             match result.map_err(|error| (REQUEST_CONFLICT, error.to_string()))? {
                 Some(run) => run,
@@ -4212,30 +5486,38 @@ impl DaemonState {
         } else {
             return Err((INVALID_PARAMS, "需要 run_id 或 request_id".into()));
         };
-        if let Some(expected) = params.exact_owner.as_ref() {
-            let owner = self
-                .run_store
-                .run_owner(&run.run_id)
-                .map_err(|error| (REQUEST_CONFLICT, error.to_string()))?;
-            if &owner != expected {
-                return Err((REQUEST_CONFLICT, "cancel exact owner 不匹配".into()));
-            }
+        let owner = self
+            .run_fact_store
+            .read_exact_run_owner(&self.scope(), &run.run_id)
+            .await
+            .map_err(|error| (error.rpc_code(), error.to_string()))?;
+        if params
+            .exact_owner
+            .as_ref()
+            .is_some_and(|expected| expected != &owner)
+        {
+            return Err((REQUEST_CONFLICT, "cancel exact owner 不匹配".into()));
         }
+        let envelope = agent_core::EnterpriseOwnerEnvelope {
+            scope: self.scope(),
+            owner,
+        };
         if run.status == RunStatus::Queued {
             let removed = self
-                .run_store
-                .remove_queued(&run.run_id)
-                .map_err(|error| (INTERNAL_ERROR, error.to_string()))?;
+                .run_execution_store
+                .cancel_queued_run(&envelope)
+                .await
+                .map_err(|error| (error.rpc_code(), error.to_string()))?;
             if removed {
                 let key = ActiveKey {
                     session_id: run.session_id.0.clone(),
                     request_id: run.request_id.clone(),
                 };
+                let terminal = self
+                    .terminal_update(&run.run_id, Err((REQUEST_CANCELLED, "请求已取消".into())))
+                    .await;
                 if let Some(active) = self.run_coordinator.active.lock().await.get_mut(&key) {
-                    active.publish(self.terminal_update(
-                        &run.run_id,
-                        Err((REQUEST_CANCELLED, "请求已取消".into())),
-                    ));
+                    active.publish(terminal);
                     active.cancellation.cancel();
                 }
                 self.run_coordinator.queue_notify.notify_waiters();
@@ -4244,9 +5526,10 @@ impl DaemonState {
                 return Ok(json!({"cancelled": true, "run_id": run.run_id, "status": "queued"}));
             }
             run = self
-                .run_store
-                .read_run(&run.run_id)
-                .map_err(|error| (INTERNAL_ERROR, error.to_string()))?
+                .queue_store
+                .read_run_record(&self.scope(), &run.run_id)
+                .await
+                .map_err(|error| (error.rpc_code(), error.to_string()))?
                 .ok_or((INVALID_PARAMS, "run 不存在".into()))?;
         }
         if !matches!(
@@ -4270,13 +5553,10 @@ impl DaemonState {
         let Some(token) = token else {
             return Ok(json!({"cancelled": false, "reason": "执行体已消失", "run_id": run.run_id}));
         };
-        let owner = self
-            .run_store
-            .run_owner(&run.run_id)
-            .map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
-        self.run_store
-            .request_cancellation(&owner)
-            .map_err(|e| (REQUEST_CONFLICT, e.to_string()))?;
+        self.run_discovery_store
+            .request_run_cancellation(&envelope)
+            .await
+            .map_err(|error| (error.rpc_code(), error.to_string()))?;
         token.cancel();
         self.approvals
             .cancel_request_in_session(&run.session_id.0, &run.request_id)
@@ -4538,25 +5818,23 @@ fn parse_params<T: for<'de> Deserialize<'de>>(params: &Value) -> Result<T, Strin
     serde_json::from_value(params.clone()).map_err(|error| format!("参数无效: {error}"))
 }
 
-async fn artifact_sha256(path: &str) -> std::io::Result<String> {
-    let mut file = tokio::fs::File::open(path).await?;
-    let mut digest = Sha256::new();
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer).await?;
-        if read == 0 {
-            break;
-        }
-        digest.update(&buffer[..read]);
-    }
-    Ok(format!("{:x}", digest.finalize()))
-}
-
 fn request_id_label(request_id: &RequestId) -> String {
     match request_id {
         RequestId::Number(value) => value.to_string(),
         RequestId::String(value) => value.clone(),
     }
+}
+
+fn lifecycle_rpc_error(error: impl Into<agent_core::RepositoryError>) -> (i64, String) {
+    let error = error.into();
+    let code = if error
+        == agent_core::RepositoryError::Coordination(agent_core::CoordinationError::Conflict)
+    {
+        REQUEST_CONFLICT
+    } else {
+        error.rpc_code()
+    };
+    (code, error.to_string())
 }
 
 fn send_result(
@@ -4566,7 +5844,15 @@ fn send_result(
 ) {
     let response = match result {
         Ok(value) => JsonRpcResponse::success(id, value),
-        Err((code, message)) => JsonRpcResponse::failure(id, code, message),
+        Err((code, message)) => match agent_core::CoordinationError::from_rpc_code(code) {
+            Some(reason) => JsonRpcResponse::failure_data(
+                id,
+                code,
+                reason.to_string(),
+                json!({"domain":"coordination","kind":reason,"retryable":reason.retryable(),"safe_auto_retry":false,"recovery_action":reason.recovery_action()}),
+            ),
+            None => JsonRpcResponse::failure(id, code, message),
+        },
     };
     let _ = frames.send(ServerFrame::Response(response));
 }
@@ -4647,6 +5933,35 @@ fn is_resolved_approval(update: &ActiveRequestUpdate, pending_ids: &HashSet<Stri
     data["approval"]["id"]
         .as_str()
         .is_some_and(|id| !pending_ids.contains(id))
+}
+
+fn send_authorization_error(
+    frames: &super::frames::FrameSender,
+    id: RequestId,
+    error: RuntimeError,
+) {
+    let response = match error {
+        RuntimeError::Ledger(reason) => JsonRpcResponse::failure_data(
+            id,
+            reason.rpc_code(),
+            reason.to_string(),
+            json!({"kind":reason,"retryable":false,"safe_auto_retry":false,"recovery_action":reason.recovery_action()}),
+        ),
+        RuntimeError::Authorization(reason) => JsonRpcResponse::failure_data(
+            id,
+            reason.rpc_code(),
+            reason.to_string(),
+            json!({"kind":reason,"retryable":false,"safe_auto_retry":false,"recovery_action":reason.recovery_action()}),
+        ),
+        RuntimeError::Coordination(reason) => JsonRpcResponse::failure_data(
+            id,
+            reason.rpc_code(),
+            reason.to_string(),
+            json!({"domain":"coordination","kind":reason,"retryable":reason.retryable(),"safe_auto_retry":false,"recovery_action":reason.recovery_action()}),
+        ),
+        error => JsonRpcResponse::failure(id, INTERNAL_ERROR, error.to_string()),
+    };
+    let _ = frames.send(ServerFrame::Response(response));
 }
 
 #[cfg(test)]

@@ -1,0 +1,15 @@
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 19.71s
+     Running tests/lifecycle_port_contract.rs (target/debug/deps/lifecycle_port_contract-2364692b193835bd)
+
+running 6 tests
+test lifecycle_replay_and_close_receipt_check_scope_before_returning_historical_result ... ok
+test lifecycle_mutation_uses_clone_writer_proof_and_rejects_expired_epoch_without_reacquiring ... ok
+test lifecycle_mutation_never_closes_a_foreign_session_or_creates_its_receipt ... ok
+test lifecycle_scope_and_unknown_resources_do_not_reveal_operations ... ok
+test two_real_connections_commit_one_lifecycle_operation_with_controlled_start_barrier ... ok
+test original_lifecycle_transaction_rolls_back_head_hook_lifetime_and_receipt_then_replays_once ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+

@@ -1,71 +1,30 @@
 //! Durable child-run ownership and result delivery on the existing RunStore connection.
 use rusqlite::{Connection, OptionalExtension, params};
-use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::json;
 
 use super::{
-    RequestId, RouteSnapshot, RunId, RunRecord, RunStatus, RunStore, RuntimeError, SessionId,
-    TurnId, insert_event, now_ms, read_run_in,
+    RequestId, RunId, RunRecord, RunStatus, RunStore, RuntimeError, SessionId, TurnId,
+    insert_event, now_ms, read_run_in,
 };
 
 const MAX_DEPTH: i64 = 2;
 const MAX_ROOT_SPAWNS: i64 = 8;
 const MAX_ROOT_ACTIVE: i64 = 4;
 
-#[derive(Clone, Debug)]
-pub struct DelegationRequest {
-    pub parent_session_id: SessionId,
-    pub parent_run_id: RunId,
-    pub child_session_id: SessionId,
-    pub spawn_key: String,
-    pub task: String,
-    pub context_source_ids: Vec<String>,
-    pub tools: Vec<String>,
-    pub permission_mode: String,
-    pub cwd: String,
-    pub max_rounds: i64,
-    pub max_tokens: i64,
-    pub max_tool_calls: i64,
-    pub deadline_ms: i64,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct DelegationRecord {
-    pub root_session_id: SessionId,
-    pub root_run_id: RunId,
-    pub parent_session_id: SessionId,
-    pub parent_run_id: RunId,
-    pub child_session_id: SessionId,
-    pub child_run_id: RunId,
-    pub spawn_key: String,
-    pub depth: i64,
-    pub status: RunStatus,
-    pub created_at_ms: i64,
-    pub started_at_ms: Option<i64>,
-    pub finished_at_ms: Option<i64>,
-    pub tools: Vec<String>,
-    pub permission_mode: String,
-    pub route: Option<RouteSnapshot>,
-    pub cwd: String,
-    pub max_rounds: i64,
-    pub max_tokens: i64,
-    pub max_tool_calls: i64,
-    pub deadline_ms: i64,
-    pub terminal: Option<Value>,
-    pub result_state: String,
-    pub reservation_owner: Option<String>,
-    pub revision: i64,
-    pub reservation_released_at_ms: Option<i64>,
-    pub reservation_expires_at_ms: Option<i64>,
-    pub content: Option<String>,
-    pub error_code: Option<i64>,
-    pub error_message: Option<String>,
-}
+pub use agent_core::{DelegationRecord, DelegationRequest};
 
 impl RunStore {
     pub fn admit_delegation(
         &self,
         request: DelegationRequest,
+    ) -> Result<DelegationRecord, RuntimeError> {
+        self.admit_delegation_scoped(request, None)
+    }
+
+    pub(crate) fn admit_delegation_scoped(
+        &self,
+        request: DelegationRequest,
+        envelope: Option<&agent_core::EnterpriseOwnerEnvelope>,
     ) -> Result<DelegationRecord, RuntimeError> {
         if request.context_source_ids.len() > 4
             || request.context_source_ids.iter().any(|id| id.len() > 512)
@@ -87,7 +46,28 @@ impl RunStore {
             return Err(RuntimeError::Protocol("子 Agent 参数或预算无效".into()));
         }
         let mut connection = self.lock_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        crate::run_delegations::check_parent_execution_in(
+            &transaction,
+            &request.parent_session_id,
+            &request.parent_run_id,
+            envelope,
+        )?;
+        if envelope.is_some() {
+            let frozen = super::requests::frozen_in(&transaction, &request.parent_run_id)?;
+            if request.cwd != frozen.cwd
+                || request.permission_mode != "request_approval"
+                || request.tools.iter().any(|name| name != "read_file")
+                || request.max_tokens as u64 > frozen.context_token_budget as u64
+                || frozen
+                    .max_tool_calls
+                    .is_some_and(|limit| request.max_tool_calls as u64 > limit)
+                || request.max_rounds > 15
+            {
+                return Err(agent_core::AuthorizationError::Forbidden.into());
+            }
+        }
         let parent = read_run_in(&transaction, &request.parent_run_id.0)?
             .ok_or_else(|| RuntimeError::Protocol("父 run 不存在".into()))?;
         if parent.session_id != request.parent_session_id {
@@ -136,33 +116,35 @@ impl RunStore {
             let record = read_delegation_in(&transaction, &child)?.ok_or_else(|| {
                 RuntimeError::Internal("缺少持久记录：existing delegation".into())
             })?;
-            let existing_task: String = transaction.query_row(
-                "SELECT input FROM runs WHERE id=?1",
+            let existing_task: Option<String> = transaction.query_row(
+                "SELECT CASE WHEN length(CAST(input AS BLOB))<=65536 THEN input END FROM runs WHERE id=?1",
                 params![child],
                 |row| row.get(0),
             )?;
-            let captured: Option<String> = transaction
-                .query_row(
-                    "SELECT snapshot_json FROM run_snapshots WHERE run_id=?1",
-                    params![child],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            let saved_ids = captured
-                .map(|raw| {
-                    serde_json::from_str::<agent_core::RunSnapshot>(&raw)
-                        .map_err(|e| RuntimeError::Protocol(e.to_string()))
-                })
-                .transpose()?
-                .and_then(|s| s.delegation_context)
-                .map_or_else(Vec::new, |c| {
-                    c.sources
-                        .into_iter()
-                        .map(|s| s.source_id)
-                        .collect::<Vec<_>>()
-                });
+            let exists: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM run_snapshots WHERE run_id=?1)",
+                params![child],
+                |r| r.get(0),
+            )?;
+            let captured = if exists {
+                Some(super::requests::frozen_in(
+                    &transaction,
+                    &RunId(child.clone()),
+                )?)
+            } else {
+                None
+            };
+            let saved_ids =
+                captured
+                    .and_then(|s| s.delegation_context)
+                    .map_or_else(Vec::new, |c| {
+                        c.sources
+                            .into_iter()
+                            .map(|s| s.source_id)
+                            .collect::<Vec<_>>()
+                    });
             if saved_ids != request.context_source_ids
-                || existing_task != request.task
+                || existing_task.as_deref() != Some(request.task.as_str())
                 || record.tools != request.tools
                 || record.max_rounds != request.max_rounds
                 || record.max_tokens != request.max_tokens
@@ -207,18 +189,26 @@ impl RunStore {
         if total >= MAX_ROOT_SPAWNS || active >= MAX_ROOT_ACTIVE {
             return Err(RuntimeError::Protocol("子 Agent 总量或并发上限已满".into()));
         }
-        let route_json: Option<String> = transaction
+        let route_json: Option<Option<String>> = transaction
             .query_row(
-                "SELECT snapshot_json FROM run_routes WHERE run_id=?1",
+                "SELECT CASE WHEN length(CAST(snapshot_json AS BLOB))<=1048576 THEN snapshot_json END FROM run_routes WHERE run_id=?1",
                 params![request.parent_run_id.0],
                 |row| row.get(0),
             )
             .optional()?;
+        let route_json = route_json
+            .map(|raw| raw.ok_or(agent_core::CoordinationError::Corrupt))
+            .transpose()?;
+        // 委派也消费原持久队列总预算，不能借由另一准入入口无限扩张。
+        let queued: i64 =
+            transaction.query_row("SELECT count(*) FROM runs WHERE status='queued'", [], |r| {
+                r.get(0)
+            })?;
+        if queued >= 1024 {
+            return Err(agent_core::CoordinationError::LeaseBusy.into());
+        }
         let now = now_ms();
-        transaction.execute(
-            "INSERT INTO sessions(id, created_at_ms) VALUES (?1, ?2)",
-            params![request.child_session_id.0, now],
-        )?;
+        let _ = super::sessions::create_in(&transaction, &request.child_session_id)?;
         let child_request_id =
             RequestId::String(format!("delegation:{}", request.child_session_id.0));
         let request_json = serde_json::to_string(&child_request_id)
@@ -245,17 +235,23 @@ impl RunStore {
                 params![child_run_id.0, route],
             )?;
         }
-        let parent_snapshot: Option<String> = transaction
-            .query_row(
-                "SELECT snapshot_json FROM run_snapshots WHERE run_id=?1",
-                params![request.parent_run_id.0],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(raw) = parent_snapshot {
-            let mut snapshot: agent_core::RunSnapshot =
-                serde_json::from_str(&raw).map_err(|e| RuntimeError::Protocol(e.to_string()))?;
+        let exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM run_snapshots WHERE run_id=?1)",
+            params![request.parent_run_id.0],
+            |r| r.get(0),
+        )?;
+        let parent_snapshot = if exists {
+            Some(super::requests::frozen_in(
+                &transaction,
+                &request.parent_run_id,
+            )?)
+        } else {
+            None
+        };
+        if let Some(mut snapshot) = parent_snapshot {
             snapshot.entry_channel = agent_core::HookChannel::Subagent;
+            // 执行指令仅属于原工作流节点，派生 run 保留冻结授权但不重复执行父节点。
+            snapshot.workflow = None;
             // 仅显式选择本父 run 的来源；祖先捕获包不自动传给孙任务。
             snapshot.delegation_context = if request.context_source_ids.is_empty() {
                 None
@@ -342,6 +338,12 @@ impl RunStore {
                         .map_err(|e| RuntimeError::Protocol(e.to_string()))?
                 ],
             )?;
+            super::enterprise::inherit_authorization_in(
+                &transaction,
+                &request.parent_run_id,
+                &child_run_id,
+                &snapshot,
+            )?;
         } else if !request.context_source_ids.is_empty() {
             return Err(RuntimeError::Protocol(
                 "父run缺少冻结快照，不能交接上下文".into(),
@@ -378,6 +380,10 @@ impl RunStore {
         )?;
         let record = read_delegation_in(&transaction, &child_run_id.0)?
             .ok_or_else(|| RuntimeError::Internal("缺少持久记录：new delegation".into()))?;
+        let child_env=super::billing::envelope_in(&transaction,&child_run_id)?;
+        let child_snapshot=super::turns::run_snapshot_in(&transaction,&child_run_id)?;
+        super::billing::reserve_in(&transaction,&child_env,child_snapshot.as_ref(),false)?;
+        super::ledgers::admit_in(&transaction,&child_run_id)?;
         super::views::commit(transaction)?;
         Ok(record)
     }
@@ -386,62 +392,34 @@ impl RunStore {
         &self,
         child_run_id: &RunId,
     ) -> Result<Option<DelegationRecord>, RuntimeError> {
-        read_delegation_in(&*self.lock_connection()?, &child_run_id.0)
+        self.delegation_scoped(&agent_core::TenantContext::local(), child_run_id, None)
     }
-
     pub fn delegation_by_spawn_key(
         &self,
         parent_run_id: &RunId,
         spawn_key: &str,
     ) -> Result<Option<DelegationRecord>, RuntimeError> {
-        let connection = self.lock_connection()?;
-        let child: Option<String> = connection
-            .query_row(
-                "SELECT child_run_id FROM delegations WHERE parent_run_id=?1 AND spawn_key=?2",
-                params![parent_run_id.0, spawn_key],
-                |row| row.get(0),
-            )
-            .optional()?;
-        child
-            .map(|id| read_delegation_in(&connection, &id))
-            .transpose()
-            .map(Option::flatten)
+        self.delegation_lookup_scoped(
+            &agent_core::TenantContext::local(),
+            None,
+            Some((parent_run_id, spawn_key)),
+        )
     }
-
     pub fn delegation_for_session(
         &self,
         session_id: &str,
     ) -> Result<Option<DelegationRecord>, RuntimeError> {
-        let connection = self.lock_connection()?;
-        let child: Option<String> = connection
-            .query_row(
-                "SELECT child_run_id FROM delegations WHERE child_session_id=?1",
-                params![session_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        child
-            .map(|id| read_delegation_in(&connection, &id))
-            .transpose()
-            .map(Option::flatten)
+        self.delegation_lookup_scoped(
+            &agent_core::TenantContext::local(),
+            Some(&SessionId(session_id.to_owned())),
+            None,
+        )
     }
-
     pub fn list_delegations(
         &self,
         root_run_id: &RunId,
     ) -> Result<Vec<DelegationRecord>, RuntimeError> {
-        let connection = self.lock_connection()?;
-        let mut statement = connection
-            .prepare("SELECT child_run_id FROM delegations WHERE root_run_id=?1 ORDER BY id")?;
-        let ids = statement
-            .query_map(params![root_run_id.0], |row| row.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        ids.iter()
-            .map(|id| {
-                read_delegation_in(&connection, id)?
-                    .ok_or_else(|| RuntimeError::Protocol("委派记录消失".into()))
-            })
-            .collect()
+        self.delegation_list_scoped(&agent_core::TenantContext::local(), root_run_id)
     }
 
     pub fn reserve_delegation_result(
@@ -450,8 +428,20 @@ impl RunStore {
         owner: &str,
         revision: i64,
     ) -> Result<DelegationRecord, RuntimeError> {
+        self.reserve_delegation_result_scoped(child_run_id, owner, revision, None)
+    }
+
+    pub(crate) fn reserve_delegation_result_scoped(
+        &self,
+        child_run_id: &RunId,
+        owner: &str,
+        revision: i64,
+        envelope: Option<&agent_core::EnterpriseOwnerEnvelope>,
+    ) -> Result<DelegationRecord, RuntimeError> {
         let mut connection = self.lock_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        crate::run_delegations::check_result_execution_in(&transaction, child_run_id, envelope)?;
         let record = read_delegation_in(&transaction, &child_run_id.0)?
             .ok_or_else(|| RuntimeError::Protocol("子 Agent 不存在".into()))?;
         if owner.is_empty() {
@@ -522,8 +512,21 @@ impl RunStore {
         revision: i64,
         target: &str,
     ) -> Result<DelegationRecord, RuntimeError> {
+        self.transition_result_scoped(child_run_id, owner, revision, target, None)
+    }
+
+    pub(crate) fn transition_result_scoped(
+        &self,
+        child_run_id: &RunId,
+        owner: &str,
+        revision: i64,
+        target: &str,
+        envelope: Option<&agent_core::EnterpriseOwnerEnvelope>,
+    ) -> Result<DelegationRecord, RuntimeError> {
         let mut connection = self.lock_connection()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        crate::run_delegations::check_result_execution_in(&transaction, child_run_id, envelope)?;
         let record = read_delegation_in(&transaction, &child_run_id.0)?
             .ok_or_else(|| RuntimeError::Protocol("子 Agent 不存在".into()))?;
         if target == "delivered"
@@ -598,10 +601,11 @@ pub(super) fn mark_terminal_in(
     Ok(())
 }
 
-fn read_delegation_in(
+pub(crate) fn read_delegation_in(
     connection: &Connection,
     child_run_id: &str,
 ) -> Result<Option<DelegationRecord>, RuntimeError> {
+    crate::run_delegations::delegation_budget_in(connection, child_run_id)?;
     let raw = connection
         .query_row(
             "SELECT d.root_session_id, d.root_run_id, d.parent_session_id, d.parent_run_id,
@@ -690,17 +694,17 @@ fn read_delegation_in(
         spawn_key,
         depth,
         status: RunStatus::parse(&status)
-            .map_err(|error| RuntimeError::Protocol(error.to_string()))?,
+            .map_err(|_| RuntimeError::Coordination(agent_core::CoordinationError::Corrupt))?,
         created_at_ms: created,
         started_at_ms: started,
         finished_at_ms: finished,
         tools: serde_json::from_str(&tools)
-            .map_err(|error| RuntimeError::Protocol(error.to_string()))?,
+            .map_err(|_| RuntimeError::Coordination(agent_core::CoordinationError::Corrupt))?,
         permission_mode: permission,
         route: route
             .map(|value| {
                 serde_json::from_str(&value)
-                    .map_err(|error| RuntimeError::Protocol(error.to_string()))
+                    .map_err(|_| RuntimeError::Coordination(agent_core::CoordinationError::Corrupt))
             })
             .transpose()?,
         cwd,
@@ -711,7 +715,7 @@ fn read_delegation_in(
         terminal: terminal
             .map(|value| {
                 serde_json::from_str(&value)
-                    .map_err(|error| RuntimeError::Protocol(error.to_string()))
+                    .map_err(|_| RuntimeError::Coordination(agent_core::CoordinationError::Corrupt))
             })
             .transpose()?,
         result_state,
@@ -734,6 +738,10 @@ mod context_tests {
         let key = SessionKey(key.into());
         store.create_session(&key).unwrap();
         let snapshot = RunSnapshot {
+            workflow: None,
+            installed_generation:None,
+            billing_policy: None,
+            artifact_store_id: None,
             entry_channel: agent_core::HookChannel::DaemonRpc,
             route: None,
             tools: vec![ToolSpec {
@@ -760,6 +768,7 @@ mod context_tests {
         let Admission::New(run) = store
             .admit_run(
                 &RunAdmission {
+                    workflow_node: None,
                     plan_execution: None,
                     session_key: key,
                     expected_lifetime: None,

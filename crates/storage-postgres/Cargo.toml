@@ -1,0 +1,29 @@
+[package]
+name = "agent-storage-postgres"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+
+[dependencies]
+agent-workflow = {version="=0.1.0",path="../workflow"}
+agent-registry = {version="=0.1.0",path="../registry"}
+agent-identity = { version = "=0.1.0", path = "../identity" }
+agent-artifact = { version="=0.1.0", path="../artifact" }
+agent-core = { version = "=0.1.0", path = "../core" }
+agent-storage-ports = { version = "=0.1.0", path = "../storage-ports" }
+async-trait = "0.1"
+tokio-postgres = "=0.7.18"
+tokio-postgres-rustls = "=0.14.0"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "=2.2.0"
+rustix = { version = "1", features = ["fs"] }
+tokio = { version = "1", features = ["sync","rt","time","macros"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = {version="0.3",features=["fmt"]}
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+
+[dev-dependencies]
+agent-policy = { version = "=0.1.0", path = "../policy" }

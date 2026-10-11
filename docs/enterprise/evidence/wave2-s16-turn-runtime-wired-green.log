@@ -1,0 +1,17 @@
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 32.98s
+     Running tests/run_turn_contract.rs (target/debug/deps/run_turn_contract-f4d8aa1774b2031e)
+
+running 6 tests
+test local_turn_caller_cannot_reject_tool_exchange_in_foreign_legacy_scope ... ok
+test local_turn_caller_cannot_stage_plan_in_foreign_legacy_scope ... ok
+test local_turn_caller_cannot_begin_plan_execution_in_foreign_legacy_scope ... ok
+test local_turn_caller_cannot_read_plan_in_foreign_legacy_scope ... ok
+test local_turn_caller_cannot_stage_assistant_in_foreign_legacy_scope ... ok
+test local_turn_caller_cannot_append_transcript_in_foreign_legacy_scope ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+

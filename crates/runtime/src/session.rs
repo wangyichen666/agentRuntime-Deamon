@@ -497,10 +497,17 @@ impl SessionStore {
     }
 
     pub fn with_trace_lifetime(&self, lifetime: &agent_core::SessionLifetimeId) -> Result<Self> {
-        anyhow::ensure!(
-            lifetime.0.len() == 32 && lifetime.0.bytes().all(|b| b.is_ascii_hexdigit()),
-            "非法 trace lifetime"
-        );
+        let bytes = lifetime.0.as_bytes();
+        let sqlite_id = bytes.len() == 32 && bytes.iter().all(u8::is_ascii_hexdigit);
+        let postgres_id = bytes.len() == 36
+            && bytes.iter().enumerate().all(|(index, byte)| {
+                if matches!(index, 8 | 13 | 18 | 23) {
+                    *byte == b'-'
+                } else {
+                    byte.is_ascii_hexdigit()
+                }
+            });
+        anyhow::ensure!(sqlite_id || postgres_id, "非法 trace lifetime");
         let mut store = self.open_known_session(&self.current_id_sync())?;
         store.trace_override = Some(
             self.base_path

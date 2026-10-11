@@ -1,0 +1,49 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.05s
+     Running tests/run_turn_contract.rs (target/debug/deps/run_turn_contract-f4d8aa1774b2031e)
+
+running 4 tests
+test local_turn_caller_cannot_append_transcript_in_foreign_legacy_scope ... FAILED
+test local_turn_caller_cannot_read_plan_in_foreign_legacy_scope ... FAILED
+test local_turn_caller_cannot_stage_assistant_in_foreign_legacy_scope ... FAILED
+test local_turn_caller_cannot_reject_tool_exchange_in_foreign_legacy_scope ... FAILED
+
+failures:
+
+---- local_turn_caller_cannot_append_transcript_in_foreign_legacy_scope stdout ----
+
+thread 'local_turn_caller_cannot_append_transcript_in_foreign_legacy_scope' panicked at tests/run_turn_contract.rs:33:5:
+assertion failed: matches!(f.store.append_transcript(&f.owner, "foreign-append",
+    &[Message::text(Role::User, "foreign text")]),
+    Err(RuntimeError::Authorization(AuthorizationError::Forbidden)))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- local_turn_caller_cannot_read_plan_in_foreign_legacy_scope stdout ----
+
+thread 'local_turn_caller_cannot_read_plan_in_foreign_legacy_scope' panicked at tests/run_turn_contract.rs:46:5:
+assertion failed: matches!(f.store.read_plan(&f.owner),
+    Err(RuntimeError::Authorization(AuthorizationError::Forbidden)))
+
+---- local_turn_caller_cannot_stage_assistant_in_foreign_legacy_scope stdout ----
+
+thread 'local_turn_caller_cannot_stage_assistant_in_foreign_legacy_scope' panicked at tests/run_turn_contract.rs:27:5:
+assertion failed: matches!(f.store.stage_assistant(&f.owner,
+    &Message::text(Role::Assistant, "foreign text")),
+    Err(RuntimeError::Authorization(AuthorizationError::Forbidden)))
+
+---- local_turn_caller_cannot_reject_tool_exchange_in_foreign_legacy_scope stdout ----
+
+thread 'local_turn_caller_cannot_reject_tool_exchange_in_foreign_legacy_scope' panicked at tests/run_turn_contract.rs:40:5:
+assertion failed: matches!(f.store.reject_tool_batch(&f.owner, 1, &calls, "reject"),
+    Err(RuntimeError::Authorization(AuthorizationError::Forbidden)))
+
+
+failures:
+    local_turn_caller_cannot_append_transcript_in_foreign_legacy_scope
+    local_turn_caller_cannot_read_plan_in_foreign_legacy_scope
+    local_turn_caller_cannot_reject_tool_exchange_in_foreign_legacy_scope
+    local_turn_caller_cannot_stage_assistant_in_foreign_legacy_scope
+
+test result: FAILED. 0 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+error: test failed, to rerun pass `--test run_turn_contract`

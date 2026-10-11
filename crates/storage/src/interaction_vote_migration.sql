@@ -1,0 +1,9 @@
+BEGIN IMMEDIATE;
+CREATE TABLE interaction_votes(organization_id TEXT NOT NULL,tenant_id TEXT NOT NULL,project_id TEXT NOT NULL,agent_uid TEXT NOT NULL,interaction_id TEXT NOT NULL REFERENCES interactions(id),subject_id TEXT NOT NULL,revocation_epoch INTEGER NOT NULL CHECK(revocation_epoch>=0),expected_revision INTEGER NOT NULL CHECK(expected_revision>=0),approved INTEGER NOT NULL CHECK(approved IN (0,1)),request_json TEXT NOT NULL CHECK(length(CAST(request_json AS BLOB))<=4096),created_at_ms INTEGER NOT NULL,PRIMARY KEY(organization_id,tenant_id,project_id,agent_uid,interaction_id,subject_id),FOREIGN KEY(tenant_id,subject_id) REFERENCES principals(tenant_id,subject_id),FOREIGN KEY(tenant_id,project_id,agent_uid) REFERENCES agents(tenant_id,project_id,uid));
+CREATE TRIGGER immutable_interaction_vote_update BEFORE UPDATE ON interaction_votes BEGIN SELECT RAISE(ABORT,'immutable vote'); END;
+CREATE TRIGGER immutable_interaction_vote_delete BEFORE DELETE ON interaction_votes BEGIN SELECT RAISE(ABORT,'immutable vote'); END;
+CREATE TABLE identity_management_receipts(organization_id TEXT NOT NULL,tenant_id TEXT NOT NULL,project_id TEXT NOT NULL,agent_uid TEXT NOT NULL,operation_id TEXT NOT NULL,command_digest TEXT NOT NULL CHECK(length(command_digest)=64),actor_id TEXT NOT NULL,result_json TEXT NOT NULL CHECK(length(CAST(result_json AS BLOB))<=65536),PRIMARY KEY(organization_id,tenant_id,project_id,agent_uid,operation_id),FOREIGN KEY(tenant_id,project_id,agent_uid) REFERENCES agents(tenant_id,project_id,uid));
+CREATE TRIGGER immutable_identity_receipt_update BEFORE UPDATE ON identity_management_receipts BEGIN SELECT RAISE(ABORT,'immutable identity receipt'); END;
+CREATE TRIGGER immutable_identity_receipt_delete BEFORE DELETE ON identity_management_receipts BEGIN SELECT RAISE(ABORT,'immutable identity receipt'); END;
+INSERT INTO schema_migrations VALUES(29,CAST(strftime('%s','now') AS INTEGER)*1000);
+COMMIT;

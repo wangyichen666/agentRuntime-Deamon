@@ -1,0 +1,34 @@
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 31.59s
+     Running tests/run_request_contract.rs (target/debug/deps/run_request_contract-44b803d0c443a02a)
+
+running 13 tests
+
+thread 'active_request_source_and_capture_recheck_revocation_and_expired_writer_without_new_epoch' panicked at tests/run_request_contract.rs:663:59:
+called `Result::unwrap()` on an `Err` value: Coordination(Conflict)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test active_request_source_and_capture_recheck_revocation_and_expired_writer_without_new_epoch ... FAILED
+test capture_write_denies_foreign_scope ... ok
+test readback_denies_foreign_scope ... ok
+test complete_valid_json_cannot_override_selected_sql_capture_identity ... ok
+test fixed_scope_and_all_owner_dimensions_reject_both_methods_without_writes ... ok
+test capture_fixed_owner_mismatch_and_terminal_source_reject_but_readback_stays_readonly ... ok
+test complete_valid_capture_rejects_every_sql_identity_dimension_and_hashed_json_corruption ... ok
+test complete_legal_capture_from_previous_run_cannot_replace_another_run_row ... ok
+test original_capture_and_ledger_are_atomic_idempotent_and_fault_rolls_back ... ok
+test source_read_denies_foreign_scope ... ok
+test two_connections_capture_same_id_once_and_conflicting_payload_never_overwrites ... ok
+test real_sqlite_lock_wait_keeps_timer_live_and_cancelled_awaiter_does_not_erase_capture ... ok
+test input_and_saved_json_budgets_fail_closed_without_truncating_canonical_source ... ok
+
+failures:
+
+failures:
+    active_request_source_and_capture_recheck_revocation_and_expired_writer_without_new_epoch
+
+test result: FAILED. 12 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.80s
+
+error: test failed, to rerun pass `--test run_request_contract`

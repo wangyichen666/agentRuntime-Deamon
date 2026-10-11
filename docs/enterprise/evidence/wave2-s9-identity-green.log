@@ -1,0 +1,11 @@
+   Compiling agent-core v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/core)
+   Compiling agent-storage-ports v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-ports)
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 25.16s
+     Running unittests src/lib.rs (target/debug/deps/agent_storage-f4d26138d89f611c)
+
+running 1 test
+test enterprise::async_contract::identity_async_port_yields_while_original_connection_is_occupied ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 76 filtered out; finished in 0.15s
+

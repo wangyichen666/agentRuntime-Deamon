@@ -34,12 +34,90 @@ impl RequestRepository for RunStore {
         route: &str,
         identity: &str,
     ) -> Result<RequestContextSource, RuntimeError> {
+        let read = self.request_source_scoped(owner, route, identity, None)?;
+        Ok((read.snapshot, read.revision, read.calibration))
+    }
+    fn record_provider_request(
+        &self,
+        capture: &ProviderRequestCapture,
+        envelope: &ContextEnvelope,
+    ) -> Result<(), RuntimeError> {
+        self.record_request_scoped(capture, envelope, None)
+    }
+    fn provider_request(
+        &self,
+        key: &SessionKey,
+        lifetime: &SessionLifetimeId,
+        run: Option<&RunId>,
+        capture: Option<&str>,
+    ) -> Result<(ProviderRequestCapture, RunSnapshot), RuntimeError> {
+        self.provider_request_scoped(&TenantContext::local(), key, lifetime, run, capture)
+    }
+}
+const CAPTURE_BYTES: usize = 16 * 1024 * 1024;
+
+pub(crate) fn frozen_in(
+    db: &rusqlite::Connection,
+    run: &RunId,
+) -> Result<RunSnapshot, RuntimeError> {
+    let bytes: u64 = db.query_row(
+        "SELECT length(CAST(snapshot_json AS BLOB)) FROM run_snapshots WHERE run_id=?1",
+        [&run.0],
+        |r| r.get(0),
+    )?;
+    if bytes > 1024 * 1024 {
+        return Err(CoordinationError::Corrupt.into());
+    }
+    let raw: String = db.query_row(
+        "SELECT snapshot_json FROM run_snapshots WHERE run_id=?1",
+        [&run.0],
+        |r| r.get(0),
+    )?;
+    serde_json::from_str(&raw).map_err(|_| CoordinationError::Corrupt.into())
+}
+fn route_matches(
+    snapshot: &RunSnapshot,
+    capture: &ProviderRequestCapture,
+) -> Result<bool, RuntimeError> {
+    agent_storage_ports::request_route_matches(snapshot, capture).map_err(Into::into)
+}
+fn check_active_in(
+    db: &rusqlite::Connection,
+    owner: &ExactOwner,
+    envelope: Option<&EnterpriseOwnerEnvelope>,
+) -> Result<(), RuntimeError> {
+    if let Some(envelope) = envelope {
+        crate::execution::check_execution_in(db, envelope)?;
+    } else {
+        crate::enterprise::check_run_scope_in(db, &TenantContext::local(), &owner.run_id)?;
+        sessions::fence_in(db, owner)?;
+    }
+    if envelope.is_some() {
+        let status: String = db.query_row(
+            "SELECT status FROM runs WHERE id=?1",
+            [&owner.run_id.0],
+            |r| r.get(0),
+        )?;
+        if status != "running" {
+            return Err(CoordinationError::Conflict.into());
+        }
+    }
+    Ok(())
+}
+impl RunStore {
+    pub(crate) fn request_source_scoped(
+        &self,
+        owner: &ExactOwner,
+        route: &str,
+        identity: &str,
+        envelope: Option<&EnterpriseOwnerEnvelope>,
+    ) -> Result<RunRequestSource, RuntimeError> {
         let mut db = self.lock_connection()?;
         let tx = db.transaction()?;
-        sessions::fence_in(&tx, owner)?;
-        let snapshot = sessions::snapshot_in(&tx, &owner.session_key)?;
-        // 同事务验证投影，损坏不降级为空历史。
-        crate::context_projection::projection_in(&tx, &snapshot)?;
+        check_active_in(&tx, owner, envelope)?;
+        let RunContextReadback {
+            snapshot, frozen, ..
+        } = execution_source_in(&tx, owner)?;
         let revision = SnapshotRevision(tx.query_row(
             "SELECT revision FROM snapshot_clock WHERE id=1",
             [],
@@ -53,23 +131,31 @@ impl RequestRepository for RunStore {
             identity,
         )?;
         tx.commit()?;
-        Ok((snapshot, revision, calibration))
+        Ok(RunRequestSource {
+            snapshot,
+            revision,
+            calibration,
+            frozen,
+        })
     }
-    fn record_provider_request(
+    pub(crate) fn record_request_scoped(
         &self,
         capture: &ProviderRequestCapture,
         envelope: &ContextEnvelope,
+        execution: Option<&EnterpriseOwnerEnvelope>,
     ) -> Result<(), RuntimeError> {
         if capture.schema_version != 1
             || capture.round == 0
             || capture.capture_id.is_empty()
             || capture.capture_id.len() > 256
-            || capture.owner.session_lifetime_id != capture.input.source.lifetime
             || capture.policy_fingerprint.len() != 64
             || capture.request_digest.len() != 64
             || envelope.source != capture.input.source
         {
             return Err(RuntimeError::Protocol("请求 capture 身份无效".into()));
+        }
+        if !crate::execution::within_json_budget(capture, CAPTURE_BYTES) {
+            return Err(CoordinationError::InvalidRequest.into());
         }
         let raw = serde_json::to_string(capture)
             .map_err(|error| RuntimeError::Protocol(error.to_string()))?;
@@ -78,52 +164,51 @@ impl RequestRepository for RunStore {
         }
         let digest = format!("{:x}", Sha256::digest(raw.as_bytes()));
         let mut db = self.lock_connection()?;
-        let tx = db.transaction()?;
-        sessions::fence_in(&tx, &capture.owner)?;
+        let tx = db.transaction_with_behavior(if execution.is_some() {
+            rusqlite::TransactionBehavior::Immediate
+        } else {
+            rusqlite::TransactionBehavior::Deferred
+        })?;
+        if let Some(execution) = execution {
+            check_active_in(&tx, &execution.owner, Some(execution))?;
+            if execution.owner != capture.owner {
+                return Err(AuthorizationError::StaleOwner.into());
+            }
+        } else {
+            check_active_in(&tx, &capture.owner, None)?;
+        }
+        sessions::snapshot_budget_in(
+            &tx,
+            &capture.owner.session_key,
+            &capture.owner.session_lifetime_id,
+        )?;
         crate::context_projection::source_check(
             &tx,
             &capture.owner.session_key,
             &capture.input.source,
         )?;
-        let snapshot: RunSnapshot = serde_json::from_str(&tx.query_row(
-            "SELECT snapshot_json FROM run_snapshots WHERE run_id=?1",
-            params![capture.owner.run_id.0],
-            |row| row.get::<_, String>(0),
-        )?)
-        .map_err(|error| RuntimeError::Protocol(error.to_string()))?;
-        if capture.policy_fingerprint
-            != format!(
-                "{:x}",
-                Sha256::digest(
-                    serde_json::to_vec(&snapshot)
-                        .map_err(|error| RuntimeError::Protocol(error.to_string()))?
-                )
-            )
-            || snapshot.tools != capture.input.catalog
-            || snapshot.tool_catalog_digest
-                != format!(
-                    "{:x}",
-                    Sha256::digest(
-                        serde_json::to_vec(&capture.input.catalog)
-                            .map_err(|error| RuntimeError::Protocol(error.to_string()))?
-                    )
-                )
-            || snapshot.context_token_budget as u64 != capture.input.budget
-            || snapshot.context_policy_fingerprint.as_deref()
-                != Some(&capture.input.source.policy_fingerprint)
-        {
-            return Err(RuntimeError::Protocol("请求 catalog/policy 未冻结".into()));
-        }
-        let previous: Option<String> = tx
-            .query_row(
-                "SELECT capture_digest FROM provider_requests WHERE run_id=?1 AND capture_id=?2",
-                params![capture.owner.run_id.0, capture.capture_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if let Some(previous) = previous {
+        let snapshot = frozen_in(&tx, &capture.owner.run_id)?;
+        agent_storage_ports::validate_frozen_request(&snapshot, capture, Some(envelope))
+            .map_err(|error| RuntimeError::Protocol(error.to_string()))?;
+        let previous: Option<(String,i64,i64,u64)> = tx.query_row(
+            "SELECT capture_digest,round,candidate_index,length(CAST(capture_json AS BLOB)) FROM provider_requests WHERE run_id=?1 AND capture_id=?2",params![capture.owner.run_id.0,capture.capture_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+        if let Some((previous, round, candidate, bytes)) = previous {
             if previous != digest {
-                return Err(RuntimeError::Protocol("请求 capture 幂等冲突".into()));
+                return Err(CoordinationError::Conflict.into());
+            }
+            if round != i64::from(capture.round)
+                || candidate != i64::from(capture.candidate_index)
+                || bytes > CAPTURE_BYTES as u64
+            {
+                return Err(CoordinationError::Corrupt.into());
+            }
+            let saved: String = tx.query_row(
+                "SELECT capture_json FROM provider_requests WHERE run_id=?1 AND capture_id=?2",
+                params![capture.owner.run_id.0, capture.capture_id],
+                |r| r.get(0),
+            )?;
+            if saved != raw {
+                return Err(CoordinationError::Corrupt.into());
             }
             tx.commit()?;
             return Ok(());
@@ -150,8 +235,9 @@ impl RequestRepository for RunStore {
         tx.execute("INSERT INTO context_ledgers VALUES(?1,?2,?3) ON CONFLICT(run_id,round) DO UPDATE SET envelope_json=excluded.envelope_json",params![capture.owner.run_id.0,capture.round,serde_json::to_string(envelope).map_err(|error|RuntimeError::Protocol(error.to_string()))?])?;
         crate::views::commit(tx)
     }
-    fn provider_request(
+    pub(crate) fn provider_request_scoped(
         &self,
+        scope: &TenantContext,
         key: &SessionKey,
         lifetime: &SessionLifetimeId,
         run: Option<&RunId>,
@@ -162,15 +248,30 @@ impl RequestRepository for RunStore {
         }
         let mut db = self.lock_connection()?;
         let tx = db.transaction()?;
+        crate::enterprise::check_session_scope_in(&tx, scope, key)?;
+        sessions::lifetime_owner_in(&tx, key, lifetime)?;
         let metadata = sessions::metadata_in(&tx, key)?
             .filter(|metadata| !metadata.deleted && metadata.lifetime == *lifetime)
             .ok_or_else(|| RuntimeError::Protocol("请求读取 stale lifetime".into()))?;
-        let row:Option<(String,String,String)>=tx.query_row("SELECT p.capture_json,p.capture_digest,s.snapshot_json FROM provider_requests p JOIN runs r ON r.id=p.run_id JOIN run_snapshots s ON s.run_id=p.run_id WHERE r.session_id=?1 AND r.lifetime=?2 AND (?3 IS NULL OR p.run_id=?3) AND (?4 IS NULL OR p.capture_id=?4) ORDER BY p.rowid DESC LIMIT 1",params![key.0,metadata.lifetime.0,run.map(|run|&run.0),capture],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
-        let (raw, digest, snapshot) = row.ok_or_else(|| {
-            RuntimeError::Protocol(
-                "provider request unavailable: 无发送前 capture，不能重建空请求".into(),
-            )
-        })?;
+        // 先只读取固定大小标识与字节长度，再读取完整 JSON；同一 read TX。
+        let row: Option<(String,String,i64,i64,u64,u64)> = tx.query_row(
+            "SELECT p.run_id,p.capture_id,p.round,p.candidate_index,length(CAST(p.capture_json AS BLOB)),length(CAST(s.snapshot_json AS BLOB)) FROM provider_requests p JOIN runs r ON r.id=p.run_id JOIN run_snapshots s ON s.run_id=p.run_id WHERE r.session_id=?1 AND r.lifetime=?2 AND (?3 IS NULL OR p.run_id=?3) AND (?4 IS NULL OR p.capture_id=?4) ORDER BY p.rowid DESC LIMIT 1",
+            params![key.0,metadata.lifetime.0,run.map(|run|&run.0),capture],
+            |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?))).optional()?;
+        let (sql_run, sql_capture, sql_round, sql_candidate, bytes, snapshot_bytes) =
+            row.ok_or(CoordinationError::Conflict)?;
+        if bytes > CAPTURE_BYTES as u64
+            || snapshot_bytes > 1024 * 1024
+            || sql_run.len() > 1024
+            || sql_capture.len() > 256
+        {
+            return Err(CoordinationError::Corrupt.into());
+        }
+        crate::enterprise::check_run_scope_in(&tx, scope, &RunId(sql_run.clone()))?;
+        sessions::snapshot_budget_in(&tx, key, lifetime)?;
+        let (raw,digest,snapshot): (String,String,String) = tx.query_row(
+            "SELECT p.capture_json,p.capture_digest,s.snapshot_json FROM provider_requests p JOIN run_snapshots s ON s.run_id=p.run_id WHERE p.run_id=?1 AND p.capture_id=?2",
+            params![sql_run,sql_capture], |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?;
         if raw.len() > 16 * 1024 * 1024 || format!("{:x}", Sha256::digest(raw.as_bytes())) != digest
         {
             return Err(RuntimeError::Protocol("请求 capture 摘要损坏".into()));
@@ -179,7 +280,14 @@ impl RequestRepository for RunStore {
             .map_err(|error| RuntimeError::Protocol(error.to_string()))?;
         let frozen: RunSnapshot = serde_json::from_str(&snapshot)
             .map_err(|error| RuntimeError::Protocol(error.to_string()))?;
-        if captured.schema_version != 1
+        if !route_matches(&frozen, &captured)?
+            || captured.owner.run_id.0 != sql_run
+            || captured.capture_id != sql_capture
+            || i64::from(captured.round) != sql_round
+            || i64::from(captured.candidate_index) != sql_candidate
+            || captured.input.source.source_start.0 != 0
+            || captured.round == 0
+            || captured.schema_version != 1
             || sessions::owner_in(&tx, &captured.owner.run_id)? != captured.owner
             || captured.owner.session_key != *key
             || captured.owner.session_lifetime_id != *lifetime
@@ -236,6 +344,33 @@ impl RequestRepository for RunStore {
     }
 }
 
+pub(crate) fn execution_source_in(
+    db: &rusqlite::Connection,
+    owner: &ExactOwner,
+) -> Result<RunContextReadback, RuntimeError> {
+    let frozen = frozen_in(db, &owner.run_id)?;
+    let snapshot = sessions::snapshot_in(db, &owner.session_key)?;
+    let projection = crate::context_projection::projection_in(db, &snapshot)?;
+    Ok(RunContextReadback {
+        snapshot,
+        projection,
+        frozen,
+    })
+}
+impl RunStore {
+    pub(crate) fn context_source_scoped(
+        &self,
+        envelope: &EnterpriseOwnerEnvelope,
+    ) -> Result<RunContextReadback, RuntimeError> {
+        let mut db = self.lock_connection()?;
+        let tx = db.transaction()?;
+        crate::execution::check_execution_in(&tx, envelope)?;
+        let value = execution_source_in(&tx, &envelope.owner)?;
+        tx.commit()?;
+        Ok(value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,6 +391,7 @@ mod tests {
         let Admission::New(run) = store
             .admit_run(
                 &RunAdmission {
+                    workflow_node: None,
                     session_key: metadata.key,
                     expected_lifetime: Some(metadata.lifetime),
                     request_id: RequestId::Number(1),
@@ -442,6 +578,7 @@ mod tests {
         let file = path();
         let (store, capture, _) = fixture(&file);
         let owner = capture.owner;
+        crate::enterprise::remove_v21_for_fixture(&store.lock_connection().unwrap());
         store.lock_connection().unwrap().execute_batch("DROP TABLE provider_requests; DELETE FROM schema_migrations WHERE version>=20; CREATE TRIGGER capture_migration_fault BEFORE INSERT ON schema_migrations WHEN NEW.version=20 BEGIN SELECT RAISE(ABORT,'capture migration fault'); END").unwrap();
         drop(store);
         assert!(RunStore::open(&file).is_err());
@@ -476,7 +613,7 @@ mod tests {
         store
             .lock_connection()
             .unwrap()
-            .execute("INSERT INTO schema_migrations VALUES(21,0)", [])
+            .execute("INSERT INTO schema_migrations VALUES(28,0)", [])
             .unwrap();
         drop(store);
         assert!(RunStore::open(&file).is_err());

@@ -1,0 +1,42 @@
+   Compiling agent-core v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/core)
+   Compiling agent-storage-ports v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-ports)
+   Compiling agent-memory v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/memory)
+   Compiling agent-daemon-protocol v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-protocol)
+   Compiling agent-context v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/context)
+   Compiling agent-policy v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/policy)
+   Compiling agent-sandbox v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/sandbox)
+   Compiling agent-artifact v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/artifact)
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 37.32s
+     Running unittests src/lib.rs (target/debug/deps/agent_runtime-9adb6fd010003549)
+
+running 11 tests
+test cron::tests::unattended_approval_always_refuses ... ok
+test cron::tests::accepts_standard_five_field_cron ... ok
+test cron::tests::stops_after_finite_retries ... ok
+test cron::tests::unattended_rejection_is_recorded_as_failure ... ok
+test cron::tests::persists_due_job_and_records_success ... ok
+
+thread 'cron::tests::agent_runner_uses_an_independent_persisted_session' panicked at crates/runtime/src/cron.rs:910:70:
+called `Result::unwrap()` on an `Err` value: Coordination(StaleLease)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test cron::tests::native_cron_has_its_own_frozen_workload_authorization ... ok
+test cron::tests::native_cron_late_result_cannot_finalize_a_later_owner_generation ... ok
+test cron::tests::agent_runner_uses_an_independent_persisted_session ... FAILED
+
+thread 'cron::tests::immediate_repetitions_of_one_job_have_distinct_native_occurrences' panicked at crates/runtime/src/cron.rs:1118:22:
+called `Result::unwrap()` on an `Err` value: Coordination(StaleLease)
+test cron::tests::immediate_repetitions_of_one_job_have_distinct_native_occurrences ... FAILED
+test cron::tests::native_cron_unknown_side_effect_is_not_success_and_is_not_retried ... ok
+test cron::tests::native_cron_real_sqlite_write_lock_does_not_block_runtime_timer ... ok
+
+failures:
+
+failures:
+    cron::tests::agent_runner_uses_an_independent_persisted_session
+    cron::tests::immediate_repetitions_of_one_job_have_distinct_native_occurrences
+
+test result: FAILED. 9 passed; 2 failed; 0 ignored; 0 measured; 125 filtered out; finished in 0.57s
+
+error: test failed, to rerun pass `-p agent-runtime --lib`

@@ -1,0 +1,31 @@
+    Checking agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+error[E0599]: no method named `map_err` found for opaque type `impl Future<Output = Result<Option<(Arc<dyn Tool>, Value)>, Error>>` in the current scope
+   --> crates/runtime/src/tools/mod.rs:339:14
+    |
+337 |           let target = self
+    |  ______________________-
+338 | |             .target(name, args)
+339 | |             .map_err(|e| invalid(e.to_string()))?;
+    | |             -^^^^^^^ method not found in `impl Future<Output = Result<Option<(Arc<dyn Tool>, Value)>, Error>>`
+    | |_____________|
+    |
+    |
+   ::: /Users/pilot/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/futures-util-0.3.34/src/future/try_future/mod.rs:308:8
+    |
+308 |       fn map_err<E, F>(self, f: F) -> MapErr<Self, F>
+    |          ------- the method is available for `impl futures_util::Future<Output = std::result::Result<std::option::Option<(std::sync::Arc<(dyn tools::Tool + 'static)>, serde_json::Value)>, anyhow::Error>>` here
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: consider `await`ing on the `Future` and calling the method on its `Output`
+    |
+339 |             .await.map_err(|e| invalid(e.to_string()))?;
+    |              ++++++
+help: trait `TryFutureExt` which provides `map_err` is implemented but not in scope; perhaps you want to import it
+    |
+1   + use futures_util::TryFutureExt;
+    |
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `agent-runtime` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `agent-runtime` (lib test) due to 1 previous error

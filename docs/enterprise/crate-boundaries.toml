@@ -1,0 +1,89 @@
+# 真实库的职责与已审核内部依赖；新库必须显式登记，不预注册空实现。
+
+[acp]
+owner = "ACP v1/v2 协商与协议投影"
+internal = ["agent-core", "agent-daemon-client", "agent-daemon-protocol", "agent-entry-support", "agent-client-protocol"]
+
+[cli]
+owner = "CLI/TUI 输入与展示"
+internal = ["agent-core", "agent-daemon-client", "agent-daemon-protocol", "agent-entry-support"]
+
+[context]
+owner = "纯上下文候选和实际请求 assembler"
+internal = ["agent-core"]
+
+[core]
+owner = "纯领域身份、facts 与 reducer；无基础设施"
+internal = []
+
+[daemon]
+owner = "session supervisor、run coordinator、审批唤醒和后台资源监督"
+internal = ["agent-workflow", "agent-artifact", "agent-storage-ports", "agent-identity", "agent-policy", "agent-runtime", "agent-sandbox", "agent-storage", "agent-core", "agent-daemon-protocol", "agent-context", "agent-memory", "agent-daemon-client"]
+
+[daemon-client]
+owner = "有界传输与每消费者展示游标；不重发 mutation"
+internal = ["agent-daemon-protocol"]
+
+[daemon-protocol]
+owner = "严格 DTO、版本能力与兼容命令映射"
+internal = ["agent-core"]
+
+[entry-support]
+owner = "共享 entry host、恢复和 RPC 投影"
+internal = ["agent-daemon-client", "agent-daemon-protocol"]
+
+[gateway]
+owner = "HTTP/WS 投影与本地 workspace/bearer 入口"
+internal = ["agent-identity", "agent-core", "agent-daemon-client", "agent-daemon-protocol", "agent-entry-support"]
+
+[memory]
+owner = "纯召回/摄入/评估算法"
+internal = ["agent-core"]
+
+[runtime]
+owner = "Provider wire、工具准入、安全、MCP/skill/cron 执行"
+internal = ["agent-artifact", "agent-sandbox", "agent-memory", "agent-context", "agent-storage", "agent-storage-ports", "agent-core", "agent-daemon-protocol"]
+
+[sandbox]
+owner = "前台执行 backend 与进程资源句柄"
+internal = ["agent-core"]
+
+[storage]
+owner = "SQLite 唯一事实源与当前领域 ports"
+internal = ["agent-workflow", "agent-registry", "agent-core", "agent-storage-ports"]
+
+[identity]
+owner = "可信传输主体与持久身份绑定"
+internal = ["agent-core"]
+
+[policy]
+owner = "纯 RBAC 与拒绝优先的条件判定"
+internal = ["agent-core"]
+
+[storage-ports]
+owner = "异步发布协调合同与有界 publisher；不复制业务 owner"
+internal = ["agent-core"]
+
+[storage-postgres]
+owner = "PostgreSQL canonical领域端口、发布协调与离线迁移"
+internal = ["agent-workflow", "agent-registry", "agent-artifact", "agent-identity", "agent-core", "agent-storage-ports"]
+
+[artifact]
+owner = "异步对象发布/内容验证；数据库原工具收据仍为唯一终态 owner"
+internal = ["agent-core", "agent-storage-ports"]
+
+[pack]
+owner = "严格有界签名发行物扫描与Ed25519验证；不执行插件"
+internal = ["agent-core"]
+
+[plugin]
+owner = "纯信任约束与稳定扩展coordinate冲突裁决"
+internal = ["agent-core"]
+
+[registry]
+owner = "发布/灰度/回滚/config规则；数据库适配器持久化注册事实"
+internal = ["agent-core", "agent-pack", "agent-plugin"]
+
+[workflow]
+owner = "纯DAG、lease fence、补偿规则与后端无关事务规则；daemon拥有有界调度"
+internal = ["agent-core", "agent-pack"]

@@ -1,0 +1,16 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.66s
+     Running tests/run_execution_contract.rs (target/debug/deps/run_execution_contract-6f2d9774357a83c7)
+
+running 8 tests
+test execution_terminal_keeps_admitted_owner_instead_of_adopting_later_generation ... ok
+test execution_mutations_check_all_scope_and_owner_dimensions_before_any_queue_or_terminal_result ... ok
+test execution_terminal_rejects_foreign_legacy_run_without_frozen_authorization ... ok
+test execution_unknown_provider_is_settled_in_original_terminal_transaction_without_replay ... ok
+test execution_admission_rechecks_server_time_and_rolls_back_original_authorization_and_queue_on_fault ... ok
+test execution_admission_two_original_connections_freeze_one_owner_and_one_request_fact ... ok
+test execution_terminal_fault_rolls_back_original_transcript_turn_event_outbox_and_retry_is_idempotent ... ok
+test execution_queued_mutation_rechecks_original_revocation_and_writer_expiry_without_reacquiring ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+

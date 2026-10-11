@@ -5,6 +5,10 @@ use agent_core::SessionInfo;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SlashAction {
+    Identity,
+    Outbox,
+    Events,
+    Artifact,
     Compact,
     Hooks,
     Tools,
@@ -74,7 +78,7 @@ const COMMANDS: &[SlashCommand] = &[
         name: "run",
         aliases: &[],
         help: "读取 daemon 中的 Run 状态与终态",
-        usage: "/run <run_id>",
+        usage: "/run <run_id> [fact|tools|provider]",
         args: ArgSpec::AtLeastOne("run ID"),
         action: SlashAction::Run,
     },
@@ -286,6 +290,38 @@ const COMMANDS: &[SlashCommand] = &[
         args: ArgSpec::AtLeastOne("run ID"),
         action: SlashAction::Tools,
     },
+    SlashCommand {
+        name: "identity",
+        aliases: &[],
+        help: "查看可信主体与当前策略",
+        usage: "/identity",
+        args: ArgSpec::None,
+        action: SlashAction::Identity,
+    },
+    SlashCommand {
+        name: "outbox",
+        aliases: &[],
+        help: "读取持久发布记录元数据",
+        usage: "/outbox",
+        args: ArgSpec::None,
+        action: SlashAction::Outbox,
+    },
+    SlashCommand {
+        name: "artifact",
+        aliases: &[],
+        help: "按 tool receipt 读取 artifact 分页",
+        usage: "/artifact <session> <run> <reference> [offset limit]",
+        args: ArgSpec::AtLeastOne("session、run 与 reference"),
+        action: SlashAction::Artifact,
+    },
+    SlashCommand {
+        name: "events",
+        aliases: &[],
+        help: "读取 canonical run 事件分页",
+        usage: "/events <run_id> [after_seq] [limit]",
+        args: ArgSpec::AtLeastOne("run ID"),
+        action: SlashAction::Events,
+    },
 ];
 
 pub struct SlashRegistry;
@@ -327,7 +363,24 @@ impl SlashRegistry {
         };
         let mut parts = rest.split_whitespace();
         let name = parts.next().unwrap_or_default().to_ascii_lowercase();
-        let args = parts.map(str::to_owned).collect::<Vec<_>>();
+        let tail = rest
+            .trim_start()
+            .split_once(char::is_whitespace)
+            .map_or("", |(_, tail)| tail.trim());
+        let args = if name == "artifact" && tail.starts_with('{') {
+            match serde_json::from_str::<crate::params::ArtifactReadParams>(tail) {
+                Ok(params) => vec![
+                    params.session_id,
+                    params.run_id.0,
+                    params.artifact_ref,
+                    params.offset.to_string(),
+                    params.limit.to_string(),
+                ],
+                Err(_) => return SlashParse::Error("artifact JSON 参数无效".into()),
+            }
+        } else {
+            parts.map(str::to_owned).collect::<Vec<_>>()
+        };
         let Some(command) = COMMANDS.iter().find(|command| {
             command.name == name || command.aliases.iter().any(|alias| *alias == name)
         }) else {

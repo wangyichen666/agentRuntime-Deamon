@@ -1,0 +1,11 @@
+[dependencies]
+renamed = { package = "agent-storage", path = "crates/storage" }
+inherited = { workspace = true }
+[build-dependencies]
+compiler = { package = "agent-runtime", version = "0.1.0" }
+[target.'cfg(unix)'.dependencies]
+db = { package = "rusqlite", version = "0.37" }
+[workspace.dependencies]
+inherited = { package = "agent-daemon", path = "crates/daemon" }
+[dev-dependencies]
+fixture = { package = "agent-sandbox", version = "0.1.0" }

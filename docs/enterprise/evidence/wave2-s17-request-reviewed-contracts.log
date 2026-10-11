@@ -1,0 +1,38 @@
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+error[E0308]: mismatched types
+   --> crates/storage/src/requests.rs:312:45
+    |
+312 |             || i64::from(captured.round) != sql_round
+    |                                             ^^^^^^^^^ expected `i64`, found `u32`
+
+error[E0277]: can't compare `i64` with `u32`
+   --> crates/storage/src/requests.rs:312:42
+    |
+312 |             || i64::from(captured.round) != sql_round
+    |                                          ^^ no implementation for `i64 == u32`
+    |
+    = help: the trait `PartialEq<u32>` is not implemented for `i64`
+    = help: the following other types implement trait `PartialEq<Rhs>`:
+              `i64` implements `PartialEq<serde_json::Value>`
+              `i64` implements `PartialEq`
+
+error[E0308]: mismatched types
+   --> crates/storage/src/requests.rs:313:55
+    |
+313 |             || i64::from(captured.candidate_index) != sql_candidate
+    |                                                       ^^^^^^^^^^^^^ expected `i64`, found `u32`
+
+error[E0277]: can't compare `i64` with `u32`
+   --> crates/storage/src/requests.rs:313:52
+    |
+313 |             || i64::from(captured.candidate_index) != sql_candidate
+    |                                                    ^^ no implementation for `i64 == u32`
+    |
+    = help: the trait `PartialEq<u32>` is not implemented for `i64`
+    = help: the following other types implement trait `PartialEq<Rhs>`:
+              `i64` implements `PartialEq<serde_json::Value>`
+              `i64` implements `PartialEq`
+
+Some errors have detailed explanations: E0277, E0308.
+For more information about an error, try `rustc --explain E0277`.
+error: could not compile `agent-storage` (lib) due to 4 previous errors

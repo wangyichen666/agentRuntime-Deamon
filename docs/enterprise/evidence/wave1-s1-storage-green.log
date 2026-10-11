@@ -1,0 +1,43 @@
+   Compiling agent-core v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/core)
+   Compiling agent-daemon-protocol v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-protocol)
+   Compiling agent-sandbox v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/sandbox)
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling agent-context v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/context)
+   Compiling agent-memory v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/memory)
+   Compiling agent-identity v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/identity)
+   Compiling agent-policy v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/policy)
+   Compiling agent-daemon-client v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-client)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-entry-support v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/entry-support)
+   Compiling agent-gateway v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/gateway)
+   Compiling agent-acp v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/acp)
+   Compiling agent-cli v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/cli)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 12.70s
+     Running tests/enterprise_identity_contract.rs (target/debug/deps/enterprise_identity_contract-84de39a6bcd225ba)
+
+running 5 tests
+test concurrent_duplicate_operation_commits_one_authorization_and_payload_conflicts ... ok
+test authorized_admission_freezes_policy_and_restart_readback_without_new_facts ... FAILED
+test authorization_insert_failure_rolls_back_session_run_queue_and_transcript ... ok
+test deny_scope_revocation_and_corruption_never_commit_business_facts ... ok
+test v20_upgrade_maps_legacy_sessions_without_fabricating_run_authorizations_and_failure_is_atomic ... ok
+
+failures:
+
+---- authorized_admission_freezes_policy_and_restart_readback_without_new_facts stdout ----
+
+thread 'authorized_admission_freezes_policy_and_restart_readback_without_new_facts' panicked at tests/enterprise_identity_contract.rs:121:5:
+assertion failed: matches!(store.admit_authorized_run(&admission(2), &snapshot(), &auth,
+    &agent_policy::PolicyEngine),
+    Err(RuntimeError::Authorization(AuthorizationError::StalePolicy)))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    authorized_admission_freezes_policy_and_restart_readback_without_new_facts
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+error: test failed, to rerun pass `--test enterprise_identity_contract`

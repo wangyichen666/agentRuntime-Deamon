@@ -151,41 +151,7 @@ impl ContextRepository for RunStore {
         operation: &str,
         expected_revision: Option<TranscriptSeq>,
     ) -> Result<Option<ProjectionGeneration>, RuntimeError> {
-        let db = self.lock_connection()?;
-        fence_in(&db, owner)?;
-        let record:Option<StoredCompactResult>=db.query_row("SELECT run_id,result_generation,source_json,state,reason FROM compact_operations WHERE operation=?1 AND state IN ('committed','rejected')",params![operation],|r|Ok(StoredCompactResult {run:r.get(0)?,generation:r.get(1)?,source_json:r.get(2)?,state:r.get(3)?,reason:r.get(4)?})).optional()?;
-        record
-            .map(
-                |StoredCompactResult {
-                     run,
-                     generation,
-                     source_json,
-                     state,
-                     reason,
-                 }| {
-                    let source: ContextSource = serde_json::from_str(&source_json)
-                        .map_err(|e| RuntimeError::Protocol(e.to_string()))?;
-                    if expected_revision.is_some_and(|revision| revision != source.source_end) {
-                        return Err(RuntimeError::Protocol(
-                            "compact operation source 冲突".into(),
-                        ));
-                    }
-                    if run != owner.run_id.0 {
-                        return Err(RuntimeError::Protocol(
-                            "compact operation owner 冲突".into(),
-                        ));
-                    }
-                    if state == "rejected" && reason.as_deref() != Some("no_gain") {
-                        return Err(RuntimeError::Protocol(
-                            "compact 已拒绝或失败，禁止重放摘要".into(),
-                        ));
-                    }
-                    generation
-                        .map(ProjectionGeneration)
-                        .ok_or_else(|| RuntimeError::Protocol("compact 未取得成功回执".into()))
-                },
-            )
-            .transpose()
+        self.compact_result_scoped(owner, operation, expected_revision, None)
     }
     fn context_anchor(
         &self,
@@ -206,21 +172,170 @@ impl ContextRepository for RunStore {
         projection_in(&db, snapshot)
     }
     fn begin_compact(&self, intent: &CompactIntent) -> Result<(), RuntimeError> {
+        self.begin_compact_scoped(intent, None)
+    }
+    fn settle_compact(
+        &self,
+        intent: &CompactIntent,
+        replacement: Option<&[Message]>,
+        reason: &str,
+    ) -> Result<ProjectionGeneration, RuntimeError> {
+        self.settle_compact_scoped(intent, replacement, reason, None)
+    }
+    fn record_context(
+        &self,
+        owner: &ExactOwner,
+        round: usize,
+        envelope: &ContextEnvelope,
+    ) -> Result<(), RuntimeError> {
         let mut db = self.lock_connection()?;
         let tx = db.transaction()?;
-        fence_in(&tx, &intent.owner)?;
-        source_check(&tx, &intent.owner.session_key, &intent.source)?;
-        let read_only: Option<String> = tx
-            .query_row(
-                "SELECT snapshot_json FROM run_snapshots WHERE run_id=?1",
-                params![intent.owner.run_id.0],
-                |r| r.get(0),
+        fence_in(&tx, owner)?;
+        tx.execute("INSERT INTO context_ledgers VALUES(?1,?2,?3) ON CONFLICT(run_id,round) DO UPDATE SET envelope_json=excluded.envelope_json",params![owner.run_id.0,round as i64,serde_json::to_string(envelope).map_err(|e|RuntimeError::Protocol(e.to_string()))?])?;
+        super::views::commit(tx)?;
+        Ok(())
+    }
+}
+
+fn compact_source_budget_in(
+    db: &Connection,
+    operation: &str,
+    owner: &ExactOwner,
+) -> Result<(), RuntimeError> {
+    let linked: Option<String> = db
+        .query_row(
+            "SELECT operation_id FROM compact_run_links WHERE run_id=?1",
+            [&owner.run_id.0],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if linked.as_deref().is_some_and(|linked| linked != operation) {
+        return Err(CoordinationError::Conflict.into());
+    }
+    let bytes:u64=db.query_row("SELECT COALESCE((SELECT length(CAST(source_json AS BLOB))+length(CAST(state AS BLOB))+length(CAST(COALESCE(reason,'') AS BLOB)) FROM compact_operations WHERE operation=?1 AND run_id=?2),0)",params![operation,owner.run_id.0],|r|r.get(0))?;
+    if bytes > 16384 {
+        return Err(CoordinationError::Corrupt.into());
+    }
+    Ok(())
+}
+
+fn check_compact_owner(
+    db: &Connection,
+    owner: &ExactOwner,
+    execution: Option<&EnterpriseOwnerEnvelope>,
+    require_running: bool,
+) -> Result<(), RuntimeError> {
+    let local;
+    let envelope = if let Some(execution) = execution {
+        execution
+    } else {
+        local = EnterpriseOwnerEnvelope {
+            scope: TenantContext::local(),
+            owner: owner.clone(),
+        };
+        &local
+    };
+    crate::execution::check_execution_in(db, envelope)?;
+    if envelope.owner != *owner {
+        return Err(AuthorizationError::StaleOwner.into());
+    }
+    if execution.is_some() && require_running {
+        let status: String = db.query_row(
+            "SELECT status FROM runs WHERE id=?1",
+            [&owner.run_id.0],
+            |r| r.get(0),
+        )?;
+        if status != "running" {
+            return Err(CoordinationError::Conflict.into());
+        }
+    }
+    crate::sessions::snapshot_budget_in(db, &owner.session_key, &owner.session_lifetime_id)?;
+    Ok(())
+}
+
+impl RunStore {
+    pub(crate) fn compact_result_scoped(
+        &self,
+        owner: &ExactOwner,
+        operation: &str,
+        expected_revision: Option<TranscriptSeq>,
+        execution: Option<&EnterpriseOwnerEnvelope>,
+    ) -> Result<Option<ProjectionGeneration>, RuntimeError> {
+        let mut connection = self.lock_connection()?;
+        let tx = connection.transaction()?;
+        let db = &tx;
+        check_compact_owner(db, owner, execution, false)?;
+        compact_source_budget_in(db, operation, owner)?;
+        let record:Option<StoredCompactResult>=db.query_row("SELECT run_id,result_generation,source_json,state,reason FROM compact_operations WHERE operation=?1 AND run_id=?2 AND lifetime=?3 AND state IN ('committed','rejected')",params![operation,owner.run_id.0,owner.session_lifetime_id.0],|r|Ok(StoredCompactResult {run:r.get(0)?,generation:r.get(1)?,source_json:r.get(2)?,state:r.get(3)?,reason:r.get(4)?})).optional()?;
+        let result = record
+            .map(
+                |StoredCompactResult {
+                     run,
+                     generation,
+                     source_json,
+                     state,
+                     reason,
+                 }|
+                 -> Result<ProjectionGeneration, RuntimeError> {
+                    let source: ContextSource = serde_json::from_str(&source_json)
+                        .map_err(|e| RuntimeError::Protocol(e.to_string()))?;
+                    if run != owner.run_id.0
+                        || source.lifetime != owner.session_lifetime_id
+                        || source.source_start.0 != 0
+                        || source.source_end.0 > i64::MAX as u64
+                        || source.generation.0 > i64::MAX as u64
+                    {
+                        return Err(CoordinationError::Corrupt.into());
+                    }
+                    if expected_revision.is_some_and(|revision| revision != source.source_end) {
+                        return Err(CoordinationError::Conflict.into());
+                    }
+                    if state == "rejected" && reason.as_deref() != Some("no_gain") {
+                        return Err(CoordinationError::Conflict.into());
+                    }
+                    let expected_generation = if state == "committed" {
+                        source
+                            .generation
+                            .0
+                            .checked_add(1)
+                            .filter(|value| *value <= i64::MAX as u64)
+                            .ok_or(CoordinationError::Corrupt)?
+                    } else {
+                        source.generation.0
+                    };
+                    if generation != Some(expected_generation) {
+                        return Err(CoordinationError::Corrupt.into());
+                    }
+                    Ok(ProjectionGeneration(expected_generation))
+                },
             )
-            .optional()?;
-        let frozen = read_only
-            .map(|raw| serde_json::from_str::<RunSnapshot>(&raw))
-            .transpose()
-            .map_err(|e| RuntimeError::Protocol(e.to_string()))?;
+            .transpose()?;
+        tx.commit()?;
+        Ok(result)
+    }
+    pub(crate) fn begin_compact_scoped(
+        &self,
+        intent: &CompactIntent,
+        execution: Option<&EnterpriseOwnerEnvelope>,
+    ) -> Result<(), RuntimeError> {
+        let mut db = self.lock_connection()?;
+        let tx = db.transaction_with_behavior(if execution.is_some() {
+            rusqlite::TransactionBehavior::Immediate
+        } else {
+            rusqlite::TransactionBehavior::Deferred
+        })?;
+        check_compact_owner(&tx, &intent.owner, execution, true)?;
+        source_check(&tx, &intent.owner.session_key, &intent.source)?;
+        let exists: u64 = tx.query_row(
+            "SELECT count(*) FROM run_snapshots WHERE run_id=?1",
+            [&intent.owner.run_id.0],
+            |row| row.get(0),
+        )?;
+        let frozen = if exists == 0 {
+            None
+        } else {
+            Some(super::requests::frozen_in(&tx, &intent.owner.run_id)?)
+        };
         if frozen
             .as_ref()
             .and_then(|s| s.context_policy_fingerprint.as_ref())
@@ -235,10 +350,11 @@ impl ContextRepository for RunStore {
                 "context_read_only 禁止 compact".into(),
             ));
         }
+        compact_source_budget_in(&tx, &intent.operation, &intent.owner)?;
         let previous: Option<(String, String, String)> = tx
             .query_row(
-                "SELECT run_id,source_json,state FROM compact_operations WHERE operation=?1",
-                params![intent.operation],
+                "SELECT run_id,source_json,state FROM compact_operations WHERE operation=?1 AND run_id=?2 AND lifetime=?3",
+                params![intent.operation,intent.owner.run_id.0,intent.owner.session_lifetime_id.0],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
@@ -267,19 +383,29 @@ impl ContextRepository for RunStore {
         super::views::commit(tx)?;
         Ok(())
     }
-    fn settle_compact(
+    pub(crate) fn settle_compact_scoped(
         &self,
         intent: &CompactIntent,
         replacement: Option<&[Message]>,
         reason: &str,
+        execution: Option<&EnterpriseOwnerEnvelope>,
     ) -> Result<ProjectionGeneration, RuntimeError> {
         let mut db = self.lock_connection()?;
-        let tx = db.transaction()?;
-        let (run, raw, state): (String, String, String) = tx.query_row(
-            "SELECT run_id,source_json,state FROM compact_operations WHERE operation=?1",
-            params![intent.operation],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        let tx = db.transaction_with_behavior(if execution.is_some() {
+            rusqlite::TransactionBehavior::Immediate
+        } else {
+            rusqlite::TransactionBehavior::Deferred
+        })?;
+        check_compact_owner(&tx, &intent.owner, execution, true)?;
+        compact_source_budget_in(&tx, &intent.operation, &intent.owner)?;
+        let (run, raw, state, lifetime): (String, String, String, String) = tx.query_row(
+            "SELECT run_id,source_json,state,lifetime FROM compact_operations WHERE operation=?1 AND run_id=?2",
+            params![intent.operation,intent.owner.run_id.0],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?,r.get(3)?)),
         )?;
+        if lifetime != intent.owner.session_lifetime_id.0 {
+            return Err(CoordinationError::Corrupt.into());
+        }
         if run != intent.owner.run_id.0
             || raw
                 != serde_json::to_string(&intent.source)
@@ -292,6 +418,11 @@ impl ContextRepository for RunStore {
         }
         let check = fence_in(&tx, &intent.owner)
             .and_then(|_| source_check(&tx, &intent.owner.session_key, &intent.source));
+        let check = if execution.is_some() {
+            Ok(check?)
+        } else {
+            check
+        };
         if check.is_err() || replacement.is_none() {
             tx.execute(
                 "UPDATE compact_operations SET state='rejected',reason=?2,result_generation=?3 WHERE operation=?1",
@@ -322,35 +453,8 @@ impl ContextRepository for RunStore {
         let candidate =
             replacement.ok_or_else(|| RuntimeError::Protocol("缺少 compact 候选".into()))?;
         let canonical = check?;
-        if !preserves_current_turn(&canonical, candidate) {
-            return Err(RuntimeError::Protocol(
-                "compact 不得删除或改写当前用户轮次".into(),
-            ));
-        }
-        if candidate.is_empty()
-            || candidate
-                .iter()
-                .all(|m| m.content.as_deref().is_none_or(|s| s.trim().is_empty()))
-        {
-            return Err(RuntimeError::Protocol("空 compact 候选".into()));
-        }
-        let mut pending = Vec::new();
-        for message in candidate {
-            if message.role == Role::Tool {
-                if pending.first().copied() != message.tool_call_id.as_deref() {
-                    return Err(RuntimeError::Protocol("compact tool pair 不完整".into()));
-                }
-                pending.remove(0);
-            } else {
-                if !pending.is_empty() {
-                    return Err(RuntimeError::Protocol("compact tool pair 不完整".into()));
-                }
-                pending = message.tool_calls.iter().map(|c| c.id.as_str()).collect();
-            }
-        }
-        if !pending.is_empty() {
-            return Err(RuntimeError::Protocol("compact tool pair 未闭合".into()));
-        }
+        agent_core::validate_compaction_candidate(&canonical, candidate)
+            .map_err(|error| RuntimeError::Protocol(error.to_string()))?;
         let payload = serde_json::to_string(&replacement)
             .map_err(|e| RuntimeError::Protocol(e.to_string()))?;
         tx.execute("INSERT INTO context_heads VALUES(?1,?2,?3,?4) ON CONFLICT(lifetime) DO UPDATE SET source_end=excluded.source_end,generation=excluded.generation,messages_json=excluded.messages_json",params![intent.source.lifetime.0,intent.source.source_end.0,next,payload])?;
@@ -377,19 +481,6 @@ impl ContextRepository for RunStore {
         )?;
         super::views::commit(tx)?;
         Ok(ProjectionGeneration(next))
-    }
-    fn record_context(
-        &self,
-        owner: &ExactOwner,
-        round: usize,
-        envelope: &ContextEnvelope,
-    ) -> Result<(), RuntimeError> {
-        let mut db = self.lock_connection()?;
-        let tx = db.transaction()?;
-        fence_in(&tx, owner)?;
-        tx.execute("INSERT INTO context_ledgers VALUES(?1,?2,?3) ON CONFLICT(run_id,round) DO UPDATE SET envelope_json=excluded.envelope_json",params![owner.run_id.0,round as i64,serde_json::to_string(envelope).map_err(|e|RuntimeError::Protocol(e.to_string()))?])?;
-        super::views::commit(tx)?;
-        Ok(())
     }
 }
 

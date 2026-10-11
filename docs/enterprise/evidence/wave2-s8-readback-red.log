@@ -1,0 +1,45 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.46s
+     Running tests/readback_contract.rs (target/debug/deps/readback_contract-1c309d596817c067)
+
+running 4 tests
+test duplicate_lifetime_cannot_disclose_ownerless_transcript_in_any_history_mode ... FAILED
+test local_session_page_filters_scope_before_limit_and_cursor ... FAILED
+test local_readback_never_reads_a_foreign_or_absent_session ... FAILED
+test damaged_run_lifetime_cannot_project_another_sessions_terminal ... FAILED
+
+failures:
+
+---- duplicate_lifetime_cannot_disclose_ownerless_transcript_in_any_history_mode stdout ----
+
+thread 'duplicate_lifetime_cannot_disclose_ownerless_transcript_in_any_history_mode' panicked at tests/readback_contract.rs:76:104:
+called `Result::unwrap()` on an `Err` value: SqliteFailure(Error { code: ConstraintViolation, extended_code: 2067 }, Some("UNIQUE constraint failed: session_heads.lifetime"))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- local_session_page_filters_scope_before_limit_and_cursor stdout ----
+
+thread 'local_session_page_filters_scope_before_limit_and_cursor' panicked at tests/readback_contract.rs:64:5:
+assertion `left == right` failed
+  left: SessionKey("a-hidden")
+ right: SessionKey("b-visible")
+
+---- local_readback_never_reads_a_foreign_or_absent_session stdout ----
+
+thread 'local_readback_never_reads_a_foreign_or_absent_session' panicked at tests/readback_contract.rs:46:13:
+跨域与不存在必须返回同一授权错误
+
+---- damaged_run_lifetime_cannot_project_another_sessions_terminal stdout ----
+
+thread 'damaged_run_lifetime_cannot_project_another_sessions_terminal' panicked at tests/readback_contract.rs:96:9:
+不能把 B 的终态投影给 A
+
+
+failures:
+    damaged_run_lifetime_cannot_project_another_sessions_terminal
+    duplicate_lifetime_cannot_disclose_ownerless_transcript_in_any_history_mode
+    local_readback_never_reads_a_foreign_or_absent_session
+    local_session_page_filters_scope_before_limit_and_cursor
+
+test result: FAILED. 0 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+error: test failed, to rerun pass `--test readback_contract`

@@ -449,6 +449,15 @@ pub trait Provider: Send + Sync {
         bail!("该 provider 仅实现流式事件接口")
     }
 
+    /// 企业预算必须由 provider 请求本身强制；自定义 adapter 未实现时拒绝付费派发。
+    async fn chat_stream_bounded(
+        &self, messages: &[Message], tools: &[ToolSpec],
+        events: mpsc::UnboundedSender<ProviderEvent>, max_output: Option<u64>,
+    ) -> Result<()> {
+        if max_output.is_some() { bail!("Provider 不支持冻结输出上限"); }
+        self.chat_stream(messages, tools, events).await
+    }
+
     async fn chat_stream(
         &self,
         messages: &[Message],

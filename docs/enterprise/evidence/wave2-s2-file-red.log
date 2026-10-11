@@ -1,0 +1,22 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.52s
+     Running tests/artifact_contract.rs (target/debug/deps/artifact_contract-83e6c5754462553e)
+
+running 1 test
+test artifact_directory_symlink_cannot_redirect_publication_to_another_directory ... FAILED
+
+failures:
+
+---- artifact_directory_symlink_cannot_redirect_publication_to_another_directory stdout ----
+
+thread 'artifact_directory_symlink_cannot_redirect_publication_to_another_directory' panicked at tests/artifact_contract.rs:11:5:
+artifact 根 symlink 必须在任何写入前拒绝
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    artifact_directory_symlink_cannot_redirect_publication_to_another_directory
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+error: test failed, to rerun pass `--test artifact_contract`

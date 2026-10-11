@@ -1,0 +1,6 @@
+    Checking memchr v2.8.3
+    Checking serde v1.0.229
+    Checking thiserror v2.0.20
+    Checking serde_json v1.0.151
+    Checking agent-core v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/core)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.43s

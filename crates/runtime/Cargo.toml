@@ -9,6 +9,8 @@ publish = false
 test-support = []
 
 [dependencies]
+agent-storage-ports = { version="=0.1.0", path="../storage-ports" }
+agent-artifact = { version="=0.1.0", path="../artifact" }
 agent-sandbox = { version = "=0.1.0", path = "../sandbox" }
 agent-memory = { version = "=0.1.0", path = "../memory" }
 agent-context = { version = "=0.1.0", path = "../context" }
@@ -37,6 +39,7 @@ jsonschema = { version = "=0.33.0", default-features = false }
 rustix = { version = "=1.1.4", features = ["fs"] }
 
 [dev-dependencies]
+agent-policy = { version="=0.1.0", path="../policy" }
 agent-storage = { version = "=0.1.0", path = "../storage", features = ["test-support"] }
 rcgen = "=0.13.2"
 tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring", "tls12"] }

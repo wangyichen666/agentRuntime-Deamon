@@ -45,11 +45,22 @@ pub struct MemoryStore {
 }
 
 impl MemoryStore {
-    pub async fn migrate_legacy(&self, repository: &agent_storage::RunStore) -> Result<()> {
+    pub async fn migrate_legacy(
+        &self,
+        repository: &dyn agent_storage_ports::LegacyMemoryImportRepository,
+    ) -> Result<()> {
         if !self.path.exists() {
             return Ok(());
         }
+        anyhow::ensure!(
+            tokio::fs::metadata(&self.path).await?.len() <= 16 * 1024 * 1024,
+            "旧记忆文件超过导入预算"
+        );
         let bytes = tokio::fs::read(&self.path).await?;
+        anyhow::ensure!(
+            bytes.len() <= 16 * 1024 * 1024,
+            "旧记忆文件读取超过导入预算"
+        );
         let backup = self.path.with_extension("jsonl.pre-scoped-memory.backup");
         if !backup.exists() {
             let mut file = tokio::fs::OpenOptions::new()
@@ -63,7 +74,13 @@ impl MemoryStore {
                 anyhow::bail!("legacy memory 备份读回不一致");
             }
         }
-        repository.import_legacy_memory(&self.path.to_string_lossy(), &bytes)?;
+        repository
+            .import_legacy_memory_file(
+                &agent_core::TenantContext::local(),
+                &self.path.to_string_lossy(),
+                &bytes,
+            )
+            .await?;
         Ok(())
     }
     pub fn from_env(workspace: &Path) -> Self {
@@ -84,7 +101,9 @@ impl MemoryStore {
     }
 
     pub async fn save(&self, content: String, ttl_days: Option<u64>) -> Result<MemoryEntry> {
-        if let Some((repository, owner)) = crate::loop_engine::current_session_repository() {
+        if let Some(owner) = crate::loop_engine::current_execution_owner() {
+            let repository =
+                crate::loop_engine::current_session_repository().map(|(repository, _)| repository);
             let now = unix_time()?;
             let expires_at = ttl_days.map(|days| now.saturating_add(days.saturating_mul(86400)));
             let digest = format!("{:x}", sha2::Sha256::digest(content.as_bytes()));
@@ -110,13 +129,18 @@ impl MemoryStore {
                 content_digest: digest,
                 revision: 0,
             };
-            let saved = repository.store_memory(
-                entry
-                    .source
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("缺少 memory owner"))?,
-                &entry,
-            )?;
+            let saved = if let Some((envelope, port)) = crate::loop_engine::current_native_memory()
+            {
+                port.store_run_memory(&envelope, &entry).await?
+            } else {
+                legacy_memory_repository(repository.as_deref())?.store_memory(
+                    entry
+                        .source
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("缺少memory owner"))?,
+                    &entry,
+                )?
+            };
             return Ok(MemoryEntry {
                 id: saved.id,
                 content: saved.content,
@@ -166,27 +190,33 @@ impl MemoryStore {
     }
 
     pub async fn recall(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
-        if let Some((repository, owner)) = crate::loop_engine::current_session_repository() {
-            let visibility = visibility_for(&*repository, &owner)?;
-            let candidates = repository.memory_candidates(&visibility)?;
+        if let Some(owner) = crate::loop_engine::current_execution_owner() {
+            let repository =
+                crate::loop_engine::current_session_repository().map(|(repository, _)| repository);
+            let (visibility, _) = current_memory_settings(repository.as_deref(), &owner).await?;
+            let candidates =
+                current_memory_candidates(repository.as_deref(), &owner, &visibility).await?;
             let records = agent_memory::rank_with_feedback(
                 candidates,
                 &visibility,
                 query,
                 limit,
                 unix_time()?,
-                &repository.memory_assessments(&visibility)?,
+                &current_memory_assessments(repository.as_deref(), &owner, &visibility).await?,
             );
             let exposures = records
                 .iter()
                 .map(agent_core::MemoryExposure::from)
                 .collect::<Vec<_>>();
-            if let Err(error) = repository.record_memory_exposures(
+            if let Err(error) = current_memory_exposures(
+                repository.as_deref(),
                 &owner,
                 &exposures,
                 "tool_result_prepared",
                 agent_memory::RECALL_POLICY,
-            ) {
+            )
+            .await
+            {
                 tracing::warn!(error=%error,"memory 工具曝光维护未写入");
             }
             return Ok(records
@@ -261,10 +291,10 @@ impl MemoryStore {
 }
 
 pub fn visibility_for(
-    repository: &dyn agent_storage::ControlRepository,
+    repository: Option<&dyn agent_storage::ControlRepository>,
     owner: &agent_core::ExactOwner,
 ) -> Result<agent_core::MemoryVisibility> {
-    let project = repository
+    let project = legacy_memory_repository(repository)?
         .run_snapshot(&owner.run_id)?
         .map_or_else(|| "".into(), |s| s.cwd);
     Ok(agent_core::MemoryVisibility {
@@ -272,6 +302,77 @@ pub fn visibility_for(
         project,
         allow_confirmed_global: true,
     })
+}
+
+fn legacy_memory_repository(
+    repository: Option<&dyn agent_storage::ControlRepository>,
+) -> Result<&dyn agent_storage::ControlRepository> {
+    repository.ok_or_else(|| anyhow::anyhow!("native记忆缺领域端口，禁止退回旧文件"))
+}
+
+pub(crate) async fn current_memory_settings(
+    repository: Option<&dyn agent_storage::ControlRepository>,
+    owner: &agent_core::ExactOwner,
+) -> Result<(
+    agent_core::MemoryVisibility,
+    Option<agent_core::RunSnapshot>,
+)> {
+    let snapshot = if let Some((envelope, port)) = crate::loop_engine::current_native_memory() {
+        envelope.owner.fence(owner)?;
+        Some(port.read_memory_settings(&envelope).await?)
+    } else {
+        legacy_memory_repository(repository)?.run_snapshot(&owner.run_id)?
+    };
+    let visibility = agent_core::MemoryVisibility {
+        lifetime: owner.session_lifetime_id.clone(),
+        project: snapshot
+            .as_ref()
+            .map_or_else(String::new, |s| s.cwd.clone()),
+        allow_confirmed_global: true,
+    };
+    Ok((visibility, snapshot))
+}
+pub(crate) async fn current_memory_candidates(
+    repository: Option<&dyn agent_storage::ControlRepository>,
+    owner: &agent_core::ExactOwner,
+    visibility: &agent_core::MemoryVisibility,
+) -> Result<Vec<agent_core::MemoryRecord>> {
+    if let Some((envelope, port)) = crate::loop_engine::current_native_memory() {
+        Ok(port
+            .read_memory_candidates(&envelope.scope, &owner.session_key, visibility)
+            .await?)
+    } else {
+        Ok(legacy_memory_repository(repository)?.memory_candidates(visibility)?)
+    }
+}
+pub(crate) async fn current_memory_assessments(
+    repository: Option<&dyn agent_storage::ControlRepository>,
+    owner: &agent_core::ExactOwner,
+    visibility: &agent_core::MemoryVisibility,
+) -> Result<Vec<agent_core::MemoryAssessment>> {
+    if let Some((envelope, port)) = crate::loop_engine::current_native_memory() {
+        Ok(port
+            .read_memory_assessments(&envelope.scope, &owner.session_key, visibility)
+            .await?)
+    } else {
+        Ok(legacy_memory_repository(repository)?.memory_assessments(visibility)?)
+    }
+}
+pub(crate) async fn current_memory_exposures(
+    repository: Option<&dyn agent_storage::ControlRepository>,
+    owner: &agent_core::ExactOwner,
+    entries: &[agent_core::MemoryExposure],
+    channel: &str,
+    policy: &str,
+) -> Result<()> {
+    if let Some((envelope, port)) = crate::loop_engine::current_native_memory() {
+        port.record_run_memory_exposures(&envelope, entries, channel, policy)
+            .await?;
+    } else {
+        legacy_memory_repository(repository)?
+            .record_memory_exposures(owner, entries, channel, policy)?;
+    }
+    Ok(())
 }
 
 pub struct RememberTool {
@@ -350,15 +451,28 @@ impl Tool for MemoryEvidenceTool {
     async fn execute(&self, args: Value) -> Result<String> {
         let args: EvidenceArgs =
             serde_json::from_value(args).context("memory_evidence 参数无效")?;
-        let (repository, owner) = crate::loop_engine::current_session_repository()
-            .context("证据读取要求 daemon exact owner")?;
-        let visibility = visibility_for(&*repository, &owner)?;
-        let page = repository.memory_evidence(
-            &visibility,
-            &args.memory_id,
-            args.after_source,
-            args.limit,
-        )?;
+        let owner = crate::loop_engine::current_execution_owner()
+            .context("证据读取要求daemon exact owner")?;
+        let repository = crate::loop_engine::current_session_repository().map(|(store, _)| store);
+        let (visibility, _) = current_memory_settings(repository.as_deref(), &owner).await?;
+        let page = if let Some((envelope, port)) = crate::loop_engine::current_native_memory() {
+            port.read_memory_evidence(
+                &envelope.scope,
+                &owner.session_key,
+                &visibility,
+                &args.memory_id,
+                args.after_source,
+                args.limit,
+            )
+            .await?
+        } else {
+            legacy_memory_repository(repository.as_deref())?.memory_evidence(
+                &visibility,
+                &args.memory_id,
+                args.after_source,
+                args.limit,
+            )?
+        };
         Ok(serde_json::to_string(&page)?)
     }
 }

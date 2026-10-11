@@ -208,6 +208,11 @@ fn namespace(params: &Value) -> Result<Option<&Value>, String> {
 /// 在 SDK 的容错 DTO 解码之前检查顶层身份，不吞未知字段。
 pub fn validate_acp_fields(method: &str, params: &Value, version: u16) -> Result<(), String> {
     let allowed: &[&str] = match method {
+        "_my_agent/identity/read" | "_my_agent/runtime/doctor" => &[],
+        "_my_agent/outbox/read" => &["after", "limit"],
+        "_my_agent/run/events" => &["run_id", "after_seq", "limit"],
+        "_my_agent/run/read" | "_my_agent/run/tools" | "_my_agent/run/provider" => &["run_id"],
+        "_my_agent/artifacts/read" => &["session_id", "run_id", "artifact_ref", "offset", "limit"],
         "initialize" if version == 1 => &[
             "protocolVersion",
             "clientCapabilities",

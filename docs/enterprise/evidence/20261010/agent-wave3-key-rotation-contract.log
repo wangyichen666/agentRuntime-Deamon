@@ -1,0 +1,15 @@
+   Compiling agent-identity v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/identity)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 15.77s
+     Running unittests src/lib.rs (target/debug/deps/agent_identity-0bdd15bcd36da835)
+
+running 1 test
+test oidc::cache_contract::real_key_rotation_and_expired_cache_fail_closed ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.01s
+
+     Running tests/oidc_contract.rs (target/debug/deps/oidc_contract-343a2018a96793da)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+

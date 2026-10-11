@@ -1,0 +1,28 @@
+    Blocking waiting for file lock on build directory
+    Checking serde_core v1.0.229
+    Checking tokio v1.53.1
+    Checking futures-sink v0.3.34
+    Checking slab v0.4.12
+    Checking tracing v0.1.44
+    Checking tungstenite v0.29.0
+    Checking futures-util v0.3.34
+    Checking axum-core v0.5.6
+    Checking serde v1.0.229
+    Checking serde_json v1.0.151
+    Checking serde_path_to_error v0.1.20
+    Checking hyper v1.11.1
+    Checking tokio-rustls v0.26.4
+    Checking serde_urlencoded v0.7.1
+    Checking agent-core v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/core)
+    Checking tower v0.5.3
+    Checking hyper-util v0.1.20
+    Checking tokio-tungstenite v0.29.0
+    Checking tower-http v0.6.11
+    Checking hyper-rustls v0.27.9
+    Checking axum v0.8.9
+    Checking agent-daemon-protocol v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-protocol)
+    Checking reqwest v0.12.28
+    Checking agent-daemon-client v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-client)
+    Checking agent-entry-support v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/entry-support)
+    Checking agent-gateway v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/gateway)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 49s

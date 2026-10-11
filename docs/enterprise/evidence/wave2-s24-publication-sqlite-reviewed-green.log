@@ -1,0 +1,36 @@
+   Compiling agent-core v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/core)
+   Compiling agent-daemon-protocol v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-protocol)
+   Compiling agent-storage-ports v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-ports)
+   Compiling agent-memory v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/memory)
+   Compiling agent-context v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/context)
+   Compiling agent-sandbox v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/sandbox)
+   Compiling agent-identity v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/identity)
+   Compiling agent-policy v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/policy)
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling agent-artifact v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/artifact)
+   Compiling agent-storage-postgres v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-postgres)
+   Compiling agent-daemon-client v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-client)
+   Compiling agent-entry-support v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/entry-support)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-cli v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/cli)
+   Compiling agent-gateway v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/gateway)
+   Compiling agent-acp v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/acp)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 55.22s
+     Running tests/publication_contract.rs (target/debug/deps/publication_contract-aeb0e7f91586a409)
+
+running 10 tests
+test sqlite_receipt_foreign_scope_and_wrong_digest_are_rejected_by_database_foreign_key ... ok
+test sqlite_independent_connections_compete_with_controlled_barrier_and_single_lease_winner ... ok
+test sqlite_shared_publication_contract ... ok
+test sqlite_restart_after_inbox_commit_before_ack_replays_receipt_without_business_writes ... ok
+test sqlite_foreign_corrupt_outbox_must_be_forbidden_before_decode ... ok
+test sqlite_outbox_failure_rolls_back_original_event_and_terminal_transaction ... ok
+test sqlite_tamper_is_rejected_and_sql_trigger_prevents_body_rewrites ... ok
+test sqlite_async_delivery_write_yields_the_runtime_during_real_database_lock ... ok
+test sqlite_v21_migration_does_not_backfill_old_events_and_verified_backup_reopens ... ok
+test sqlite_outbox_sql_binding_mismatch_must_not_return_original_private_envelope ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.61s
+

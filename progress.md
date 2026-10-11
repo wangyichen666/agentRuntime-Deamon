@@ -592,3 +592,395 @@ v1/v2 物理预算 256 帧/8MiB、4MiB 单帧、128 tasks；v2 请求32。真实
 修复后所有门禁退出0：Rust379（31真实daemon/入口、12架构）/tmp/control-waves-wave8-tests-audited-final.log；strict Clippy/MSRV1.88/release 对应 clippy/msrv/release-audited-final.log；fmt/JS/diff static-audited-final.log，文档收尾再检查 delivery-static.log；Web36 web-accepted.log。cargo deny --offline check --hide-inclusion-graph 四项通过 deny-accepted.log，仅已有公告缓存，未在线刷新。完整逐项 owner、迁移、删旧路径、兼容、失败、测试和实际环境边界见 docs/changes/governed-runtime-final-report.md；物理 API docs/runtime-crates.md。
 
 八波实现与本地门禁全部完成。商业 Provider/真实 IDE v2/MCP/用户 hook/Docker成功隔离/真实Keychain/Linux/CI仍未验收；不声称这些生产环境已通过。没有提交、推送或部署。
+
+
+# 企业升级执行记录（2026-10-07）
+
+- 读取用户附件完整规格，核对 git HEAD/status、workspace、现有架构测试、物理 crate 清单、ADR 与 CI。
+- 应用 planning-with-files：保留既有规划历史并追加新任务。当前进行 Wave 0 基线审计和可执行门禁。
+
+- 启动完整基线 Rust 回归，输出 docs/enterprise/evidence/baseline-tests.log；生成基线物理依赖/测试名索引。
+
+- 真实 RED（exit 101）见 docs/enterprise/evidence/wave0-red-quality.log：旧 AST 没有检测 std::println/core::todo/std::unimplemented。修复宏路径识别；新增 owner、Cargo alias/条件/继承、channel 构造站点护栏与夹具。四生产无界站点 + 一测试 feature 例外精确登记，尚未宣称有界化。
+
+- 首次新增护栏编译发现 syn::Error 不支持 PartialEq；整数判断改为 parse().ok() == Some(0)，生产代码未受影响。日志 wave0-architecture-green.log 保留后续另存结果。
+
+- Wave 0 指定九项命令退出0，机器报告 docs/enterprise/evidence/wave0-gates.json；Rust 387/0失败/0忽略，其中20架构/31真实daemon，Web36。cargo deny 在线命令四类通过，保留已有 duplicate warnings。开始隔离副本真注入三类违规，原工作区不变。
+
+- 隔离副本实际三次违规均被架构门禁拒绝（exit101 且断言命中，非编译失败）；报告 wave0-red-fixtures.json。逐表对账纠正文档计数为48，所有 DDL 表均在 schema-v20.md，无漏表；schema-v20-inventory.json 保存列表。
+
+- 企业 Wave 0 locally verified 完成，报告 docs/enterprise/wave0-report.md。原 schema v20/所有业务路径/锁文件未改；Wave1–10仍未实现，不复用旧个人波次完成状态。文档收尾后再做静态/架构检测。
+
+- 收尾更强 owner 登记/例外去重检查后，九项完整门禁再次全0；Rust仍387/Web36。三真注入 RED 全命中；新文件无尾随空格、文档链接存在、Cargo.lock 与 HEAD 字节完全相同。
+
+## 企业 Wave1-S1 实施中
+真实 daemon identity.readback RED 返回 -32601，日志 evidence/wave1-s1-red.log。新增 core 企业DTO、纯 identity/policy 库、v21身份/授权迁移与同一准入事务、中央 RPC 策略 gate、CLI/ACP v2/HTTP投影。首次编译发现测试字符串推导歧义，已改显式String；首轮全测试发现8个旧schema降级fixture保留了v21表，正修复fixture真实删除新schema而非让生产迁移忽略重复表。新的事务合同正在验证策略freeze、revocation、故障回滚和并发幂等；尚未验收Wave1。
+
+Wave1-S1验证修复：新授权合同的stale-policy用例误用了另一个request ID，先触发合法ProtocolViolation；保留ID绑定约束，测试改为同ID的旧策略请求。/identity放入slash末尾，保留原TUI菜单首项和键盘顺序。真实parity测试初版未创建session，被原生命周期准入正确拒绝；补显式创建而不放宽准入。此前失败日志全部保留。
+
+Wave1-S1真实parity已通过（5.07秒）。首次九门禁的test/clippy/MSRV被新增opaque ID测试的try_from模糊.into阻断，已改.to_owned保留类型校验；runner继续执行其余门禁并保留失败记录，不把部分绿视为验收。
+
+全workspace实际运行后发现 delegated/hook child 已经在 canonical 准入事务创建，旧幂等读回缺授权被新检查拒绝。现扩展原 child 准入事务继承经完整父owner/epoch/SHA核验的授权与更窄原snapshot；不能从请求补造历史授权。升级前 Local 旧run仍在当前可信授权后可幂等读回（snapshot=null），不对未知/外域主体开放。真实compact合同的schema断言20随实际migration更新为21，其余副作用/读回断言保留。失败记录 tests-reviewed.log 保留。
+
+## 企业 Wave1-S1 本地验收完成
+
+完整门禁 evidence/wave1-s1-final-gates.json 九项全部exit0，402 Rust（包括20架构、32真实daemon、7新增真实SQLite授权合同），36 Web，在线cargo deny通过。真实入口/故障/restart证据已写 docs/enterprise/wave1-s1-report.md、identity-api.md、schema-v21.md、ADR0004。第三方lock所有package条目与HEAD逐字段比较完全相同。完整Wave1仍未完成，Wave2–10尚未实施；没有提交/推送/部署。
+
+
+### 企业 Wave2-S1：事务发布协调（2026-10-07）
+
+- 已写 core DTO/lease reducer、两独立 adapter、v22/schema v1、same-transaction outbox、本地 publisher/receipt/ack、六种入口投影。
+- 已保留真实 RPC RED 与 PG worker regression/55P03 RED；修复异步驱动交接后 PG6项通过。最终九门禁和完整域 FK 复验尚在汇总。
+- 原 Local/native owners 保留；enterprise_ready=false。没有提交、推送或部署；未声明完整 Wave2–10 完成。
+
+
+### Wave2-S2 文件 artifact 实施
+
+真实 symlink RED 已保留。固定目录句柄/no-follow/CAS/原子 NOREPLACE/fsync、摘要和原 tool receipt 读回核验已接线；8 文件合同与真实 daemon 六入口/重启合同通过。正在跑九门禁。发现原 store_owned_output→finish_tool 的引用提交窗口可能被跨进程 GC 删除；下一切片改原 tool receipt 事务发布，不建第二业务状态机，schema 保持 v22。PostgreSQL lane 已再次真实通过6项，证据按切片独立保存；脚本新增 --wave 以避免覆盖早期证据。
+
+
+### Wave2-S2 门禁与 S3 File 两阶段发布
+
+S2 九门禁全退出0：420 Rust、6 PG 显式 ignored（独立真实 lane六项通过）、36 Web；34真实daemon。S3新增 core ToolArtifactCompletion、私有 staged File 能力和原 tool receipt 的 BEGIN IMMEDIATE 发布事务；生产 runtime 已替换先存文件再独立 finish_tool 的路径。13 文件合同通过；真实第二数据库连接 Barrier/写锁合同、真实子进程在 finalize 后 commit 前 kill 并重启合同通过。Clippy发现 test module不在文件末尾和未用变量，已修结构和变量，未放宽 lint。此前 sessions_read 测试方法名错误与缺 trait import 已修，不作为 RED。
+
+
+### Wave2-S3 验收记录
+
+九门禁 wave2-s3-file-final-gates.json 均退出0：427 Rust/6 PG ignored/36 Web/34真实daemon/20架构；独立真实PG六项通过。新增对象根目录时父目录 fsync 审阅修复后，重新跑 reviewed 全部门禁。File正式对象、原 tool receipt 和实际摘要不一致均 fail closed。未实现 S3-compatible backend、全部业务PG、native writer epoch 或离线迁移；完整Wave2和Wave3–10不能标完成。未提交、推送、部署。
+
+
+Wave2-S3 reviewed 最终验收：9项门禁全exit0、Rust427/Web36、独立真实PG6。完整报告 docs/enterprise/wave2-s3-file-report.md；原所有权/旧Local兼容和未完成范围如实保留。没有把File切片编号S3误标为S3对象存储后端；完整Wave2/Wave3–10仍未完成。
+
+
+## 最新请求：完成完整企业 Wave2–10
+
+继续既有工作区，不清理前序未提交变更。完整Wave2前置缺口仍为业务PG、native writer lease、S3与离线迁移。先实施S3-compatible artifact纵向切片：异步对象端口、有实际runtime caller、网络不持DB事务、原tool receipt继续唯一引用/终态owner、真实对象存储合同/故障/重启、多入口读回与九门禁。不得把PG发布协调或File切片伪称完整Wave2。
+
+
+## Wave2-S4 最终复核与继续 S5
+
+S4 真正 S3-compatible 后端已生产接线；SQLite v23 原工具收据/opaque ref、prepared 元数据、实际 GET SHA/size 与完整 receipt payload 摘要核验。payload-reviewed 九门禁全部 exit0：436 Rust/36 Web，9 项外部环境测试显式 ignored；独立真实 TLS MinIO 三项及真实 PG 六项通过。 SDK 固定 object_store0.14.2/reqwest0.13.5/quick-xml0.41.0，修复两项新 XML 公告，无 advisory ignore；仅新增 webpki-root-certs1.0.9 的已有同类证书数据许可例外，全文保存。旧第三方包身份未改变，新增43项。报告 docs/enterprise/wave2-s4-s3-report.md。
+
+用户再次指示“继续”。下一 S5 为 native session writer lease：租约与原 admission/迟到 mutation 同事务检查，不能把 S1 delivery lease 冒充 native writer。Local 默认不依赖外部服务，显式 mode 引入租约；DB 中已存在租约时未持 proof 的 Store 不可绕过。第二活 daemon 不得执行全局 recovery 把首个活 run 标 unknown。native PG 全业务迁移仍是完整 Wave2 后续，Wave3–10不伪称完成。
+
+
+## Wave2-S5 进行中
+
+SQLite v24 native writer 与原 admission/terminal/transcript/tool/provider/resource/Hook/lifecycle 事务接线。真实两活 daemon RED 为首个 run 被第二实例改 unknown；两个 DB 连接 Barrier、旧 owner 迟到原调用、DB 到期接管、v24 迁移备份/故障和未来版本测试已落盘。启动/运行三秒受管续租，TTL十五秒；默认无 lease 的 Local 保持兼容，已有 native 行的未配置连接不能继续写入。诊断六入口新增共享 writer 摘要，初测暴露 bind-before-ready 指纹竞态，已修原子 marker + 有限启动等待，正在重跑。完整九门禁、S3 和 PG 发布回归尚未完成；全业务PG/PG writer/离线迁移及完整Wave2–10仍未完成，禁止提升 readiness。
+
+
+S5 最终代码九门禁全通过（wave2-s5-writer-final-gates.json）：451 Rust、36 Web、9 外部环境 ignored；真实 TLS MinIO 三项回归通过。对象 late writer 新 StaleWriter(-32063/409)拒绝，legacy 活 owner 首次开启 Conflict、两次 commit 原 SQL 到期故障同事务回滚、ready 双 socket barrier 通过。独立 PG 发布六项回归正在执行，不声称 PG native writer完成。发现原 Cron runner 创建新的未配置 RunStore，native 模式安全拒绝该后台写入；需要下一切片复用 daemon canonical repository/proof 和对象 backend，并验证真实 Cron caller，不能用前台 lease 测试代替。
+
+S6 fixture 修正：未知工具最初使用 deferred 名称，没有 discovery，实际工具收据为空/文件未写，不能作为未知副作用证据。改为冻结 core write_file 名称的受控 effect 后，runtime Cron 8项全通过，文件一次、native unknown、attempt1；未放宽终态断言。补真实定时触发续租与正常/kill恢复测试，独立S3与九门禁待跑。
+
+S6 真定时触发合同发现禁用未来schedule后 active Cron未计入daemon persistent background，空闲退出在续租观测期间中止当前run。process.log为超时初诊，process-diagnostic.log为真实EOF失败；DB证据为原running被空闲recover改unknown，非provider回包。keeps_daemon_alive增加原running集合判断，保留现有调度owner。
+
+S6 第一轮完整门禁 tests失败：acp_v2_plan_controls入口对等测试预选并释放TCP端口58976后，Web进程bind撞并发端口，os48 Address in use；其余37真实daemon测试通过。保留cron-final日志，不能记全通过。修fixture由实际Web服务bind端口0，并读取真实监听地址，避免TOCTOU而不是改串行或跳测试；完整九门禁须新reviewed前缀。
+
+S6 Web fixture修正期间Rustfmt检测预选端口删除后残留空白，已清理；新WebSocket-only caller未用port提示已改丢弃绑定，无lint降级。服务实际local_addr用于原启动stdout，8个真实Web子进程从自己的endpoint文件读取port0真实地址，不预留并释放端口。首轮九门禁除端口竞态tests之外其余8项exit0。
+
+S6 reviewed九门禁456Rust/36Web全部exit0，但审阅后新增Provider receipt数据库主键与JSON身份一致性RED（provider-corrupt-red.log）实际发现source JSON可指向target attempt。恢复/finish now核主键、round、candidate、run、Started；新contract确保两run/全部attempt/event零变更。最终审阅代码需重新九门禁并跑真实环境，不将旧456结果代表新增防护。
+
+S6 implemented / locally verified：最终wave2-s6-cron-audited九门禁全部exit0，457Rust/36Web/10外部ignored；独立TLSMinIO四项和PG发布六项全通过。nativeCron同物理repo/proof/backend/冻结Provider，未知收口/no retry，定时续租/退出/kill恢复、六入口、SQL fault/损坏JSON身份零写闭合。报告wave2-s6-cron-report.md。完整Wave2和Wave3–10仍未完成；下一S7统一已接线async端口的SQLite有界阻塞隔离，保持schema24。
+
+S7 cancel-budget目标测试首次编译失败：agent-storage单包缺Tokio test宏feature（全workspace统一feature不能替代单包正确声明）。增加仅dev-dependencies macros，复用已有锁定Tokio，无外部包版本变化，生产rt/sync/time保持。错误日志保存，非功能RED。
+
+S7 最终九门禁 wave2-s7-adapter-final全部exit0；459Rust/36Web/10外部ignored。SQLite发布8项、storage取消/共享预算1项、真实daemon38项均通过；独立S3四项与PG发布六项回归进行中，不能提前记完整本地验收。所有native业务asyncports/nativePG/离线迁移仍pending。
+
+S7 最终implemented / locally verified：459Rust/36Web/10外部ignored、九门禁、真实TLS S3四项及PG发布六项全部通过。统一三组端口的有界SQLite隔离及取消/过载，schema仍v24。报告wave2-s7-adapter-report.md；完整Wave2–10仍未完成。后续必须完整native业务asyncports、全业务PG/租户键/原事务、audit/quota/offline迁移，不得把协调端口当作全部事实源。
+
+本轮交付复核：S6 audited与S7 final两组九门禁及各自S3/PG JSON均全部exit0；最后git diff --check通过，无后台gate/cargo任务遗留。全部改动仍在同一未提交工作区；未提交/推送/部署。后续继续完整Wave2的全native领域异步端口、全部canonical PostgreSQL/schema与tenant域、native PG writer、audit/quota及离线count/digest/切换/回滚；这些未实现，不能进入并宣称Wave3–10完成。
+
+Wave2-S8：四项有效RED与七项storage GREEN；schema25永久life归属、只读scopedasyncports与原daemoncaller、HTTP/CLI新增只读投影、客户端错误归约和ACPtypederror已实施。真实六入口/重启测试正在重跑，随后完整九门禁和两个真实外部lane。完整Wave2–10未完成，继续按顺序推进。
+
+S8最终implemented / locally verified：467Rust/36Web/10外部ignored、九门禁全exit0，真实TLS MinIO四项和真实PG发布六项全过。schema25及rollback/隔离证据报告wave2-s8-readback-report.md，完整Wave2–10尚未完成；继续S9中心身份/授权async端口。
+
+Wave2-S9：中心身份/冻结授权async端口与纯core安全错误已接线，schema25保持。真正Connection占有timer RED/GREEN，新增scope/oldowner/revocation/proof/故障零写合同，身份九项通过。真实六入口中心SQL故障与S8 scoped重启运行中，完整门禁/外部回归未验收。完整Wave2–10未完成，继续。
+
+S9 最终九门禁全部 exit0：471 Rust / 36 Web / 40 真实 daemon，10 项外部测试按环境显式 ignored。真实 TLS MinIO 四项与 PG 发布六项独立回归进行中；S10 已准备事件隔离/字节分页 RED 和实际端口/六入口方案，尚未实施，完整 Wave2–10 未完成。
+
+S9 implemented / locally verified：471 Rust / 36 Web / 40 真实 daemon、九门禁全 exit0，独立真实 TLS MinIO 四项和真实 PG 发布六项全通过。报告 wave2-s9-identity-report.md；继续 S10 事件读回的实际 RED/修复，完整 Wave2–10 未完成。
+
+S10 已实施：RunEventPage/RunEventRepository、SQLite scope 单事务及行/字节分页、原事件/stamp共用解码、daemon run.events/订阅恢复和 CLI/ACP1/ACP2/HTTP/WS 实际投影。两项有效 RED、六项 storage GREEN 与六入口真实 daemon 合同通过；订阅恢复、共享预算/竞争与完整九门禁/真实环境回归尚待收口，schema25/enterprise_ready=false。
+
+S10 最终九门禁 wave2-s10-events-cursor-final 全 exit0：480 Rust / 36 Web / 42 真实 daemon / 10 外部 ignored；两次实施/旧行为回归已修复并保留失败证据。独立 S3/PG 回归中；S11 lifecycle scoped async 实施草稿仍 proposed，完整 Wave2–10 未完成。
+
+S10 implemented / locally verified：480 Rust / 36 Web / 42 真实 daemon、九门禁及独立 TLS MinIO 四项/PG 发布六项全 exit0。报告 wave2-s10-events-report.md；事件 provenance 后续缺口如实记录，完整 Wave2–10 未完成。继续 S11 lifecycle scope/async 真 RED。
+
+S11：七项 lifecycle 合同/79 storage 单测通过。新增 result_json 错误 key/lifetime 真实 RED，原共用 decoder 校验永久 owner；取消发生在原 commit 后仍保持实际 blocking permit。真实 daemon scope RED 为缺失会话清空的 -32602 与越域 Forbidden 不同；删除前置同步查询，原事务统一授权。daemon fixture 方法名错误单独保留，不计 RED；完整门禁与真实环境回归待收口。
+
+S11 完整九门禁全exit0：489Rust/36Web/43真实daemon，外部10项明确ignored；独立真实TLS S3四项全过，PG发布六项回归中。S12 run.read/tools/provider原同步查询的scope/单事务/async缺口审阅及两个真实RED草稿已准备，尚未实施。完整Wave2–10仍未完成。
+
+S11 implemented / locally verified：489Rust/36Web/43真实daemon，完整九门禁及独立TLS MinIO四项/PG发布六项全部exit0。继续S12原run事实查询async隔离；完整Wave2–10未完成，enterprise_ready=false。
+
+S12 implemented：两个真实baseline RED与额外continuation故障RED、七项readback GREEN/storage80项通过。三新async端口实际RPC与slash caller共用原SQL/decoder/Connection，scope在同读TX内，完整字节/行预算。Provider JSON/SQL身份校验和未知拼写兼容；六入口新投影实际进程合同验收中。重复已有/run接线编译错误保留，已扩建原registry，不计RED；完整九门禁/真实环境待收口。
+
+S12七项storage合同/storage80项/真实六入口三视图、driver故障、scope与重启合同均通过；原/run默认摘要和compact纯formatter兼容。ACP2严格字段白名单遗漏已修，实施失败保留。完整九门禁wave2-s12-run-facts-final开始，之后S3/PG严格串行。完整Wave2–10仍未完成。
+
+S12 implemented / locally verified：498 Rust/36 Web/44真实daemon、九门禁 wave2-s12-run-facts-lint-final 全 exit0，独立真实 TLS MinIO 四项/PG 发布六项全过。相邻 if Clippy 失败保留、修后完整重跑，无 lint 例外。继续 S13 原准入/队列/终态真实 caller，schema25与全Wave2–10 pending/readiness=false保持。
+
+继续 S13：准入/队列/终态原事务异步端口草稿已准备，开始原同步生产路径真实 RED。S12 已完整本地验收，完整 Wave2–10 未完成。
+
+S13 async 真实 foreground/cancel 已接线，owner 同准入 TX 捕获贯穿工具审计/Hook/终态；三个有效 RED、八项 execution GREEN/storage82/真实前台迟到结果与条件重启合同通过。新增编码预算合同待全套验证；夹具假设/修正编译失败保留。完整九门禁 wave2-s13-execution-final 进行中，S3/PG 后续严格串行。全Wave2–10未完成。
+
+首次完整门禁暴露实施回归：ACP 原 standard_acp_streams_updates_and_round_trips_permission 在默认栈发生 overflow；原用两个 async wrapper 将大执行 Future 重复内联。改为在普通函数入口 Box::pin 原执行 Future，唯一 task-local helper 持 heap pointer，未扩大栈、未 ignore 原合同。原 ACP 测试已在默认栈通过；新增256KiB执行Future/上下文小于4KiB/原owner保留的两种caller合同通过。Clippy explicit-auto-deref 修为自然借用，无 allow。失败日志 wave2-s13-execution-final-tests.log / clippy.log 保留；接着完整九项门禁重跑。
+
+最终本地验收：wave2-s13-execution-stack-final 九项全部exit0，511Rust/36Web/45真实daemon，外部10项明确ignored。执行合同9/storage82/runtime131均通过，原ACP标准与前台generation故障合同保持，未加栈或跳过测试。真实TLS MinIO四项与PostgreSQL发布协调六项独立回归全部exit0，见 wave2-s13-execution-regression-s3.json / postgres.json。原失败门禁和夹具失败均保留；未CI/生产验证、未提交。全企业Wave2尚未完成，Wave3–10 pending，enterprise_ready=false。继续原Provider attempt/未知结果和实际runtime caller，不能称所有ports或全部PG事实已迁移。
+
+继续S14原Provider attempt：S13全验收结束；两个真实业务RED开始，分别验证终态不能改写原provider身份、已persist OutcomeUnknown的attempt不能导致run假成功。后续才应用同事务async端口及实际runtime caller，schema25保持，全Wave2–10未完成。
+
+S14推进：五项原事务RED已修复，八项scoped合同GREEN。真实HTTP完整接收后断连有效RED观察到3次请求/run Failed；新增驱动内部dispatch证据，只有确证未建立连接或明确4xx拒绝才允许安全重试，5xx/丢失响应/现场超时取消保守Unknown。wire GREEN一次调用/OutcomeUnknown/typed -32002/重启不重放。native新attempt冻结route缺口有效RED（profile维度截停，其余维度待GREEN验证），同原Immediate TX增加running/candidate/profile/API/model校验。新的timer及完整合同/共享预算/九门禁与真实lane仍待验收，未提升全企业readiness。
+
+S14 implemented / locally verified：wave2-s14-attempt-audited-final 九项全部exit0，526Rust/36Web/48真实daemon、10外部环境项明确ignored。12项attempt存储合同/131 runtime单测/3真实HTTP接受后断连取消超时全部GREEN。独立TLS MinIO四项业务与PostgreSQL发布协调六项全部exit0；PG runner五步骤不等于五业务合同。首次依赖清单/Clippy遗漏及两项旧取消断言失败保留，未放宽架构护栏、未加栈/跳过测试。schema25，不新增第三方包，未提交推送部署；完整Wave2–10未完成，enterprise_ready=false。继续原工具事务async/固定owner，后续完整PG/租户键/nativewriter/auditquota/offline仍必须闭合。
+
+
+S15 implemented / 局部验收：原工具六异步端口接实际前台 caller，同原 Connection/四 permit/固定准入 owner；四项有效旧业务 RED 修复。原未知工具后继续执行后续 wave 的有效 RED 修复（后续 effect1→0，模型请求均1），原 typed unknown/no replay。11工具合同、83storage单测、真实工具发现回填合同通过；File已commit后取消等待者仍持permit/收据持久合同通过。保存batch SQL字节预检与十二项扩展合同正在跑，九门禁/S3/PG待最终验收。schema25/readiness=false，完整Wave2–10未完成；详见 docs/enterprise/wave2-s15-tool-report.md。
+
+S15 全量 Rust 门禁已 exit0：540通过/0失败/10外部环境ignored，39个test executables；runtime132/storage83/工具integration12/真实daemon48均纳入。其余八门禁仍进行，真实TLS S3四业务和PG发布六业务之后严格串行，暂不标最终验收。
+
+
+S15 implemented / locally verified：wave2-s15-tool-audited-final 九项全部exit0，540 Rust / 36 Web / 48真实daemon，39个test executables、10外部环境项明确ignored；12项工具存储合同、83 storage单测、132 runtime单测通过。真实TLS MinIO四业务与PostgreSQL发布协调六业务回归全部exit0。原工具六async端口/固定owner/原File两阶段receipt事务及未知工具停止后续wave已接实际前台caller，无新表/状态机/第三方依赖，schema25。原功能RED、编译/夹具失败证据保留，不计虚假RED；未放宽超时/栈/架构。Cron兼容和其余业务ports/fullPG/租户键/nativePGwriter/完整outbox/auditquota/offline仍欠；完整Wave2–10未完成，enterprise_ready=false。详见 docs/enterprise/wave2-s15-tool-report.md。
+
+S16 implemented / 局部验收中：原turn/transcript/计划六异步端口已接实际foreground runtime及daemon start-plan，同一Connection/四permit/固定准入envelope。六项原越域RED已修，15项扩展合同通过；另确认已结算无决策run仍返回计划执行成功和receipt.run_id错误仍执行两个有效RED，原helper增加running及SQL/JSON身份校验，16项最终合同在跑。Message临时借用编译失败、旧计划直接SQL插入clock变化和执行夹具误用Queue均保留、均不计功能RED。schema25/无新状态表/无第三方库；完整九门禁/S3/PG尚待验收，全Wave2–10仍pending/readiness=false。
+
+S16完整九门禁运行中；生产源冻结。初test编译给出run_turn_contract中多余RunRepository import警告，只移除该无效test import（无生产或测试行为修改）；Clippy仍将核最终源码。SQL身份新增断言等行为从九门禁开始前已固定。S17仅/tmp request/context异步审阅草稿，未实施，不提升完整Wave状态。
+
+S16完整Rust门禁exit0：556通过/0失败/10外部ignored，40个executables；实际daemon48/原计划审阅执行六入口与重启恢复全部保持。Clippy exit0，未增加例外或栈；MSRV/release/Web/deny/diff进行中，随后TLS S3四业务和PG发布六业务严格串行。
+
+
+S16 implemented / locally verified：wave2-s16-turn-audited-final 九项全部exit0，556 Rust / 36 Web / 48真实daemon，40个test executables、10外部环境项明确ignored；16项turn/transcript/计划integration合同、83 storage/132 runtime单测通过。独立真实TLS MinIO四业务和PostgreSQL发布协调六业务全部exit0。原六async端口接实际前台/PlanStore/daemon start-plan，同一Connection/四permit/固定准入envelope；六越域RED、已结算无决策仍给执行许可RED、receipt错误run_id仍执行RED修复。JSON四维和SQL四维身份GREEN，不把第一个截停RED夸成多项RED；故障回滚/CAS/幂等/撤销/过期和真实daemon原计划六入口/恢复合同保持，无新表/第三方包、schema25。编译/夹具失败及测试无效import警告保留，不计功能RED；未放宽超时/栈/护栏。全业务ports/nativePG/租户键/nativePGwriter/outbox/auditquota/offline仍欠，完整Wave2–10未完成，enterprise_ready=false。详见 docs/enterprise/wave2-s16-turn-report.md。
+
+
+2026-10-08 持续执行：用户要求直到Wave10完成再停。S16已完整本地验收；S17请求捕获/上下文异步迁移in_progress，先复现原请求行SQL/JSON完整合法错配及scope缺口，随后唯一helper/固定准入envelope/实际模型及摘要await。全企业Wave2–10尚未完成，readiness=false。继续使用planning-with-files已有记录，不重建计划。
+
+S17四项有效功能RED（scope来源读、capture写、只读重建，以及完整合法JSON保留原digest但SQLcapture_id错配）均独立失败，修后四项GREEN。原helper唯一body/同TXscope/JSONSQLrun/capture/round/candidate核、SQLBLOB预算和完整canonical前缀超预算明确拒绝已实施。三个native async端口接线进行中；摘要回调改owned消息+boxed await，compact使用已捕获owner进入同原task-local上下文。完整compact准入/结算仍sync欠账，不能称全async。旧GREEN session已结束后write_stdin返回Unknownprocess，日志证明4passed，不重复运行冒充新增证据。
+
+S17扩展首次12合同11pass/1fail：capture中life维度在原入参Protocol验证提前转换为Conflict，未得到固定owner的StaleOwner。移除冗余提前life检查，native同TX先验证scope/fixedowner/冻结fence，再核captureowner并执行原source_check；不放宽测试断言。幂等重复提交增加原SQLround/candidate/byte及savedraw核对，损坏事实不因digest相同冒充幂等成功。check期间无效import警告为当时未加终态扩展合同，现在已使用该trait，不计功能RED。
+
+S17 reviewed编译失败：SQLidentity元组在长SQL macro附近保留无空格格式，文本替换未命中u32→i64，比较因此类型不匹配；精确修正元组类型，无测试放宽。writer lease夹具列名在运行前审阅发现应session_key，已修正。两者均实施错误，不计功能RED。
+
+S17额外route有效RED：合法冻结catalog/policy及正确摘要仍接受与冻结Provider候选不一致的route/provideridentity，实测Ok写入（wave2-s17-request-route-red.log）；原helper增加候选index、model与原candidate序列化SHA身份核对，读回复用同helper，不新增路由账本。撤销夹具首次失败为对未结算legacy运行开启writer被原安全activation拒绝，先正常终态结算原夹具run再启用writer，不修改原activation保护。
+
+S17请求合同14项全部GREEN；三个端口的满额合同和异步摘要发送前校验单测已补，库/真实普通模型及compact-summary回归串行进行。S18原事件provenance两个RED草稿已写/tmp，尚未应用；考虑在同Wave2剩余实现批次后统一完整九门禁和真实环境回归，避免把每个小端口切片冒充完整Wave。全Wave2–10未完成。
+
+S17库回归发现真实兼容回归：两个未知副作用合同在发送前capture失败，Cron按原安全未发送逻辑尝试4次，未执行外部副作用。新envelopecatalog检查错误混用了两种历史合法编码：RunSnapshot哈希typed ToolSpec serialization，ContextEnvelope哈希serde_json::Value（字段排序）。改为各自按原canonical表示核同一catalog，不改历史摘要或弱化合同。原失败log wave2-s17-libraries-local.log保留，完整库及真实daemon回归以新prefix重跑。
+
+S17 reviewed-local库步骤exit0：133 runtime / 83 storage，包括三个请求端口统一满额、异步摘要先await拒绝不发送，以及原未知工具/Provider/Cron合同。真实daemon普通请求读回与compact-summary两步继续串行，不改生产源；随后S18真实RED开始。
+
+S18两个真实RED均有效：原native事件stamp删除后分页返回无_my_agent_view的成功事件，直接stamp读取返回None，均不允许降legacy。应用schema26原events永久provenance/native缺stampCorrupt/已发布stamp删除保护/先SQL字节预算；旧fixture准确撤26后再撤25，future更新27。旧迁移故障版本仍原值不放宽。S17普通模型与compact-summary真实daemon两步均exit0；其完整九门禁与真实lane跟本批收口统一执行，不冒充最终验收。
+
+S18扩展编译漏导入MaintenanceRepository导致health_report方法不可见；补正确trait import，无行为变更，不计功能RED。两个scoped RED修后8原事件合同已GREEN；新增来源/迁移备份/回滚/future27/预算合同继续验收。
+
+S18事件12项合同及storage83单测全部GREEN，schema26已实施但完整门禁尚未收口。S19Cron审阅proposed：真实背景运行仍with_tool_audit重读owner、finish(runid)重取终态owner、sync创建/准入/请求；拟同canonicalports/固定准入上下文与独立workload主体，policy verifier从daemon注入，原create_in与admit_inner同TX复用，不新增runtime→policy依赖。先真实RED再实施。
+
+S18五组迁移回归全部exit0（enterprise identity/object/publication/readback/writer；外部环境测试显式ignored，未冒充真实lane）。S19两个业务RED有效：缺独立冻结workload0记录，以及晚到callback把新generation状态改failed；锁场景第三测试先被旧Deferred升级SQLITE_BUSY失败截停，未达到timer断言，不夸async timer RED。已实施schema27 Local固定workload/developer角色、原同TX SessionCreate+Prompt校验及create_in/admit body/fixedowner，实际Cron接原asyncports；policy verifier仅由daemon注入，无新增runtime基础设施依赖。首次check缺std::sync::Arc限定已修，开发依赖policy加入原测试注入用途，Cargo.lock将更新后locked门禁验证。
+
+S19 Cron初11合同9pass/2fail：两个原持久history验收在独立新连接上调用旧session_snapshot时由views::commit强制writer校验而StaleLease。测试改用原S8已经实现的只读read_session(Canonical)端口，在同一个独立新连接验证相同消息/持久session断言，不重新获取writer或降低保护。两个有效业务RED、native暂时写锁后成功/timerGREEN及原未知工具no retry已通过。
+
+S17–S19 收口：当前schema27。补 source 总 batch 行数与 message revision 预算，避免小字节大量合法空行的分配放大；首次局部命令使用 --exact 配部分测试名导致0项运行，日志保留、不计RED，下一次使用完整测试名。一次查找不存在schema.sql已改用实际session_migration.sql。S18/S19中文实施报告已保存，完整九门禁与真实S3/PG尚待本批统一验收。
+
+S17新增有效row-budget RED：32769个合法空batch使原source成功返回32770个batch_ranges，修前真实失败证据 wave2-s17-request-row-budget-functional-red.log；原同TX source预算增加batch行数及总messages≤32768，修后request15/event12已GREEN，workload7继续运行。S20 compact仅只读预审，原settle在fence失败后写rejected/terminal为关键风险，native必须零晚写；计划/tmp/agent-rust-wave2-s20-compact-plan.md，尚未实施。
+
+S17–S19 reviewed合同request15/event12通过，workload6/7通过；foreign夹具改scope时原已有Local writer FK拒绝UPDATE，未达到准入断言，不计业务RED。夹具用保持FK的删除旧lease→修改scope→插入foreign lease构造真实foreign session，未关闭FK，前后lease/clock/hooks零写断言保持。
+
+S17–S19宽门禁进行中：runtime136/storage83/架构20已通过，未完整结束。S20仅/tmp草稿，没有生产更改；发现原RunKind由linkage推导，拟复核原request id/input防合法link跨run错配，避免影子kind。另发现原Canonical/Model snapshot_in仍缺总量/行预算，拟共享唯一sessions预算helper，保全量或明确拒绝。
+
+S17–S19首次完整九门禁8项通过、Clippy101：LOCAL_CRON_SUBJECT生产常量放在test module后触发items_after_test_module。移动到test module前，不新增lint允许。Rust588/42 executables/外部10ignored、Web36、daemon48已通过，原失败prefix wave2-s17-s19-audited-final全部保留；先Clippy完整scope预检，随后最终验收收口。
+
+Clippy原生产常量顺序已修，完整workspace/alltargets/allfeatures/-Dwarnings预检exit0（wave2-s17-s19-clippy-reviewed.log），无新增lint例外。最终九门禁改用wave2-s17-s19-reviewed-final全项重跑，生产源码重新冻结，原失败门禁完整保留。实际TLS S3/PG需在该完整结果后串行。S20仍仅/tmp，不冒充实施。
+
+
+S17–S19 implemented / locally verified：wave2-s17-s19-reviewed-final 九项全部exit0，588 Rust / 36 Web / 48真实daemon，42个test executables、10外部环境项明确ignored；runtime136/storage83、request15/event12/workload7合同全部通过。独立真实TLS MinIO四组业务与PostgreSQL发布协调六项全部exit0（wave2-s17-s19-reviewed-regression-s3.json / postgres.json，PG runner五步骤不等于五合同）。S17三请求端口实际模型/摘要/读回await；S18原events不可变来源及native缺stampCorrupt；S19原同TX后台准入、固定owner及Local独立workload。schema27，不新增第三方包。首轮Clippy常量放testmodule后失败、foreign夹具writerFK失败及0tests过滤错误均保留，不计功能RED；移动常量后完整九项重跑，未放宽lint/超时/栈/架构。全企业Wave2、Wave3–10仍未完成，enterprise_ready=false，未提交推送部署。继续S20 compact实际RED与原唯一helper迁移。
+
+S20首个旧路径RED运行被夹具漏导入TurnRepository编译错误截停（wave2-s20-compact-functional-red.log），不计功能RED；加正确trait import保留原commit_turn业务，新增原canonical只读大量合法空batch预算复现，共七项准备运行。S17–S19九门禁及真实S3/PG已全exit0，当前无验收后台命令；S20开始实际代码。
+
+S20七个有效业务RED全部复现（wave2-s20-compact-audited-functional-red.log）：foreign admit/fact/begin/settle均Ok，合法linkage移动到原Chat仍Ok NoGain，旧generation结算revision33→37，canonical读回32769合法空batch成功。首次夹具缺TurnRepository修后复现，不计编译失败为RED。抽取脚本在begin_compact单行签名处断言失败：已写ports/source、尚未写context及以后；修泛化闭括号插入策略，正在保留部分树首次check失败日志后继续剩余抽取，不重跑已写parts。
+
+S20抽取余下helpers/actual callers已应用。闭括号适配首次误命中Result<(),RuntimeError>的unit括号，begin_compact_scoped签名被格式器拒绝；精确修复实际函数声明，后续脚本限定arrow前寻找args闭括号。两次parser/wiring失败保留，不计业务RED；不得重跑已应用extract以覆新源码。
+
+S20恢复编译发现已有daemon字段为readback_store/event_store，草稿误用session_read_store/run_event_store；改回原同Arc端口，不添加第二字段。source预算聚合限前32769行：达到阈值明确拒绝，未超阈值时是完整集，避免百万坏空行全表CPU扫描且不截断合法历史。既有Source和Canonical共用唯一预算helper。新check继续，未放宽编译/test断言。
+
+S20 native夹具误用不存在SessionCommand::Clear导致编译失败（compact-native-green.log），修为原End{delete:false}生命周期命令；未修改生产lifecycle。审阅发现专用Compact run若begin另一个operation可能结算原run，增加独立业务RED；SourceCAS竞争改为普通Chat下两个implicit intent，避免用错误专用run操作伪造并发。
+
+S20第8项有效业务RED：专用Compact native run begin另一个operation真实返回Ok(())（wave2-s20-compact-operation-red.log），原唯一helper增加linkage operation绑定，无第二业务账本；正常Chat两implicit intent独立CAS合同避免混淆run领域。修后14context合同待运行。
+
+S20 native reviewed首轮10/14通过，四项夹具SQL误用events.kind（真实列event），修查询及故障trigger为event，不计这些夹具失败为业务RED。增加8context+exactOwner全部9方法共享四permit满额拒绝断言，不绕过实际预算。
+
+S20 corrected native十四合同全部exit0（wave2-s20-compact-native-corrected-green.log），包括8个有效功能RED对应修复、全scope/owner维度、专用operation绑定、正常Chat SourceCAS零terminal、原terminal故障回滚、清空后历史读取、撤销/过期/大source与300ms真实锁等待下25ms timer/取消awaiter后worker真实提交。完整门禁仍待运行。
+
+S20库runtime136/storage83和真实daemon五项compact合同全通过（libraries-reviewed.log / daemon-compact-reviewed.log）；同批新端口及exactOwner共享预算断言在storage测试内已过。S21开始原即时事件投影真实RED，schema27，预审/tmp/agent-rust-wave2-s21-event-projection-plan.md。S20/S21统一本地完整门禁收口，仍非全Wave2完成。
+
+S21两个有效RED（latest-event-functional-red.log）：foreign helper返回私密terminal与封存stamp，合法2MiB event返回成功。共用原decoder/scoped TX/SQL CASE字节预检、async latest端口及daemon实际caller已接线；首check闭包Err.into类型推断失败，显式Result<StoredEvent,RuntimeError>；委派父run使用真实字段run_fact_store（readback_store只SessionRead），无新增字段或第二事实。
+
+S21 reviewed check因daemon原imports显式列表缺新增Core TenantContext/CoordinationError截停；加真实显式imports（未放宽架构依赖）。追加精确child/原stamp相等、四scope+absent统一Forbidden、退休life零writer/clock及合法JSON错digest拒绝合同；最新事件current_thread真实连接锁timer/取消预算回收库合同。
+
+S21首native 16/17通过；退休life后的夹具试改events被原stale fact owner保护拒绝，未到decoder断言；改为合法ViewStamp JSON更改snapshot_revision但保留旧digest，验证原stamp SHA拒绝，不把events payload无digest误称已验证。S20审阅又发现begin直接取无界run_snapshots、settle不再复核frozen只读政策；新增两真实旧路径RED。
+
+S20第9项有效业务RED：原无冻结授权legacy兼容run的合法>1MiB冻结snapshot，经native begin真实返回Ok（compact-frozen-reviewed-functional-red.log）。原begin改复用requests::frozen_in唯一SQL长度+JSONdecoder，缺snapshot仍保持legacy兼容；native授权fence check_snapshot_in取原snapshot前增加SQL长度预检，继续核原SHA。readonly改动本就被原SHA拒绝Forbidden，不新增第二政策状态机，不计为RED。
+
+S20/S21 context16/event17已全GREEN（context-event-reviewed-green.log）。Clippy预检截停于原请求source helper放testmodule后及format!未内联变量；移动helper到测试模块前、改直接格式变量，无lint例外。latest child SQL CASE先字节预算，再json_valid，再json_extract；坏/巨大候选明确拒绝，不解析无界JSON或跳过损坏候选返回更旧事件。追加该合同后统一宽门禁。
+
+S20/S21 implemented，完整本地验证进行中：原上下文/compact八async端口与exactOwner端口、即时事件投影async端口已接真实caller，scope/fixedOwner/CAS/原stamp/预算在唯一原事务复核。context16/event17局部通过，runtime136/storage83及五项真实daemon compact通过；新增child SQL预算和锁合同在统一门禁中验证。schema27，无新第三方依赖，未提交推送部署；全业务async/nativePG/租户键/PGwriter/auditquota/offline与完整Wave2–10未完成。详见wave2-s20-context-report.md及wave2-s21-event-projection-report.md。
+
+S20/S21首次完整门禁8/9通过，仅workspace tests101：真实daemon central_async_authorization_storage_fault... ACP stdout EOF，47/48实测daemon通过（另2外部ignored）。故障夹具principals仍存在、1session/0run、无web诊断，故障发生于ACP启动/初始化阶段而非授权故障注入之后。原helper丢stderr到sink无法诊断；追加64KiB有界stderr及method/真实ExitStatus，仍持续drain，不改合同断言、timeout、栈或test并行度；独立复核该合同，再处理根因。原8项成功不覆盖失败test，总验收未完成。
+
+ACP有界诊断版本独立重跑原central_async_authorization_storage_fault... exit0（acp-failure-diagnostic.log），不能据此称根因已修；原并发完整daemon合同正在同样原配置重跑（daemon-bounded-diagnostic.log），未设置test_threads/额外TOKIO_WORKER_THREADS/栈/超时。首次失败完整证据保留，当前无九门禁最终合格声明。
+
+ACP原并发复核完成：48 passed / 0 failed / 2 ignored（50总项），daemon-bounded-diagnostic.log exit0；首次EOF仍未定位，不称已修根因。S20新增第10个有效业务RED：source_json合法JSON改为不同lifetime后read_compaction_result实际返回Ok(Some(0))，证据compact-result-identity-functional-red.log。原唯一事务增加JSON源lifetime/起点/整数范围与committed+1/no_gain原generation一致性；健康revision冲突及summary_failed以Conflict拒绝重放，损坏以Corrupt拒绝。新增三项读回合同正在验证。首次改动闭包Err.into推断失败，显式返回Result<ProjectionGeneration, RuntimeError>修复，编译失败日志保留、不计业务RED。全Wave2–10仍未完成。
+
+S20新增来源身份修复后的context19/event18均通过（result-corrected-green.log），原首次closure类型推断编译失败日志保留。wave2-s20-s21-reviewed-final完整九项门禁已启动；生产源码冻结，S22只/tmp预审与合同草稿，不称已实施。
+
+最终九门禁仍运行：workspace中runtime136/storage84/context19/event18及真实daemon48均过；原central_async_authorization_storage_fault合同此次原并发也通过，runtime suite 48 passed/2ignored（36.57s）。首次ACP EOF仍无根因，不因后续过而删除失败证据；真实S3/PG继续待当前完整门禁结束后串行。
+
+S20/S21最终本地九门禁全部exit0（wave2-s20-s21-reviewed-final-gates.json）：614 Rust /36 Web，43执行体，10外部环境项ignored；context19/event18/runtime136/storage84/daemon48已计入。真实TLS MinIO四组业务回归已启动（reviewed-regression），PG发布六项合同待其结束后串行；生产源码仍冻结。首次九门禁tests101/ACP EOF与初闭包类型推断失败完整保留，后续通过不解释为已定位修复根因。
+
+2026-10-09 S20/S21 implemented / locally verified：wave2-s20-s21-reviewed-final 九项全部exit0，614 Rust /36 Web /48实测daemon，43测试执行体、10外部环境项明确ignored；runtime136/storage84/context19/event18全部通过。独立真实TLS S3四组业务及PostgreSQL发布协调六项全部exit0（wave2-s20-s21-reviewed-regression-s3.json / postgres.json），自己的MinIO容器与PG隔离DB已清理。第10项有效compact来源身份RED已修，同原事务核JSON lifetime/起点/结果generation，正常revision和摘要失败返回Conflict，损坏Corrupt。首次九门禁tests101/ACP初始化EOF保留；独立与原并发daemon复核、最终完整门禁均未复现，根因未定位，64KiB有界诊断并持续drain保留，未修改超时/栈/并行度。schema27，无新第三方包。全企业Wave2、Wave3–10仍未完成，enterprise_ready=false；未提交推送部署。继续S22实际Live事件mutation，再S23发现端口，统一本批验收。
+
+S22两个有效业务RED已复现（live-events-functional-red.log）：foreign旧compatibility append以及无冻结授权旧run的late callback都Ok(EventSeq(2))。已有frozen SHA的native owner保护不能称被绕过；复现明确授权记录0、合法同步更新run及head generation。原helper保留唯一events/interactions/stamp/outbox事务；native live新async入口与五个实际chat caller固定准入env、shared4budget、状态/allowlist/object/字节预算已接线，foreground初始历史改await原execution_context。check workspace/alltargets/allfeatures已exit0。新增typed scope/owner/终态/预算/rollback/两Connection seq及取消awaiter仍实际worker提交合同待GREEN，尚未最终验收；S23继续待实施。extract脚本已应用，不得重跑覆盖新源码。
+
+S22首次GREEN命令错误：-p agent-storage搭配根package的--test run_event_contract，Cargo拒绝目标（未执行任何合同，不计业务失败或RED）。改为两个真实package命令串行：storage --lib，再根run_event_contract；保留原错误日志，不改测试断言。
+
+S22 storage首轮84/85通过，取消awaiter新合同失败不是timer/预算失效：原Fixture.admit默认Queue，worker正确以Conflict拒绝queued事件，所以没有提交。新live合同明确try_start_queued先进入Running，保留原timer/permit/提交一次断言，不改生产guard、不放宽status；三个新native事件夹具及并发夹具同样真实start，原已有18只读夹具保持不改。并发cursor用start后的真实last_seq，不能用准入时旧seq。最初late-owner旧路径RED是Queued兼容run，后续需Running原helper再复现，避免夸可执行callback证据。
+
+S22纠正Running夹具后storage85全过（storage-corrected-green.log），25ms timer/四permit占有及worker取消后单次提交原断言通过。原callback helper在真正Running且head/run generation一致更新后再次真实复现成功EventSeq(3)（live-running-owner-functional-red.log），不是Queued不合法状态的混合证明；恢复测试调用线上实际native append_run_live_event固定env，预期不变，原legacy runid helper保留维护语义。完整23事件合同继续GREEN验收；本批尚未九门禁和真实环境验收。
+
+S22局部verified：storage85/event23全部通过，含满额四permit、真实连接锁timer/awaiter取消后worker真实提交及interaction/event/stamp/outbox故障rollback、两独立连接seq/stamp/outbox。真实daemon48回归正在运行（daemon-reviewed-local.log）。报告wave2-s22-live-events-report.md，尚未最终九门禁/真实环境收口，S23接下来同批迁移。
+
+S23首轮5个有效业务RED：foreign publish/discovered/read/cancel真实Ok，合法>1MiB保存snapshot执行许可真实Ok(true)（discovery-functional-red.log）。第6历史夹具先End仍Running被原领域拒绝，未到历史读回，不计功能RED；修为原finish canonical Completed再End，然后独立复现历史读取。S22真实daemon48全部通过（2外部S3ignored），新批九门禁待S23合并收口。
+
+S23 runtime/storage实际接线check已过。RunDiscoveryRepository四端口共享4permit；原discovery事务复用完整scope/fixedowner/writer/frozen授权，历史仅永久归属与receipt校验。daemon run.discovery和/tools已await，取消只捕获一次原owner贯穿queued/running事务，ToolRegistry发现许可await且副作用前一次冻结descriptor供原批次和输出预算使用。新增合同首轮8/10通过：两个Connection校验stamp列误用event_seq（真实seq），夹具修正；保存receipt错误catalog当前回Conflict，改唯一read helper将保存的generation冲突映射Corrupt，caller generation冲突仍Conflict；失败日志保留，不把夹具失败计业务RED。追加原授权撤销/租约过期/退休重启/累计入库预算及四真实锁合同，等待局部GREEN，再同批S22/S23完整门禁与真实环境验收。schema27，无新第三方依赖，全Wave2–10未完成。
+
+S23 corrected14发现合同全部通过（discovery-reviewed-corrected-green.log）。stamp真实seq夹具已修，前次12/13仍为已编译旧查询执行体，失败证据保留；不是生产修复。保存catalog冲突已归Corrupt，合法caller冲突保留Conflict；进一步将健康已取消执行许可明确Conflict，并将129行预算夹具改每条真实匹配operation/SHA的合法receipt，不以多处损坏混淆预算证明，统一完整门禁验证最终源。新增native搜索worker取消与四实际Connection锁/awaiter取消合同；storage/runtime库正在运行。S22/S23完整九门禁和真实S3/PG仍待收口，Wave2–10未完成。
+
+S23库全部通过（wave2-s23-libraries-reviewed-green.log）：runtime137/storage86，包括新增native搜索worker取消、共享四permit满额拒绝、四端口真实Connection锁25ms timer与awaiter取消后原worker恰好完成一次。S22/S23统一本地九门禁已启动wave2-s22-s23-reviewed-final；生产源码冻结，后续发布scope只在/tmp预审不修改生产。原六发现RED已修，14root发现合同局部通过；最终全量仍运行，真实S3/PG待九门禁结束后串行。
+
+S22/S23首轮完整门禁8/9通过（wave2-s22-s23-reviewed-final）：636 Rust/44执行体/10外部ignored、36 Web、MSRV/release/deny/diff全部通过，仅Clippy101：新发现合同5处对Copy的RepositoryError调用expected.clone()。去掉5处多余clone，不改断言/超时/栈/并行度、不加lint例外；首次失败完整保留，不计功能RED。修正后的完整九门禁wave2-s22-s23-reviewed-corrected-final重新验收，生产源码保持不变，真实S3/PG待完成后串行。
+
+S22/S23修正后的完整九门禁wave2-s22-s23-reviewed-corrected-final全部exit0：636 Rust/36 Web/48实测daemon，44执行体，10外部ignored；runtime137/storage86/context19/discovery14/event23全部通过。首次8/9仅Clippy多余Copy.clone失败的证据保留，无lint例外、无测试/栈/并发/超时放宽。真实TLS S3四组业务回归已启动wave2-s22-s23-reviewed-regression；PG发布六项待S3后串行。生产源码仍冻结，全Wave2–10未完成。
+
+2026-10-09 S22/S23 已实现并完成本地验收：wave2-s22-s23-reviewed-corrected-final九项全部exit0，636 Rust/36 Web/48实测daemon，44执行体、10外部ignored；runtime137/storage86/context19/discovery14/event23全部通过。真实TLS S3四组业务及PostgreSQL发布六项全部exit0（wave2-s22-s23-reviewed-regression-s3.json / postgres.json）；自己的MinIO容器与PG独立DB已清理。原实时事件caller固定准入env、发现四端口及取消一次捕获owner已接actualawait；原事实/SQL/同TX不复制。首次九门禁Clippy5处Copy.clone失败及发现夹具错误完整留，不计业务RED，不放宽lint/断言/超时/栈/并行度。schema27，无新第三方包，全Wave2/Wave3–10仍未完成，enterprise_ready=false；未提交推送部署。后续S24发布完整key先SQL/列绑定与预算实际合同，预审与草稿在/tmp，仅未执行时不计RED。
+
+S24已进入实际合同：原SQLite发布8项通过，新增两个功能RED真实失败（wave2-s24-publication-sqlite-functional-red.log）：六维组织/租户/项目/agent/session/lifetime外域租约的ACK和inbox共12次均先返回Corrupt而非Forbidden；仅改保存SQL域列、原JSON和SHA合法，六维read_publications均Ok(1)返回原域envelope。全部在隔离fixture显式移除immutable触发器注入保存事实损坏，不声称正常业务写可以绕过触发器。真实PG原六项+新两项合同已启动wave2-s24-publication-functional-red，待其完成再修改原两个adapter与唯一decoder。S22/S23此前636/九门禁/真实S3PG全部验收通过，当前新增RED不覆盖前批事实，也不计全Wave2完成。
+
+S24真实PG原六项+新两项功能RED复现（publication-functional-red-postgres.log）：12个六维ACK/inbox均Corrupt，SQL组织/tenant/project/agent/session/life列不同但JSON+SHA合法时六维均Ok(1)。两后端共有四个有效功能RED合同（按独立合同计，维度次数不夸成24漏洞）。原record已改WHERE完整KEY+event_id，原claim/ACK及claim_owner查询同key，唯一decode_record增加只读OutboxRowBinding核原SQL列与JSON；未复制业务SQL状态机，无新事实表/schema/deps。SQL CASE抑制超4MiB payload、错误长度id/digest与超大身份列；SQLite按行原decoder，不先collect所有raw。check workspace全targets/features通过；SQLite发布10合同全部通过（sqlite-reviewed-green.log），真实PG八合同正在GREEN验证。pending_delivery_keys元数据仍需预算复核，不声称本批全部方法已预算闭合。
+
+S24 scoped/row-binding修复后真实PG八合同全通过（publication-reviewed-green-postgres.log），包含原六+两新增。另实际SQLite pending_delivery_keys预算RED：合法UTF8的>1MiB保存session_key返回Ok(1)（pending-budget-sqlite-functional-red.log）；测试首case即失败，尚未执行lifetime，不夸成两个RED。原READ/CLAIM codec虽已SQL预算，pending_keys仍裸字段，继续相同实际PG合同，然后改原元数据投影；并非整批最终验收完成。
+
+S24原发布完整key/保存列binding与SQL预算已实施，最终局部SQLite12/真实PG10全部通过（publication-sqlite-final-corrected-green.log / publication-final-green-postgres.log），自己的独立DB已删。三类问题分别在两后端六独立合同有效RED；新增run/seq夹具首次FK拒绝未达decoder，改真实events引用目标并保留FK，失败不计RED。大合法JSON拒绝与零claim/inbox/ACK/clock为回归，旧decoder后置预算已有拒绝，不伪称RED/独立内存测试。schema27/PG发布schema1不变，无新依赖。报告wave2-s24-publication-report.md；完整九门禁即将启动，生产冻结，后续Hook仅/tmp预审，全Wave2–10仍未完成。
+
+2026-10-09 S24已实现并本地验收：wave2-s24-reviewed-final九项全exit0，640 Rust/36 Web/48实测daemon，44执行体、14外部ignored；SQLite12与真实PG10项发布合同通过。真实TLS S3四组业务与PG发布10项回归全部通过（wave2-s24-reviewed-regression-s3.json / postgres.json），自己的容器与独立DB已清理。原完整key先SQL、保存列与唯一JSON decoder绑定、字段预算已接实际两adapter，无新schema/deps。全业务PG/其余async与完整Wave2–10仍欠，enterprise_ready=false；未提交推送部署。继续S25原Hook观察读回/待发布/ACK实际合同，执行actor取消仍单独欠账。
+
+S25原Hook观察三个async端口已实施，真实RPC、/hooks、startup积压查询与lifecycle ACK已接await；原Connection/helper/四permit，无新schema/deps。六项原路径有效RED已复现，原只读clock合同已通过不能算RED（views::commit无无条件clock写，预审推断已纠正）。14项局部观察合同全过；退休夹具Clear不存在与误用End(false)失败留，不计RED。原JSON有界身份JOIN原scope，过滤在LIMIT64前；保存outcome预算/原operation及ownerSQL绑定，ACK先scope。storagecurrent_thread/共享预算与实际observer进程daemon合同正在验证，完整九门禁和真实环境回归待；Hook claim/settle及受管取消仍欠，完整Wave2–10未完成。
+
+2026-10-09 工作流变更：用户明确要求“先开发完，再测试，再修复”，停止逐切片 RED/GREEN/九门禁/真实环境回归。S25 的最后已验源已有九项全 exit0、656 Rust/36 Web/49实际daemon、45执行体、14外部ignored，真实TLS S3四组通过；本批PG最终回归未启动，不能称完整双lane验收。S26 continuation三端口、S27 Hook claim/settle/快照/interaction受管执行与关闭drain、S28记忆读取/写入/曝光/反馈/摄入及实际RPC/上下文/工具/Cron/维护接线已开发，均尚未编译和测试。cargo fmt仅格式化成功，不是行为验证。当前树不是656项已验源；集中验证安排在开发阶段完成后。完整Wave2–10仍未完成，enterprise_ready=false，schema27，未提交/推送/部署。
+
+开发追加 S29–S31（全部未编译、未测试）：S29资源八端口接RPC、/resources、后台执行/状态/日志工具和取消子树清理，原资源状态机/游标/进程身份唯一；S30交互四端口接read/list/respond/stamp，原Broker只交付等待者，回答处理注册原daemon协调器effect_tasks句柄集合，客户端Drop不能detach已接受的claim，shutdown统一join效果任务；S31将原DelegationRequest/Record移至core，八端口接实际spawn/read/list/wait/cancel/result reservation/RPC/工具/启动结束路径。child session复用原sessions::create_in与原授权继承；原继承目前仅Local，native明确拒绝NonLocal准入，不能称完整企业委派完成。三领域复用原Connection/four-permit/原事务，不新增业务事实副本。只进行开发格式化，未执行测试、cargo check、Clippy或九门禁，集中验证留待开发完成。完整Wave2–10仍未完成，enterprise_ready=false。
+
+开发追加 S32–S36（尚未编译、未测试）：S32队列五端口接queue RPC、重启32条稳定游标恢复、订阅/取消/关闭终态读取；旧同步SDK队列和request查找共用同一scoped helper。父委派冻结cwd、request_approval、只读工具和预算复核，child也消费原1024队列总预算。S33会话控制三端口接运行装配、trace元数据、偏好选择和旧transcript导入，选择/导入在原事务核lifetime；全域偏好键和旧文件导入尚仅Local。S34维护四端口、计划管理四端口接doctor、启动/关闭恢复、GC、人工核验、RPC/斜线计划和旧计划导入，重启恢复及writer统计按SQL完整scope过滤；原Hook恢复校验绑定并保存unknown。S35观察三端口和旧记忆导入一端口接canonical诊断、context摘要、legacy artifact读取及旧文件导入；canonical批次digest/长度复用唯一decoder，历史artifact只核永久归属，无需writer。S36生命周期Hook由至多一个受管发布批次定时排空，存储失败保留待发而非ACK；Cron通过daemon弱引用任务委派器接固定执行HookScope及终态观察，不新建结果状态；idle探针受管，不在listener分支等待数据库。上述都是源码实施，不是并发或故障合同通过的证据。只有cargo fmt开发格式化；未执行cargo check/test/Clippy或门禁。当前schema27，全量PG事实和完整Wave2–10仍欠，enterprise_ready=false。
+
+开发追加 S37–S38（尚未编译、未测试）：启动采用async bootstrap，同一事实源读取session元数据/偏好/旧历史并由唯一assemble_prepared构建daemon。native执行新的with_native_execution不携带旧ControlRepository，上下文、记忆、Provider捕获、Exec冻结配置均从async领域端口与固定owner读取；旧同步接口仅留SDK兼容，DaemonState生产字段已移除同步聚合。工厂目前仍接受具体RunStore，全量PG装配尚欠。静态复核同时补Hook恢复身份字段SQL预算、writer启用对损坏Hook JSON的拒绝及context摘要先永久归属核验。仅开发格式化，不运行编译/测试/门禁。
+
+开发追加 S39（尚未编译、未测试）：新PgCanonicalStore复用原PG发布连接/driver，独立canonical schema v1（现有coordination仍v1）；已写现有业务事实及writer/audit/quota的完整四维域DDL、永久lifetime外键、scope RLS、不可变事实和scope版本时钟。native writer读/获取/续租/释放和绑定句柄维护已实现，mutation在原TX核固定proof并提交前复核数据库时钟。PG会话lifecycle Create/End/Close/Fork、元数据/偏好/Local旧历史导入与实际管理CLI已接，原Hook lifecycle publication同事务。PG事件append/read/page、版本封存和canonical outbox在原TX实现；NOTIFY仅唤醒。完整scope身份读取/冻结授权检验、初始化域CLI、审计hash-chain读取/幂等append及配额账户配置/预占/结算亦为真实SQL实现。当前PG runtime尚未可装配：RunExecution等其余PG端口、远程TLS、完整离线迁移仍欠，不称全业务PG或完整Wave2完成。依赖仅新增已在lock中的serde/sha2直依赖；cargo fmt开发格式化成功，未cargo check/test/Clippy/真实PG或门禁。完整Wave3–10尚未进入，enterprise_ready=false。
+
+开发追加 S40（尚未编译、未测试）：PG RunExecution五方法已写真实普通/独立workload准入、固定owner和冻结授权、请求/计划receipt幂等、scope队列预算、稳定run计数、队列启动及TurnCommit事务。工具未确认/Provider未确认/已启动副作用取消共用core normalize_run_terminal_status（原SQLite caller也调用同函数）；开放tool exchange结算unknown并闭合原transcript，Provider attempt归unknown，usage/planCAS/终态/委派result原事实同TX。新增PG队列五端口、完整域游标读取和元数据查询，实际控制CLI沿原scope仍enterprise_ready=false。PG plans原document/version/identity/decision helper已写，仍欠完整计划端口、原context/compact/工具/请求等PG适配与Daemon PG装配、离线迁移。静态读取发现grant提取中残留tx变量、队列恢复limit原端口为usize/请求lookup返回RunRecord，已按原声明修正；没有运行编译或测试，不把静态修复算验证证据。
+
+开发追加 S41（尚未编译、未测试）：PG canonical/model/omitted会话读回及列表由同一REPEATABLE READ事务构建，包括原history/队列/交互/终态/计划/上下文与固定scope；canonical message IDs移入core由SQLite/PG共用。PG Hook观察三端口与执行四端口真实实现，claim保存原running并ACK原publication，settle保留unknown不重播；Hook合法性移至core共用。历史Hook只核永久归属，运行Hook核固定授权及writer，ownerless生命周期核当前head proof，已删除head只可协调，不能执行旧run。静态复核发现SessionSnapshot.prefix_digest原为按batch raw拼接哈希，PG改回同语义；transcript/Hook添加原rowid等价的storage_row_id稳定顺序，lifecycle退休proof退出续租集。原RunQueue接口签名已按usize/RunRecord修正。只有cargo fmt，未执行cargo check/test/Clippy/门禁/数据库。离线工具和其余PG端口、PG daemon装配仍欠，全Wave2–10未完成。
+
+### S42–S43 开发记录（尚未验证）
+
+按用户“先按规划开发，完成后测试再修复”继续：新增 PostgreSQL RunFact（4）、Provider attempt（4）、interaction（4）、RunTurn（6）、discovery/cancellation（4）、RunTool（6）、对象 artifact 发布（3）的真实领域实现。身份、永久 lifetime、原 SQL 绑定和字段预算先于正文，mutation 携带已绑定 writer proof 并在提交前复核数据库时钟；开始/终态事件与 outbox 同事务，网络对象 I/O 在事务外。
+
+两种后端共用 Provider attempt 身份解码、终态调用身份、实时事件许可集合、interaction 正文规则、计划 stage/摘要/Markdown 验证、冻结目录发现许可、artifact receipt/completion 验证。原 no-follow 文件发布实现移动到 agent-artifact 共用，SQLite 原 API 通过重导出保留；PG 的宿主文件发布必须显式配置且只允许 Local，四 permit 包含取消后仍在执行的文件 worker。PG 工具收据与对象 published 同一原事务，没有第二套工具终态。
+
+补了当前角色与冻结授权角色的比较；canonical DDL 添加 JSON 正文约束、原事件不可改写、published stamp 保护、Hook/对象发布单调标记及稳定 Provider/discovery 插入序号。DDL未运行。仅 cargo fmt 格式化成功，不代表编译或行为正确，S25旧验收不覆盖本树。请求/context/compact、记忆、资源、委派、管理/维护、runtime装配、远程TLS及离线迁移等仍待开发；完整Wave2及Wave3–10均未完成。
+
+### 2026-10-09 敏捷续开发
+
+已阅读提示词、基线/架构/进度及源码改动，补 PG 后台资源八端口与两后端共享规则，修复前批遗留导入/借用/类型/Arc接线编译问题。局部 check 通过。第一次 SQLite 局部测试编译发现 flywheel trait缺导入和新增夹具误用不存在的in_memory，均已修正，保留为编译失败而非业务RED。首轮 PG 真实资源合同通过，最终源码局部测试仍在收尾；没有跑完整测试或门禁。详见 docs/enterprise/wave2-resource-continuation-report.md。
+
+最终结果：agent-daemon + agent-storage-postgres 局部 locked/offline check exit0，无告警；core资源3、SQLite资源2、真实PostgreSQL资源1全部通过。真实PG18.6合同包含事件插入故障下资源/时钟/events/stamp/outbox回滚，重建连接读回永久事实；未运行实际后台进程，不称完整远程worker验收。自己的临时测试数据库已删除。开发格式化与diff检查通过，未跑全量测试/九门禁；未提交/推送/部署。资源端口切片完成，完整PG runtime与Wave2–10仍未完成。
+
+### 2026-10-09 计划、诊断、续跑和装配
+
+PG PlanControl4/RuntimeObservation3/HookContinuation3已实现，新增文件与原lib模块真实接线；共用原admit_in/commit_terminal_in及唯一transcript/关系/计划receipt decoder。计划丢弃最终write/receipt之后seal，snapshot/stamp/outbox一并提交。DaemonRepositories为同一adapter构造26端口，实际Local启动已使用；兼容SDK委托同一工厂。首次装配check发现SessionRead不提供metadata，两处改为原SessionControl端口；修复后生产最终locked/offline check exit0无告警。只有局部编译、格式化和diff检查，本轮未执行测试/实库/完整门禁。完整PG runtime与Wave2–10未完成。详见docs/enterprise/wave2-plan-observation-continuation-report.md。
+
+最终test-support局部cargo check exit0；保留两组兼容测试字段/资源helper dead_code告警。最终生产check无告警，git diff --check通过。本轮没有运行测试或真实数据库合同。
+
+
+### 2026-10-09 PG 记忆、委派、维护与本机启动
+
+补齐同源 PG 记忆/维护/委派领域端口，并将 daemon/Cron/导入/artifact 接到完整26端口装配；默认SQLite保留，postgres-local显式Unix socket与writer、空Local域human和独立workload初始化，PG文件目录绑定database/schema。canonical迁移v2实际执行，遗忘不破坏历史反馈幂等；共享摘录/凭据过滤和授权conditions。恢复、核验及文件GC使用原事实事务，GC取消后仍受管并排空。实库冒烟发现并修正resource session_id关联错误、同owner过期预留、异步Provider预算遗漏；实际启动发现PG UUID与trace文件校验不兼容，保留32hex兼容并接受严格UUID。局部生产编译和test-support内部测试源码编译通过，真实PG18.6合同1项通过。真实binary双后端启动/假模型chat/重启去重通过，每个后端仅调用模型一次，PG未生成SQLite事实库；未跑完整测试或门禁，完整Wave2–10未完成。详见docs/enterprise/wave2-native-runtime-report.md。
+
+最终补正：真实PG chat暴露执行future与事件消费者等待同一连接的闭环；改为join并行驱动，已接收事件完成及剩余队列排空后才提交终态，未引入第二执行状态。最新binary的两个后端冒烟均exit0，使用本机假模型及独立临时工作区。
+# 本批收尾验证
+
+PostgreSQL schema v2 下资源生命周期/日志/作用域/事务回滚局部合同通过。自行创建的临时 PostgreSQL 数据库已删除；双后端冒烟 daemon 和临时工作区已清理。本轮未执行全量测试及完整门禁。
+
+### 持续开发：TLS与配额
+
+已实现PgConnectionConfig严格文件配置、CA/hostname校验TLS、可选mTLS、受保护password/key文件、超时和断连零重放；connect_local保留，PgCanonicalStore共用原迁移，daemon新增postgres装配。TLS局部生产cargo check通过（/tmp/agent-wave2-tls-check.log）。新增SQLite schema28审计hash-chain/配额和同源读写端口；两后端runs额度原事务预占/终态结算，Local无配置继续原体验；RPC/CLI audit/quota接线。ledger局部编译首次发现MutexGuard借用与新Ledger错误match缺口，正在修复，尚未称合同通过。完整Wave1/2–10仍未完成。
+
+### 2026-10-10 持续开发：TLS、账本与离线迁移
+
+已实现远程PG严格CA/hostname TLS及可选mTLS配置（真实远程握手待验收）；SQLite schema28和PG原准入事务的runs配额预占/终态结算、审计hash-chain、audit/quota RPC与CLI均已接线，装配29个领域端口。同一ledger合同SQLite与真实PostgreSQL18.6分别通过；第一次include-ignored因未设置测试DB环境变量启动失败，不计行为失败。
+
+全canonical离线工具prepare/dry-run/copy/verify/switch/rollback已接真实PG管理入口，保留原源库、artifact store_id、backup证据和daemon切换marker。自有fixture 68表52行（artifact0）完成真实dry-run、提交、逐表逐行对账、切换与回滚；回滚后正确格式PG迟到mutation返回Conflict。首轮deferred FK触发器未清空导致ALTER拒绝，已先SET CONSTRAINTS ALL IMMEDIATE修复；回滚等待栅栏前固定RR快照风险已改READ COMMITTED。上述局部没有证明大artifact、远程PG、切换后真实daemon和迁移故障矩阵全部通过。
+
+当前正在接企业RuntimeIdentity受保护启动配置与全daemon scope路由，并修复PG普通policy/role发布错误撤销在途run的语义；尚待必要编译与局部身份验证。完整Wave1/2仍部分，Wave3–10仍待实现，enterprise_ready=false。未全量测试/门禁，未提交/推送/部署。
+
+### 2026-10-10 企业域与身份治理续开发
+
+当前 SQLite schema29、PG canonical v3、daemon 同源30领域端口。真实代码已接企业 RuntimeIdentity、会话事务授权、身份注册/角色/策略/撤销 RPC+CLI、冻结策略与双人审批。双后端 identity_governance_contract 两项通过（含撤销旧票、幂等与越域拒绝），PG ordinary_publish_preserves_run_but_explicit_revocation_fences 一项实库通过。生产 daemon/storage-postgres/cli 局部 check 和真实 binary build 成功。双租户 daemon 冒烟首次因夹具会话名不符合原格式被拒，已修夹具待重跑。Wave3 WebSocket128帧/8MiB/64并发、connect/write/idle deadline 和慢消费 detach 已接真实入口，局部check通过；完整慢消费/断线验收未运行。Wave1/2完整验收与Wave3剩余身份/directory/共享限额仍欠，Wave4–10尚待实现，enterprise_ready=false。未提交、推送或部署。
+
+企业scope真实binary冒烟最终通过：两个租户同一PG schema、同project/agent/session/request ID，各自run-1，重启幂等，模型总2calls，quota各消费1，审计scope一致，未创建SQLite事实库。夹具首次错误已修并保留诊断记录。证据见docs/enterprise/evidence/20261010/agent-wave1-scope-smoke.json。Wave3已新增jsonwebtoken9.3.1有限JWKS验签、可信scope/subject/epoch transport envelope、Gateway/daemon双端接线，正在局部编译；尚无OIDC行为验收。HTTP审批改为pending/detach，禁止因HTTP不能交互而伪造拒绝。新增依赖后--locked拒绝未更新依赖边，正在一次offline更新lock，不算行为测试失败。
+
+### 2026-10-10 Wave3 Access Plane实际接线
+
+新增jsonwebtoken9.3.1（固定lock，Rust1.88），有限JWKS缓存（32keys/128KiB/TTL/5秒刷新冷却）、HTTPS/DNS pin/禁代理与重定向、RS256/ES256/EdDSA允许集、issuer/audience/exp/nbf/iat/短期access用途及可信scope/subject/epoch校验。BearerCredential Debug脱敏，不进入params或canonical facts；Gateway/daemon独立验签，原身份/角色/策略事务作最终授权。SQLite schema30/PG canonical4新增session_directory和Access租约/计数，daemon同源31端口。Directory创建复用原session create helper并同TX审计；路由不可变，真实HTTP /enterprise/sessions、/enterprise/rpc只公开opaque session_id。租户/主体/endpoint三层数据库时钟固定窗口和并发预算，PG同tenant advisory lock；请求先获取共享lease，流body持有lease，Drop异步release、过期收敛，不生成第二run。HTTP30s首响应、240s总流与15s idle预算，WS256本机连接、64并发、128帧/8MiB以及240s企业连接预算。上一批局部cargo check通过；最新WS目录接线、共享合同与OIDC mock合同正在必要编译/验证。仍欠登录nonce/state/PKCE持久化、APIkey Argon2id/服务凭据、共享限额配置/完整用量成本、全网关多runtime路由；Wave3未完成，Wave4–10尚待实施，enterprise_ready=false。
+
+### 2026-10-10 Wave3 访问面与凭据纵向切片
+
+SQLite schema31 / PG canonical v5，daemon 同后端装配32领域端口。API key仅落Argon2id PHC，首发行返回明文，同operation重读不再返回；撤销同事务递增主体epoch。Gateway使用固定服务主体+Gateway角色的独立凭据证明入口channel，外部params不能决定授权属性。
+
+局部验证：OIDC最小JWKS签名/域/audience/expiry/未知kid合同1项通过；Access+凭据共享合同SQLite/真实PG各1项通过，含24连接竞争只16个准入、凭据幂等及撤销。真实binary HTTP→UDS→PG冒烟通过：opaque目录幂等、用户chat、跨租户401、假模型只调用1次。先前fixture audit limit128超过64，改fixture后通过；不能将此前失败记为通过。证据在evidence/20261010。
+
+仍在开发：进程内token bucket和目录current lifetime额外复核已写入，尚待本切片编译；登录state/nonce/PKCE、真正轮转/stale矩阵、multi-endpoint路由及细粒度费用账本未完成。完整套件、Clippy、release、MSRV和真实远程OIDC/集群验收未运行，enterprise_ready=false。
+
+### 2026-10-10 登录与访问面续开发
+
+新增SQLite schema32、PG v6一次性登录事务，Gateway /auth/login 与 /auth/callback 接原daemon端口。S256 PKCE、HttpOnly/SameSite/Secure cookie、issuer/state/nonce/ID-token subject/audience/azp 检验已实现；消费CAS发生在授权码兑换之前，未知兑换结果不重放。32端口保持同后端，OAuth不是第二业务session。OpenAPI3.1静态导出已接/openapi.json。
+
+真实HTTP授权码登录冒烟通过：错误state不消费，合法回调返回短期token（no-store），回调重放401、token端点只调用1次，原opaque session可读。双后端一次性消费/错误verifier/重放拒绝合同各1项通过。身份合同含nonce/主体绑定1项通过，第二把真实Ed25519钥匙轮转、刷新冷却和过期stale拒绝合同1项通过；TTL测试调整私有缓存时钟，未实际等待30秒。
+
+进程内三层token bucket和current lifetime保护已写入且生产编译过；targeted bucket unit尚待执行。持久目录多端点路由正在接线，受保护端点map、运行实例endpoint+scope校验、按原operation查已发布目录已写；最新路由树尚待编译/双端点真实冒烟。细粒度input/output/cache/tool/sandbox费用账本和分层预算尚未完成，Wave3仍进行中。credential.status已受统一RPC准入核验，未发现原先假设的独立JWT绕过；显式重复查询已删除。
+
+- 2026-10-10 续开发：修JSON-RPC result:null存在性，局部protocol合同1项pass；真实双端点HTTP冒烟越过directory/chat后在restart run.read403，定位平铺DTO投影，修复待重跑。费用policy、双backend管理员端口、前向33/v7迁移、准入/Provider/tool/resource账本和冻结预算限额正在接线；最新必要check运行，未标完成。下一项：补局部双backend费用合同、实库迁移/双端点smoke，再完成Wave3后继续Wave4–10。
+- 双backend billing_contract5共2项通过（实PG两连接竞争）；schema33/PGv7实库迁移验证。发现原四permit背压应由合同承认，未放宽并发。继续细分共享endpoint lease（34/v8前向迁移）、重建真实binary并跑双端点重启+登录+费用链路，随后补工具/resource局部预算合同和多scope入口路由。
+- 真实双端点Gateway重启+PKCE登录+费用HTTP组合冒烟pass；max_tokens128真实发送、cost30各层原TX结算、1modelcall。修Provider先attempt后capture引起预算冲突：capture先保存，原attempt事务预算后才派发。证据已归档evidence/20261010，继续多scope Gateway受保护配置和路由，然后Wave4。
+
+- 多scope Gateway编译发现Query字段移动错误，改取内部DTO；WS首帧无显式HTTP别名时允许受保护JWT scope选路，OAuth cookie按配置别名隔离。新增工作区连接缓存256上限。正在必要编译与真实多租户冒烟。
+
+### 2026-10-10 多企业 Gateway 纵向切片已局部验证，开始 Wave4
+
+当前 schema SQLite34 / PostgreSQL canonical8，daemon33同后端领域端口。单 Gateway 受保护 AGENT_GATEWAY_SCOPES 配置最多16个完整scope，JWT未经验证的scope只用于有限配置选路，选路后Gateway和daemon分别完整验签/原事务授权。API key以X-Agent-Scope或WS首帧scope选路；错误/跨scope均401。OAuth cookie按别名隔离，额外OAuth回调必须包含配置别名；客户端连接缓存上限256。
+
+必要cargo check/build通过；真实HTTP Gateway + 三daemon + 同PG schema的两个tenant冒烟通过：同名主体/Agent/operation的opaque目录互不访问，B的API key仅在B配置可用；原A双运行端点/Gateway重启/授权码一次消费/输出上限128/费用30微单位/模型仅1次调用仍通过。证据evidence/20261010/agent-wave3-multi-scope-smoke.json。未测试真实远程IdP/HA/多Gateway压力、工具与resource费用专项仍待验收；Wave3功能主要入口实现，不据此宣称完整验收。Wave4注册表/配置/签名代际正在实施，Wave5–10尚未实现，enterprise_ready=false。
+
+- Wave4注册表签名扫描移到数据库事务外；原TX只核expected revision/current trust digest、不可变generation和operation receipt。运行中session绑定固定代，canary/rollback只影响后续新lifetime；原Local未安装session固定None。SQLite35/PG9新迁移尚待实库合同，未宣称Wave4完整。
+
+- Wave4注册/config/签名纵向切片：SQLite35/PG9实库共享合同各1项通过；34同后端daemon端口。CLI/HTTP/RPC发布与读回、原session绑定/准入TX/原run snapshot/LoopEngine真实接线。最新MCP来源/Hook信任/根历史/CLI NOFOLLOW改动必要binary build进行中，随后真实HTTP固定V1而current V2模型请求冒烟。完整验收与Wave5–10仍未完成，不退出任务。
+
+- Wave4真实HTTPsmoke首次在registry请求前共享Access准入503，未生成注册业务事实；定位valid_access_endpoint缺新路由白名单，补registry/generation与后续固定workflow/A2A endpoint后必要重构建。旧PG/SQLite注册合同通过，不能将该HTTP失败算成功。
+
+- Wave4真实入口组合smoke通过：同Gateway两tenant/三个daemon/实PG9，先发布签名V1并创建原目录会话，再发布V2+100%canary，旧会话实际模型请求含V1 prompt且无tools，重启仍读原run；费用30微单位、输出128、1modelcall和PKCE一次消费保持通过。证据agent-wave4-registry-runtime-smoke2.json。注册/config/发行主要纵向切片已实现并局部验证；完整并发/归档CLI安全矩阵/三入口parity待验；Wave5九类持久DAG/native引用/A2A正在开发，Wave6–10仍待实施，继续不停。
+
+- Wave5持久DAG继续：SQLite36/PG10前向迁移与共用事务编排已接真实后端，35领域端口、严格RPC/CLI/HTTP入口、有界独立workload调度、AgentRun原run同TX关联、SubWorkflow同TX创建与关联。必要入口check2通过；原生工具/Approval/Webhook和snapshot恢复语义正在继续接线，最新编译未完成。尚未运行36/10实库合同，不能标Wave5完成；Wave6–10仍未实施。本任务继续推进，不退出。
+
+- Wave5必要契约：agent-wave5-workflow-sqlite3.log 1项pass；agent-wave5-workflow-postgres2.log实PG1项pass（此前首轮漏关联失败单独保留）。生产a2a/compensation check通过；最新结果幂等/Compensating、真实双backend HTTP/A2A冒烟binary构建中。新增scripts/smoke-workflow-a2a.py尚未执行，不能记为通过。下一步补artifact引用并跑真实后台+原tool+SSE断流+重启，再补人工/补偿/未知reconcile；Wave6–10仍在原任务范围内，不能停。
+
+
+## 2026-10-11 远端开发检查点
+
+用户明确要求提交当前修改到云端。正在整理真实实现与状态记录，保留全部已有改动，不重写历史、不生产部署。Wave5 session binding 最新 binary 构建通过；派生 run 清除父 workflow 执行指令的安全修复正在局部验证。A2A 前三轮失败没有计作成功，最终入口冒烟仍待验。Wave5 仍部分，Wave6–10 未实现，完整验收后置。远端与本地原 HEAD 一致；准备在当前 main 上提交并普通推送，无强制推送。
+
+提交前最新局部验证：`cargo test --locked --test workflow_contract sqlite_workflow_native_fence` 通过（1 passed）；包含最新会话绑定及派生指令清除源码的编译。日志已归档 evidence/20261011/checkpoint-workflow-contract.log。完整套件及 Wave5 最终真实 HTTP 冒烟未运行；历史日志原样保留，源码/迁移的 git diff --check 通过。

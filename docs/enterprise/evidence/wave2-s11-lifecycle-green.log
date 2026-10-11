@@ -1,0 +1,34 @@
+   Compiling agent-storage-ports v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-ports)
+   Compiling agent-artifact v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/artifact)
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling agent-storage-postgres v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-postgres)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+error[E0277]: `Result<std::option::Option<agent_core::CompactRunRequest>, RuntimeError>` is not a future
+    --> crates/daemon/src/handlers.rs:2535:14
+     |
+2535 |             .await
+     |             -^^^^^
+     |             ||
+     |             |`Result<std::option::Option<agent_core::CompactRunRequest>, RuntimeError>` is not a future
+     |             help: remove the `.await`
+     |
+     = help: the trait `Future` is not implemented for `Result<std::option::Option<agent_core::CompactRunRequest>, RuntimeError>`
+     = note: Result<std::option::Option<agent_core::CompactRunRequest>, RuntimeError> must be a future or must implement `IntoFuture` to be awaited
+     = note: required for `Result<std::option::Option<agent_core::CompactRunRequest>, RuntimeError>` to implement `IntoFuture`
+
+error[E0277]: `Result<std::option::Option<ProjectionGeneration>, RuntimeError>` is not a future
+    --> crates/daemon/src/handlers.rs:2552:14
+     |
+2552 |             .await
+     |             -^^^^^
+     |             ||
+     |             |`Result<std::option::Option<ProjectionGeneration>, RuntimeError>` is not a future
+     |             help: remove the `.await`
+     |
+     = help: the trait `Future` is not implemented for `Result<std::option::Option<ProjectionGeneration>, RuntimeError>`
+     = note: Result<std::option::Option<ProjectionGeneration>, RuntimeError> must be a future or must implement `IntoFuture` to be awaited
+     = note: required for `Result<std::option::Option<ProjectionGeneration>, RuntimeError>` to implement `IntoFuture`
+
+For more information about this error, try `rustc --explain E0277`.
+error: could not compile `agent-daemon` (lib) due to 2 previous errors

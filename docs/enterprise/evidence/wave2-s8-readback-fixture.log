@@ -1,0 +1,67 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+error[E0599]: no function or associated item named `user` found for struct `agent_core::Message` in the current scope
+  --> tests/readback_contract.rs:73:46
+   |
+73 |     f.store.import_legacy(&first, &[Message::user("a 的私密内容")]).unwrap();
+   |                                              ^^^^ function or associated item not found in `Message`
+   |
+note: if you're trying to build a new `agent_core::Message` consider using one of the following associated functions:
+      agent_core::Message::text
+      agent_core::Message::assistant_tool_calls
+      agent_core::Message::tool_result
+      agent_core::Message::user_with_images
+      and 2 others
+  --> /Users/pilot/Documents/myproject/agent-rust/crates/core/src/message.rs:31:5
+   |
+31 |     pub fn text(role: Role, content: impl Into<String>) -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+43 |     pub fn assistant_tool_calls(calls: Vec<ToolCall>) -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+55 |     pub fn tool_result(call: &ToolCall, content: impl Into<String>) -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+67 |     pub fn user_with_images(content: impl Into<String>, image_urls: Vec<String>) -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no function or associated item named `user` found for struct `agent_core::Message` in the current scope
+  --> tests/readback_contract.rs:74:47
+   |
+74 |     f.store.import_legacy(&second, &[Message::user("b 的私密内容")]).unwrap();
+   |                                               ^^^^ function or associated item not found in `Message`
+   |
+note: if you're trying to build a new `agent_core::Message` consider using one of the following associated functions:
+      agent_core::Message::text
+      agent_core::Message::assistant_tool_calls
+      agent_core::Message::tool_result
+      agent_core::Message::user_with_images
+      and 2 others
+  --> /Users/pilot/Documents/myproject/agent-rust/crates/core/src/message.rs:31:5
+   |
+31 |     pub fn text(role: Role, content: impl Into<String>) -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+43 |     pub fn assistant_tool_calls(calls: Vec<ToolCall>) -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+55 |     pub fn tool_result(call: &ToolCall, content: impl Into<String>) -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+67 |     pub fn user_with_images(content: impl Into<String>, image_urls: Vec<String>) -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `finish_run` found for struct `RunStore` in the current scope
+  --> tests/readback_contract.rs:91:13
+   |
+91 |     f.store.finish_run(&b.run_id, RunStatus::Completed, Some("b 的私密终态"), None).unwrap();
+   |             ^^^^^^^^^^
+   |
+help: there is a method `finish` with a similar name
+   |
+91 -     f.store.finish_run(&b.run_id, RunStatus::Completed, Some("b 的私密终态"), None).unwrap();
+91 +     f.store.finish(&b.run_id, RunStatus::Completed, Some("b 的私密终态"), None).unwrap();
+   |
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `my-agent` (test "readback_contract") due to 3 previous errors

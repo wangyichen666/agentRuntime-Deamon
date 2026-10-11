@@ -21,6 +21,7 @@ pub mod params;
 pub use agent_core::{
     EventSeq, Message, PendingApprovalInfo, RequestId, RunId, RunRecord, StoredEvent,
 };
+pub use agent_core::HookChannel;
 pub use methods::{canonical_method, normalize_request};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -29,11 +30,47 @@ use thiserror::Error;
 pub const JSONRPC_VERSION: &str = "2.0";
 pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 
+/// 凭据仅存在传输 envelope，不进入业务 params、日志或 canonical 事实。
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
+#[serde(transparent)]
+pub struct BearerCredential(String);
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct GatewayCredential {
+    pub token: BearerCredential,
+    pub channel: agent_core::HookChannel,
+}
+impl BearerCredential {
+    pub fn new(value: String) -> Result<Self, ProtocolError> {
+        if value.is_empty()
+            || value.len() > 16384
+            || value
+                .bytes()
+                .any(|v| v.is_ascii_whitespace() || v.is_ascii_control())
+        {
+            return Err(ProtocolError::InvalidParams("认证凭据无效".into()));
+        }
+        Ok(Self(value))
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+impl std::fmt::Debug for BearerCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BearerCredential([已脱敏])")
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct JsonRpcRequest {
     pub jsonrpc: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol_version: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization: Option<BearerCredential>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<GatewayCredential>,
     pub id: RequestId,
     pub method: String,
     #[serde(default)]
@@ -45,6 +82,8 @@ impl JsonRpcRequest {
         Self {
             jsonrpc: JSONRPC_VERSION.to_owned(),
             protocol_version: None,
+            authorization: None,
+            gateway: None,
             id,
             method: method.into(),
             params,
@@ -56,10 +95,15 @@ impl JsonRpcRequest {
 pub struct JsonRpcResponse {
     pub jsonrpc: String,
     pub id: RequestId,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "present_result", skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<RpcError>,
+}
+
+// JSON-RPC 的 null 是合法成功结果；只有字段缺失才表示没有 result。
+fn present_result<'de, D: serde::Deserializer<'de>>(decoder: D) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(decoder).map(Some)
 }
 
 impl JsonRpcResponse {
@@ -198,8 +242,16 @@ pub fn decode_request(bytes: &[u8]) -> Result<JsonRpcRequest, ProtocolError> {
         let raw: Value = serde_json::from_slice(bytes)?;
         if let Some(fields) = raw.as_object() {
             for field in fields.keys() {
-                if !["jsonrpc", "protocol_version", "id", "method", "params"]
-                    .contains(&field.as_str())
+                if ![
+                    "jsonrpc",
+                    "protocol_version",
+                    "authorization",
+                    "gateway",
+                    "id",
+                    "method",
+                    "params",
+                ]
+                .contains(&field.as_str())
                 {
                     return Err(ProtocolError::InvalidParams(format!(
                         "未知 envelope 字段：{field}"
@@ -244,7 +296,8 @@ pub fn decode_server_frame_for_version(
     if version == 1 {
         let value: Value = serde_json::from_slice(bytes)?;
         if let ServerFrame::Response(response) = &frame {
-            if response.result.is_some() == response.error.is_some() {
+            if value.get("result").is_some() == value.get("error").is_some()
+                || (value.get("error").is_some() && response.error.is_none()) {
                 return Err(ProtocolError::InvalidParams(
                     "response 必须且只能有 result 或 error".into(),
                 ));
@@ -332,6 +385,19 @@ mod tests {
             decode_request(&bytes),
             Err(ProtocolError::FrameTooLarge { .. })
         ));
+    }
+
+    #[test]
+    fn null_success_preserves_presence_and_strict_response_shape() {
+        let frame = ServerFrame::Response(JsonRpcResponse::success(RequestId::Number(1), Value::Null));
+        let bytes = encode_frame(&frame).unwrap();
+        assert_eq!(decode_server_frame(&bytes).unwrap(), frame);
+        assert_eq!(decode_server_frame_for_version(&bytes, 1).unwrap(), frame);
+        for fields in [json!({}), json!({"error": null}), json!({"result": null, "error": null})] {
+            let mut value = json!({"frame": "response", "jsonrpc": "2.0", "id": 1});
+            value.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+            assert!(decode_server_frame_for_version(&serde_json::to_vec(&value).unwrap(), 1).is_err());
+        }
     }
 }
 

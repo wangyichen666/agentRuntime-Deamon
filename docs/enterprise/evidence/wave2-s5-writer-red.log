@@ -1,0 +1,21 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.77s
+     Running tests/runtime_contract.rs (target/debug/deps/runtime_contract-ef559da8ec38e611)
+
+running 1 test
+
+thread 'second_live_daemon_cannot_recover_the_first_daemons_native_running_session' panicked at tests/runtime_contract.rs:3213:13:
+assertion `left == right` failed: 第二活 daemon 不能把首个活 owner 当作崩溃恢复
+  left: String("unknown_after_restart")
+ right: "running"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test second_live_daemon_cannot_recover_the_first_daemons_native_running_session ... FAILED
+
+failures:
+
+failures:
+    second_live_daemon_cannot_recover_the_first_daemons_native_running_session
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 35 filtered out; finished in 1.35s
+
+error: test failed, to rerun pass `--test runtime_contract`

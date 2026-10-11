@@ -14,6 +14,7 @@ pub enum HookChannel {
     Http,
     Continuation,
     Subagent,
+    Cron,
 }
 impl HookChannel {
     pub fn key(self) -> &'static str {
@@ -26,6 +27,7 @@ impl HookChannel {
             Self::Http => "http",
             Self::Continuation => "continuation",
             Self::Subagent => "subagent",
+            Self::Cron => "cron",
         }
     }
 }
@@ -176,6 +178,54 @@ pub struct HookReadback {
     pub outcomes: Vec<HookOutcome>,
     pub cursor: u64,
     pub has_more: bool,
+}
+
+pub fn validate_hook_outcome(outcome: &HookOutcome) -> Result<(), crate::CoordinationError> {
+    let payload = &outcome.payload;
+    let owner_valid = payload.owner.as_ref().map_or_else(
+        || {
+            matches!(
+                payload.event,
+                HookEvent::SessionStart | HookEvent::SessionEnd | HookEvent::Notification
+            )
+        },
+        |owner| {
+            owner.session_key == payload.session_key
+                && owner.session_lifetime_id == payload.session_lifetime_id
+        },
+    );
+    let state_valid = match outcome.status {
+        HookStatus::Running => outcome.effect.is_none() && outcome.failure.is_none(),
+        HookStatus::Succeeded => {
+            outcome.failure.is_none()
+                && outcome
+                    .effect
+                    .as_ref()
+                    .is_some_and(|effect| payload.event.permits(effect))
+        }
+        HookStatus::Failed => {
+            outcome.effect.is_none()
+                && outcome
+                    .failure
+                    .is_some_and(|failure| failure != HookFailure::UnknownAfterRestart)
+        }
+        HookStatus::UnknownAfterRestart => {
+            outcome.effect.is_none() && outcome.failure == Some(HookFailure::UnknownAfterRestart)
+        }
+    };
+    if payload.schema_version != 1
+        || payload.operation_id.is_empty()
+        || payload.operation_id.len() > 256
+        || serde_json::to_vec(payload)
+            .map_err(|_| crate::CoordinationError::InvalidRequest)?
+            .len()
+            > 16384
+        || !owner_valid
+        || !state_valid
+    {
+        return Err(crate::CoordinationError::InvalidRequest);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

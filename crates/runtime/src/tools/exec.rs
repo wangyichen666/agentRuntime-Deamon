@@ -50,7 +50,8 @@ impl Tool for ExecTool {
     }
     async fn preflight(&self, args: &Value) -> Result<()> {
         let args: ExecArgs = serde_json::from_value(args.clone())?;
-        let backend = frozen_backend(args.sandbox)?;
+        let frozen = crate::loop_engine::current_run_settings().await?;
+        let backend = frozen_backend(args.sandbox, frozen.as_ref())?;
         if matches!(backend, SandboxBackend::Docker) && !NativeSandbox::docker_available().await {
             bail!("强沙箱 backend 或预装镜像不可用，整批拒绝");
         }
@@ -81,21 +82,17 @@ impl ExecTool {
         if cancellation.is_cancelled() {
             bail!("命令执行已取消");
         }
+        let frozen = crate::loop_engine::current_run_settings().await?;
         let request = ExecRequest {
             command: args.command,
             shell: PathBuf::from("/bin/sh"),
             cwd: self.safety.workspace().to_path_buf(),
-            timeout: execution_timeout(),
-            requested: frozen_backend(args.sandbox)?,
-            owner: crate::loop_engine::current_session_repository().map(|(_, owner)| owner),
-            docker_image: crate::loop_engine::current_session_repository()
-                .map(|(repository, owner)| {
-                    repository
-                        .run_snapshot(&owner.run_id)
-                        .map(|snapshot| snapshot.and_then(|snapshot| snapshot.docker_image))
-                })
-                .transpose()?
-                .flatten(),
+            timeout:frozen.as_ref().and_then(|s|s.billing_policy.as_ref()).map_or_else(execution_timeout,|f|execution_timeout().min(Duration::from_millis(f.policy.limits.max_sandbox_wall_ms_per_resource))),
+            requested: frozen_backend(args.sandbox, frozen.as_ref())?,
+            owner: crate::loop_engine::current_execution_owner(),
+            docker_image: frozen
+                .as_ref()
+                .and_then(|snapshot| snapshot.docker_image.clone()),
         };
         let result = self.sandbox.execute(request, cancellation).await?;
         Ok(format!(
@@ -105,16 +102,21 @@ impl ExecTool {
     }
 }
 
-fn frozen_backend(requested: Option<SandboxBackend>) -> Result<SandboxBackend> {
-    if let Some((repository, owner)) = crate::loop_engine::current_session_repository() {
-        if let Some(snapshot) = repository.run_snapshot(&owner.run_id)? {
-            if snapshot.sandbox_effective == "docker" {
-                if matches!(requested, Some(SandboxBackend::Native)) {
-                    bail!("不能放宽冻结的 Docker 隔离政策");
-                }
-                return Ok(SandboxBackend::Docker);
+fn frozen_backend(
+    requested: Option<SandboxBackend>,
+    snapshot: Option<&agent_core::RunSnapshot>,
+) -> Result<SandboxBackend> {
+    if let Some(snapshot) = snapshot {
+        if snapshot.sandbox_effective == "docker" {
+            if matches!(requested, Some(SandboxBackend::Native)) {
+                bail!("不能放宽冻结的Docker隔离政策");
             }
+            return Ok(SandboxBackend::Docker);
         }
+        anyhow::ensure!(
+            snapshot.sandbox_effective == "native",
+            "冻结sandbox类型无效"
+        );
     }
     Ok(requested.unwrap_or(SandboxBackend::Native))
 }

@@ -1,0 +1,10 @@
+{
+  "scopes": {
+    "tenant_b": {
+      "workspace": "/srv/agent/tenant-b",
+      "oidc_config": "/run/agent-config/oidc-tenant-b.json",
+      "gateway_token": "/run/agent-secrets/gateway-tenant-b.json",
+      "runtime_routes": "/run/agent-config/routes-tenant-b.json"
+    }
+  }
+}

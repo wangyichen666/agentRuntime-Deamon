@@ -76,3 +76,12 @@ pub struct AssembledProviderRequest {
     pub provider_tools_digest: String,
     pub omissions: Vec<String>,
 }
+
+/// 原上下文来源与冻结配置的一笔读事务结果；不拥有第二份历史。
+#[derive(Clone, Debug)]
+pub struct RunRequestSource {
+    pub snapshot: SessionSnapshot,
+    pub revision: SnapshotRevision,
+    pub calibration: Option<(u64, u64)>,
+    pub frozen: RunSnapshot,
+}

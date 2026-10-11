@@ -1,0 +1,87 @@
+    Checking agent-storage-ports v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-ports)
+    Checking agent-gateway v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/gateway)
+    Checking agent-acp v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/acp)
+    Checking agent-cli v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/cli)
+    Checking agent-entry-support v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/entry-support)
+    Checking agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+    Checking agent-artifact v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/artifact)
+    Checking agent-storage-postgres v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-postgres)
+error: expected expression, found `,`
+   --> crates/storage/src/context_projection.rs:262:82
+    |
+262 |     pub(crate) fn begin_compact_scoped(&self, intent: &CompactIntent) -> Result<(,
+    |                                                                                  ^ expected expression
+
+error: expected type, found `,`
+   --> crates/storage/src/context_projection.rs:262:82
+    |
+262 |     pub(crate) fn begin_compact_scoped(&self, intent: &CompactIntent) -> Result<(,
+    |                                                                                  ^ expected type
+    |
+help: expressions must be enclosed in braces to be used as const generic arguments
+    |
+262 ~     pub(crate) fn begin_compact_scoped(&self, intent: &CompactIntent) -> Result<{ (,
+263 |         execution: Option<&EnterpriseOwnerEnvelope>,
+264 ~     ) }, RuntimeError> {
+    |
+
+error[E0425]: cannot find value `execution` in this scope
+   --> crates/storage/src/context_projection.rs:266:50
+    |
+266 | ...   let tx = db.transaction_with_behavior(if execution.is_some() { rusqlite::TransactionBehavior::Immediate } else { rusqlite::Transact...
+    |                                                ^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `execution` in this scope
+   --> crates/storage/src/context_projection.rs:267:49
+    |
+267 |         check_compact_owner(&tx, &intent.owner, execution, true)?;
+    |                                                 ^^^^^^^^^ not found in this scope
+
+error[E0747]: constant provided when a type was expected
+   --> crates/storage/src/context_projection.rs:262:81
+    |
+262 |       pub(crate) fn begin_compact_scoped(&self, intent: &CompactIntent) -> Result<(,
+    |  _________________________________________________________________________________^
+263 | |         execution: Option<&EnterpriseOwnerEnvelope>,
+264 | |     ), RuntimeError> {
+    | |_____^
+
+error[E0061]: this method takes 1 argument but 2 arguments were supplied
+   --> crates/storage/src/context_projection.rs:175:14
+    |
+175 |         self.begin_compact_scoped(intent, None)
+    |              ^^^^^^^^^^^^^^^^^^^^         ---- unexpected argument #2 of type `std::option::Option<_>`
+    |
+note: method defined here
+   --> crates/storage/src/context_projection.rs:262:19
+    |
+262 |     pub(crate) fn begin_compact_scoped(&self, intent: &CompactIntent) -> Result<(,
+    |                   ^^^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+    |
+175 -         self.begin_compact_scoped(intent, None)
+175 +         self.begin_compact_scoped(intent)
+    |
+
+error[E0061]: this method takes 1 argument but 2 arguments were supplied
+   --> crates/storage/src/run_compacts.rs:71:18
+    |
+71  |                 .begin_compact_scoped(&intent, Some(&envelope))
+    |                  ^^^^^^^^^^^^^^^^^^^^          --------------- unexpected argument #2 of type `std::option::Option<&agent_core::EnterpriseOwnerEnvelope>`
+    |
+note: method defined here
+   --> crates/storage/src/context_projection.rs:262:19
+    |
+262 |     pub(crate) fn begin_compact_scoped(&self, intent: &CompactIntent) -> Result<(,
+    |                   ^^^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+    |
+71  -                 .begin_compact_scoped(&intent, Some(&envelope))
+71  +                 .begin_compact_scoped(&intent)
+    |
+
+Some errors have detailed explanations: E0061, E0425, E0747.
+For more information about an error, try `rustc --explain E0061`.
+error: could not compile `agent-storage` (lib) due to 7 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `agent-storage` (lib test) due to 7 previous errors

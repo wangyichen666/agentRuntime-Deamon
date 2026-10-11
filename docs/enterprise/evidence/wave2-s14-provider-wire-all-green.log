@@ -1,0 +1,11 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.03s
+     Running tests/runtime_contract.rs (target/debug/deps/runtime_contract-b79d5cf341cb953c)
+
+running 3 tests
+test provider_request_accepted_then_connection_lost_is_unknown_without_retry_or_restart_replay ... ok
+test provider_request_accepted_then_cancelled_is_unknown_without_retry_or_restart_replay ... ok
+test provider_request_accepted_then_silent_timeout_is_unknown_without_retry_or_restart_replay ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 47 filtered out; finished in 12.07s
+

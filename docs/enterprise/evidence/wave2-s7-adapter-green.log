@@ -1,0 +1,25 @@
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 27.61s
+     Running tests/publication_contract.rs (target/debug/deps/publication_contract-e8e473e589cc2af5)
+
+running 14 tests
+test postgres_equal_public_session_and_run_keys_remain_isolated_by_full_scope ... ignored, 独立真实 PostgreSQL lane
+test postgres_expired_epoch_and_crash_before_ack_are_recovered_by_real_worker ... ignored, 独立真实 PostgreSQL lane
+test postgres_immutable_payload_corruption_future_schema_and_disconnect_fail_closed ... ignored, 独立真实 PostgreSQL lane
+test postgres_reconnect_after_inbox_commit_uses_same_ids_and_no_duplicate_receipt ... ignored, 独立真实 PostgreSQL lane
+test postgres_shared_publication_contract ... ignored, 必须通过独立真实 PostgreSQL lane 运行，不把普通本地测试当成 PostgreSQL 验证
+test postgres_two_connections_have_one_winner_without_sleep ... ignored, 独立真实 PostgreSQL lane
+test sqlite_shared_publication_contract ... ok
+test sqlite_receipt_foreign_scope_and_wrong_digest_are_rejected_by_database_foreign_key ... ok
+test sqlite_independent_connections_compete_with_controlled_barrier_and_single_lease_winner ... ok
+test sqlite_tamper_is_rejected_and_sql_trigger_prevents_body_rewrites ... ok
+test sqlite_outbox_failure_rolls_back_original_event_and_terminal_transaction ... ok
+test sqlite_restart_after_inbox_commit_before_ack_replays_receipt_without_business_writes ... ok
+test sqlite_v21_migration_does_not_backfill_old_events_and_verified_backup_reopens ... ok
+test sqlite_async_delivery_write_yields_the_runtime_during_real_database_lock ... ok
+
+test result: ok. 8 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.35s
+

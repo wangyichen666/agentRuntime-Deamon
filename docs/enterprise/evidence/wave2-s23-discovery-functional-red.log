@@ -1,0 +1,44 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.03s
+     Running tests/run_discovery_contract.rs (target/debug/deps/run_discovery_contract-10274f22e49e13bc)
+
+running 6 tests
+
+thread 'retired_discovery_readback_uses_permanent_lifetime_without_current_writer' panicked at tests/run_discovery_contract.rs:68:98:
+called `Result::unwrap()` on an `Err` value: Protocol("session 仍有受管 run，必须先 cancel/join")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test retired_discovery_readback_uses_permanent_lifetime_without_current_writer ... FAILED
+
+thread 'discovery_cancellation_denies_foreign_without_canonical_cancel_event' panicked at tests/run_discovery_contract.rs:39:5:
+必须先在SQL拒绝scope，实际 Ok(())
+
+thread 'discovered_execution_permission_denies_foreign_before_catalog_and_receipt' panicked at tests/run_discovery_contract.rs:39:5:
+必须先在SQL拒绝scope，实际 Ok(true)
+test discovery_cancellation_denies_foreign_without_canonical_cancel_event ... FAILED
+
+thread 'discovery_publication_denies_foreign_before_any_permit_or_event' panicked at tests/run_discovery_contract.rs:39:5:
+必须先在SQL拒绝scope，实际 Ok(ToolDiscoveryReceipt { schema_version: 1, owner: ExactOwner { session_key: SessionKey("discovery-port"), session_lifetime_id: SessionLifetimeId("09957b76eb75ae6cfbc813432cc5462a"), run_id: RunId("run-1"), run_generation: RunGeneration(1), turn_id: TurnId("turn-1") }, operation_id: "discovery-operation", query: ToolSearchQuery { query: "select:private__lookup", limit: Some(1) }, result: ToolSearchResult { schema_version: 1, catalog_generation: "9ac54788c7a4774c4b07add93510774ccb35b42b46c60aa230ff9380e84aa880", tools: [ToolSpec { name: "private__lookup", description: "私有工具定义", parameters: Object {"type": String("object"), "properties": Object {"query": Object {"type": String("string")}}, "required": Array [String("query")], "additionalProperties": Bool(false)} }], has_more: false, dispatch_hint: "延迟工具须再次调用顶层 tool_search，arguments={name: canonical_name, arguments: 原工具参数}；只允许本 run 已发现的精确名称。" } })
+
+thread 'discovery_readback_denies_foreign_before_loading_private_definitions' panicked at tests/run_discovery_contract.rs:39:5:
+必须先在SQL拒绝scope，实际 Ok([ToolDiscoveryReceipt { schema_version: 1, owner: ExactOwner { session_key: SessionKey("discovery-port"), session_lifetime_id: SessionLifetimeId("0a775e99a412d8583f491f97d129e79b"), run_id: RunId("run-1"), run_generation: RunGeneration(1), turn_id: TurnId("turn-1") }, operation_id: "discovery-operation", query: ToolSearchQuery { query: "select:private__lookup", limit: Some(1) }, result: ToolSearchResult { schema_version: 1, catalog_generation: "9ac54788c7a4774c4b07add93510774ccb35b42b46c60aa230ff9380e84aa880", tools: [ToolSpec { name: "private__lookup", description: "私有工具定义", parameters: Object {"type": String("object"), "properties": Object {"query": Object {"type": String("string")}}, "required": Array [String("query")], "additionalProperties": Bool(false)} }], has_more: false, dispatch_hint: "延迟工具须再次调用顶层 tool_search，arguments={name: canonical_name, arguments: 原工具参数}；只允许本 run 已发现的精确名称。" } }])
+test discovered_execution_permission_denies_foreign_before_catalog_and_receipt ... FAILED
+test discovery_publication_denies_foreign_before_any_permit_or_event ... FAILED
+test discovery_readback_denies_foreign_before_loading_private_definitions ... FAILED
+
+thread 'discovery_saved_frozen_snapshot_has_budget_before_decoding_legal_json' panicked at tests/run_discovery_contract.rs:83:5:
+保存的大JSON应在装入Rust前拒绝，实际 Ok(true)
+test discovery_saved_frozen_snapshot_has_budget_before_decoding_legal_json ... FAILED
+
+failures:
+
+failures:
+    discovered_execution_permission_denies_foreign_before_catalog_and_receipt
+    discovery_cancellation_denies_foreign_without_canonical_cancel_event
+    discovery_publication_denies_foreign_before_any_permit_or_event
+    discovery_readback_denies_foreign_before_loading_private_definitions
+    discovery_saved_frozen_snapshot_has_budget_before_decoding_legal_json
+    retired_discovery_readback_uses_permanent_lifetime_without_current_writer
+
+test result: FAILED. 0 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+error: test failed, to rerun pass `--test run_discovery_contract`

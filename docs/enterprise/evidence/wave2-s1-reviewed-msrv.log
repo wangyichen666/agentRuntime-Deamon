@@ -1,0 +1,11 @@
+    Blocking waiting for file lock on build directory
+    Checking agent-storage-ports v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-ports)
+    Checking agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+    Checking agent-storage-postgres v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-postgres)
+    Checking agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+    Checking agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+    Checking agent-acp v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/acp)
+    Checking my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Checking agent-cli v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/cli)
+    Checking agent-gateway v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/gateway)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 21.27s

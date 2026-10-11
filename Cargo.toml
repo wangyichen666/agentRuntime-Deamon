@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/core", "crates/daemon-protocol", "crates/daemon-client", "crates/storage", "crates/context", "crates/memory", "crates/sandbox", "crates/runtime", "crates/daemon", "crates/entry-support", "crates/cli", "crates/acp", "crates/gateway"]
+members = [".", "crates/core", "crates/identity", "crates/policy", "crates/pack", "crates/plugin", "crates/registry", "crates/workflow", "crates/daemon-protocol", "crates/daemon-client", "crates/storage", "crates/storage-ports", "crates/artifact", "crates/storage-postgres", "crates/context", "crates/memory", "crates/sandbox", "crates/runtime", "crates/daemon", "crates/entry-support", "crates/cli", "crates/acp", "crates/gateway"]
 resolver = "3"
 
 [package]
@@ -28,6 +28,17 @@ tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net",
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [dev-dependencies]
+agent-workflow = {version="=0.1.0",path="crates/workflow"}
+agent-registry = {version="=0.1.0",path="crates/registry"}
+agent-pack = {version="=0.1.0",path="crates/pack"}
+ed25519-dalek = "=2.2.0"
+base64 = "=0.22.1"
+agent-artifact = { version="=0.1.0", path="crates/artifact" }
+sha2 = "0.10"
+agent-storage-ports = { version = "=0.1.0", path = "crates/storage-ports" }
+agent-storage-postgres = { version = "=0.1.0", path = "crates/storage-postgres" }
+agent-policy = { version = "=0.1.0", path = "crates/policy" }
+agent-identity = { version = "=0.1.0", path = "crates/identity" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 agent-daemon-protocol = { version = "=0.1.0", path = "crates/daemon-protocol" }
 futures-util = { version = "0.3", features = ["sink"] }

@@ -335,6 +335,10 @@ async fn run_acp_slash(
                 | SlashAction::Context
                 | SlashAction::Snapshot
                 | SlashAction::Resources
+                | SlashAction::Identity
+                | SlashAction::Outbox
+                | SlashAction::Events
+                | SlashAction::Artifact
                 | SlashAction::Doctor
                 | SlashAction::Run
                 | SlashAction::Subagents
@@ -354,17 +358,27 @@ async fn run_acp_slash(
         }) if matches!(args.as_slice(), [command] if command == "list" || command == "status")
     );
     let content = if allowed {
-        let value = agent_entry_support::rpc::request_result(
-            client,
-            "slash.execute",
-            json!({
-                "line": line,
-                "session_id": session_id.to_string(),
-                "entry_channel":"acp",
-            }),
-        )
-        .await
-        .map_err(internal_error)?;
+        let value = client
+            .request_result(
+                "slash.execute",
+                json!({
+                    "line": line,
+                    "session_id": session_id.to_string(),
+                    "entry_channel":"acp",
+                }),
+            )
+            .await
+            .map_err(|error| match error {
+                agent_daemon_client::ClientError::Rpc(error) => {
+                    let mut projected =
+                        AcpError::new(i32::try_from(error.code).unwrap_or(-32603), error.message);
+                    if let Some(data) = error.data {
+                        projected = projected.data(data);
+                    }
+                    projected
+                }
+                error => internal_error(error),
+            })?;
         let response: SlashResponse = serde_json::from_value(value)
             .map_err(|error| internal_error(anyhow::Error::from(error)))?;
         render_acp_slash_response(response)
@@ -493,7 +507,11 @@ async fn forward_prompt_stream(
                         return Ok(StopReason::Cancelled);
                     }
                     let code = i32::try_from(error.code).unwrap_or(-32603);
-                    return Err(AcpError::new(code, error.message));
+                    let mut projected = AcpError::new(code, error.message);
+                    if let Some(data) = error.data {
+                        projected = projected.data(data);
+                    }
+                    return Err(projected);
                 }
                 if !forwarded_text
                     && let Some(content) = response

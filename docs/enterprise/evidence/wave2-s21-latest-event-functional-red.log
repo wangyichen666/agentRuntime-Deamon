@@ -1,0 +1,24 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.82s
+     Running tests/run_event_contract.rs (target/debug/deps/run_event_contract-d9c9a20dddd5294c)
+
+running 2 tests
+
+thread 'latest_view_event_denies_foreign_before_reading_payload' panicked at tests/run_event_contract.rs:573:5:
+最新事件必须完整scope先核，实际为 Ok(Some(StoredEvent { run_id: RunId("run-1"), seq: EventSeq(2), event: "terminal", data: Object {"private": String("租户私密终态"), "_my_agent_view": Object {"schema_version": Number(1), "session_key": String("event-session"), "session_lifetime_id": String("0b9479dcca6c11b689efc23ef258560e"), "snapshot_revision": Number(10), "metadata_revision": Number(1), "transcript_revision": Number(0), "projection_generation": Number(0), "owner": Object {"session_key": String("event-session"), "session_lifetime_id": String("0b9479dcca6c11b689efc23ef258560e"), "run_id": String("run-1"), "run_generation": Number(1), "turn_id": String("turn-1")}, "event_seq": Number(2), "previous_visible_seq": Number(0), "terminal": Bool(false), "interaction": Null}} }))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test latest_view_event_denies_foreign_before_reading_payload ... FAILED
+
+thread 'latest_view_event_denies_legal_oversized_payload_before_decode' panicked at tests/run_event_contract.rs:594:5:
+合法大事件不能无限字节读回，实际success=true,error=None
+test latest_view_event_denies_legal_oversized_payload_before_decode ... FAILED
+
+failures:
+
+failures:
+    latest_view_event_denies_foreign_before_reading_payload
+    latest_view_event_denies_legal_oversized_payload_before_decode
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.39s
+
+error: test failed, to rerun pass `--test run_event_contract`

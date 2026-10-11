@@ -1,0 +1,38 @@
+   Compiling agent-core v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/core)
+   Compiling rcgen v0.13.2
+   Compiling agent-storage-ports v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-ports)
+   Compiling agent-sandbox v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/sandbox)
+   Compiling agent-daemon-protocol v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-protocol)
+   Compiling agent-context v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/context)
+   Compiling agent-memory v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/memory)
+   Compiling agent-artifact v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/artifact)
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 20.53s
+     Running unittests src/lib.rs (target/debug/deps/agent_runtime-d67c48aa327cf9f9)
+
+running 8 tests
+test cron::tests::unattended_approval_always_refuses ... ok
+test cron::tests::accepts_standard_five_field_cron ... ok
+test cron::tests::stops_after_finite_retries ... ok
+test cron::tests::unattended_rejection_is_recorded_as_failure ... ok
+test cron::tests::persists_due_job_and_records_success ... ok
+test cron::tests::agent_runner_uses_an_independent_persisted_session ... ok
+test cron::tests::native_cron_unknown_side_effect_is_not_success_and_is_not_retried ... FAILED
+test cron::tests::immediate_repetitions_of_one_job_have_distinct_native_occurrences ... ok
+
+failures:
+
+---- cron::tests::native_cron_unknown_side_effect_is_not_success_and_is_not_retried stdout ----
+
+thread 'cron::tests::native_cron_unknown_side_effect_is_not_success_and_is_not_retried' panicked at crates/runtime/src/cron.rs:901:9:
+assertion failed: !record.success
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    cron::tests::native_cron_unknown_side_effect_is_not_success_and_is_not_retried
+
+test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 122 filtered out; finished in 0.14s
+
+error: test failed, to rerun pass `-p agent-runtime --lib`

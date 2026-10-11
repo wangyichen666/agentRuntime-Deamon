@@ -1,0 +1,9 @@
+[package]
+name = "agent-policy"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+
+[dependencies]
+agent-core = { version = "=0.1.0", path = "../core" }

@@ -1,0 +1,52 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.77s
+     Running tests/run_attempt_contract.rs (target/debug/deps/run_attempt_contract-b889593afc3e8fb1)
+
+running 5 tests
+test provider_outcome_unknown_cannot_be_projected_as_successful_run ... FAILED
+test provider_terminal_cannot_rewrite_original_start_time ... FAILED
+test provider_terminal_cannot_rewrite_original_profile ... FAILED
+test provider_terminal_cannot_rewrite_original_api ... FAILED
+test provider_terminal_cannot_rewrite_original_model ... FAILED
+
+failures:
+
+---- provider_outcome_unknown_cannot_be_projected_as_successful_run stdout ----
+
+thread 'provider_outcome_unknown_cannot_be_projected_as_successful_run' panicked at tests/run_attempt_contract.rs:34:5:
+assertion `left == right` failed: 已持久化 Provider 未知结果不能被 canonical run 结算成成功
+  left: Completed
+ right: UnknownAfterRestart
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- provider_terminal_cannot_rewrite_original_start_time stdout ----
+
+thread 'provider_terminal_cannot_rewrite_original_start_time' panicked at tests/run_attempt_contract.rs:23:9:
+原 Provider 身份维度 3 不能在终态改写，实际 Ok(())
+
+---- provider_terminal_cannot_rewrite_original_profile stdout ----
+
+thread 'provider_terminal_cannot_rewrite_original_profile' panicked at tests/run_attempt_contract.rs:23:9:
+原 Provider 身份维度 0 不能在终态改写，实际 Ok(())
+
+---- provider_terminal_cannot_rewrite_original_api stdout ----
+
+thread 'provider_terminal_cannot_rewrite_original_api' panicked at tests/run_attempt_contract.rs:23:9:
+原 Provider 身份维度 1 不能在终态改写，实际 Ok(())
+
+---- provider_terminal_cannot_rewrite_original_model stdout ----
+
+thread 'provider_terminal_cannot_rewrite_original_model' panicked at tests/run_attempt_contract.rs:23:9:
+原 Provider 身份维度 2 不能在终态改写，实际 Ok(())
+
+
+failures:
+    provider_outcome_unknown_cannot_be_projected_as_successful_run
+    provider_terminal_cannot_rewrite_original_api
+    provider_terminal_cannot_rewrite_original_model
+    provider_terminal_cannot_rewrite_original_profile
+    provider_terminal_cannot_rewrite_original_start_time
+
+test result: FAILED. 0 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+error: test failed, to rerun pass `--test run_attempt_contract`

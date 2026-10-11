@@ -1,0 +1,22 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.05s
+     Running tests/writer_contract.rs (target/debug/deps/writer_contract-12f2878073cdb615)
+
+running 1 test
+test corrupted_provider_receipt_cannot_redirect_unknown_to_another_attempt ... FAILED
+
+failures:
+
+---- corrupted_provider_receipt_cannot_redirect_unknown_to_another_attempt stdout ----
+
+thread 'corrupted_provider_receipt_cannot_redirect_unknown_to_another_attempt' panicked at tests/writer_contract.rs:836:5:
+损坏JSON身份必须在修改另一条收据之前拒绝
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    corrupted_provider_receipt_cannot_redirect_unknown_to_another_attempt
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.06s
+
+error: test failed, to rerun pass `--test writer_contract`

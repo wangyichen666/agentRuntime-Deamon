@@ -1,0 +1,33 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.28s
+     Running tests/publication_contract.rs (target/debug/deps/publication_contract-aeb0e7f91586a409)
+
+running 12 tests
+test sqlite_receipt_foreign_scope_and_wrong_digest_are_rejected_by_database_foreign_key ... ok
+test sqlite_shared_publication_contract ... ok
+test sqlite_independent_connections_compete_with_controlled_barrier_and_single_lease_winner ... ok
+test sqlite_restart_after_inbox_commit_before_ack_replays_receipt_without_business_writes ... ok
+test sqlite_foreign_corrupt_outbox_must_be_forbidden_before_decode ... ok
+test sqlite_async_delivery_write_yields_the_runtime_during_real_database_lock ... ok
+test sqlite_outbox_failure_rolls_back_original_event_and_terminal_transaction ... ok
+test sqlite_saved_large_publication_rejects_before_any_claim_inbox_ack_or_clock_repair ... ok
+test sqlite_pending_delivery_keys_reject_oversized_saved_identity ... ok
+test sqlite_tamper_is_rejected_and_sql_trigger_prevents_body_rewrites ... ok
+test sqlite_v21_migration_does_not_backfill_old_events_and_verified_backup_reopens ... ok
+test sqlite_outbox_sql_binding_mismatch_must_not_return_original_private_envelope ... FAILED
+
+failures:
+
+---- sqlite_outbox_sql_binding_mismatch_must_not_return_original_private_envelope stdout ----
+
+thread 'sqlite_outbox_sql_binding_mismatch_must_not_return_original_private_envelope' panicked at tests/publication_contract.rs:875:10:
+called `Result::unwrap()` on an `Err` value: SqliteFailure(Error { code: ConstraintViolation, extended_code: 787 }, Some("FOREIGN KEY constraint failed"))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    sqlite_outbox_sql_binding_mismatch_must_not_return_original_private_envelope
+
+test result: FAILED. 11 passed; 1 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.72s
+
+error: test failed, to rerun pass `--test publication_contract`

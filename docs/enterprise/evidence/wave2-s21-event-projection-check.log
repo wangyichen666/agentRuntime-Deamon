@@ -1,0 +1,99 @@
+    Checking agent-storage-ports v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-ports)
+    Checking agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+    Checking agent-artifact v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/artifact)
+    Checking agent-storage-postgres v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-postgres)
+error[E0283]: type annotations needed
+   --> crates/storage/src/events.rs:120:28
+    |
+120 |                     return Err(CoordinationError::InvalidRequest.into());
+    |                            ^^^                                   ---- type must be known at this point
+    |                            |
+    |                            cannot infer type of the type parameter `E` declared on the enum `Result`
+    |
+note: multiple `impl`s satisfying `_: From<agent_core::CoordinationError>` found
+   --> crates/storage/src/lib.rs:64:20
+    |
+64  |     Coordination(#[from] agent_core::CoordinationError),
+    |                    ^^^^
+    = note: and another `impl` found in the `agent_core` crate: `impl From<agent_core::CoordinationError> for agent_core::RepositoryError;`
+    = note: required for `agent_core::CoordinationError` to implement `Into<_>`
+help: consider specifying the generic arguments
+    |
+120 |                     return Err::<agent_core::StoredEvent, E>(CoordinationError::InvalidRequest.into());
+    |                               ++++++++++++++++++++++++++++++
+
+error[E0283]: type annotations needed
+   --> crates/storage/src/events.rs:120:28
+    |
+116 |                     .map_err(|_| CoordinationError::Corrupt)?
+    |                                                             - type must be known at this point
+...
+120 |                     return Err(CoordinationError::InvalidRequest.into());
+    |                            ^^^ cannot infer type of the type parameter `E` declared on the enum `Result`
+    |
+note: multiple `impl`s satisfying `_: From<agent_core::CoordinationError>` found
+   --> crates/storage/src/lib.rs:64:20
+    |
+64  |     Coordination(#[from] agent_core::CoordinationError),
+    |                    ^^^^
+    = note: and another `impl` found in the `agent_core` crate: `impl From<agent_core::CoordinationError> for agent_core::RepositoryError;`
+help: consider specifying the generic arguments
+    |
+120 |                     return Err::<agent_core::StoredEvent, E>(CoordinationError::InvalidRequest.into());
+    |                               ++++++++++++++++++++++++++++++
+
+error[E0283]: type annotations needed
+   --> crates/storage/src/events.rs:120:28
+    |
+113 |                 let raw = raw.ok_or(CoordinationError::InvalidRequest)?;
+    |                                                                       - type must be known at this point
+...
+120 |                     return Err(CoordinationError::InvalidRequest.into());
+    |                            ^^^ cannot infer type of the type parameter `E` declared on the enum `Result`
+    |
+note: multiple `impl`s satisfying `_: From<agent_core::CoordinationError>` found
+   --> crates/storage/src/lib.rs:64:20
+    |
+64  |     Coordination(#[from] agent_core::CoordinationError),
+    |                    ^^^^
+    = note: and another `impl` found in the `agent_core` crate: `impl From<agent_core::CoordinationError> for agent_core::RepositoryError;`
+help: consider specifying the generic arguments
+    |
+120 |                     return Err::<agent_core::StoredEvent, E>(CoordinationError::InvalidRequest.into());
+    |                               ++++++++++++++++++++++++++++++
+
+error[E0283]: type annotations needed
+   --> crates/storage/src/events.rs:120:28
+    |
+120 |                     return Err(CoordinationError::InvalidRequest.into());
+    |                            ^^^ cannot infer type of the type parameter `E` declared on the enum `Result`
+...
+124 |             .transpose()?;
+    |                         - type must be known at this point
+    |
+note: multiple `impl`s satisfying `RuntimeError: From<_>` found
+   --> crates/storage/src/lib.rs:62:16
+    |
+62  |     Artifact(#[from] agent_core::ArtifactError),
+    |                ^^^^
+63  |     #[error("持久协调错误: {0}")]
+64  |     Coordination(#[from] agent_core::CoordinationError),
+    |                    ^^^^
+65  |     #[error("授权错误: {0}")]
+66  |     Authorization(#[from] agent_core::AuthorizationError),
+    |                     ^^^^
+...
+78  |     Persistence(#[from] rusqlite::Error),
+    |                   ^^^^
+...
+87  | impl From<agent_core::RepositoryError> for RuntimeError {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: consider specifying the generic arguments
+    |
+120 |                     return Err::<agent_core::StoredEvent, E>(CoordinationError::InvalidRequest.into());
+    |                               ++++++++++++++++++++++++++++++
+
+For more information about this error, try `rustc --explain E0283`.
+error: could not compile `agent-storage` (lib) due to 4 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `agent-storage` (lib test) due to 4 previous errors

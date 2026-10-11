@@ -1,0 +1,4 @@
+    Checking agent-acp v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/acp)
+    Checking agent-gateway v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/gateway)
+    Checking my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 12.28s

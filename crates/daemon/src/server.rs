@@ -60,6 +60,25 @@ pub async fn run_unix_server(
     paths: &RuntimePaths,
     workspace: &std::path::Path,
 ) -> Result<()> {
+    // 续租属于受管 daemon 生命周期，覆盖 fingerprint/ready 发布阶段。
+    if let Some(store) = state.session_writers.clone() {
+        let stop = state.shutdown.clone();
+        if !state.spawn_owned(async move {
+            let mut tick=tokio::time::interval(Duration::from_secs(3));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _=stop.cancelled()=>break,
+                    _=tick.tick()=>{
+                        if store.renew_bound_writers().await.is_err() {
+                            tracing::warn!("session writer 续租未确认，原事务 fence 将阻止过期写入");
+                        }
+                    }
+                }
+            }
+        }).await { anyhow::bail!("daemon 已停准入，不能启动 writer 续租"); }
+    }
+    crate::workflow::start(state.clone()).await?;
     paths.prepare().await?;
     if paths.socket.exists() {
         tokio::fs::remove_file(&paths.socket)
@@ -77,13 +96,56 @@ pub async fn run_unix_server(
     let mut memory_tick = tokio::time::interval(Duration::from_secs(60));
     memory_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut memory_due = false;
+    let mut memory_maintenance = JoinSet::new();
+    let mut publication_tick = tokio::time::interval(Duration::from_millis(250));
+    publication_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let publication_owner = format!(
+        "daemon-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    );
+    // 至多一个发布批次占用 blocking pool；不在 listener select 内等待 SQLite busy timeout。
+    let mut publications = JoinSet::new();
+    let mut hook_tick = tokio::time::interval(Duration::from_millis(250));
+    hook_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut hook_publications = JoinSet::new();
+    let mut idle_probes = JoinSet::new();
     let interrupt = tokio::signal::ctrl_c();
     tokio::pin!(interrupt);
 
     loop {
         tokio::select! {
+            _=hook_tick.tick(),if hook_publications.is_empty()=>{
+                let owner=state.clone();
+                hook_publications.spawn(async move {owner.dispatch_hook_publications().await});
+            }
+            result=hook_publications.join_next(),if !hook_publications.is_empty()=>{
+                match result {
+                    Some(Ok(Ok(())))|None=>{},
+                    Some(Ok(Err(error)))=>tracing::warn!(%error,"生命周期Hook发布未确认，保留原待发记录"),
+                    Some(Err(error))=>tracing::warn!(%error,"生命周期Hook发布任务异常结束"),
+                }
+            }
+            _ = publication_tick.tick(), if publications.is_empty() => {
+                let store=state.publication_store.clone();
+                let owner=publication_owner.clone();
+                let scope=state.scope();
+                publications.spawn(async move {
+                    agent_storage_ports::publish_to_local_inbox(store.as_ref(), &scope, &owner).await
+                });
+            }
+            result = publications.join_next(), if !publications.is_empty() => {
+                match result {
+                    Some(Ok(Ok(_))) | None => {},
+                    Some(Ok(Err(error))) => tracing::warn!(%error, "持久 outbox 发布未完成，保留待发记录重试"),
+                    Some(Err(error)) => tracing::warn!(%error, "持久 outbox 发布任务异常结束"),
+                }
+            }
             accepted = listener.accept() => {
                 let (stream, _) = accepted.context("接受 daemon 客户端连接失败")?;
+                if connections.len()>=256 {drop(stream);continue;}
                 clients = clients.saturating_add(1);
                 accepted_any = true;
                 idle_since = None;
@@ -94,28 +156,22 @@ pub async fn run_unix_server(
                     }
                 });
             }
-            _ = memory_tick.tick() => {
-                memory_due = match state.run_store.recover_memory_ingests(32) {
-                    Ok(_) => {
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map_or(0, |d| d.as_millis() as i64);
-                        match state.run_store.next_memory_ingest_due() {
-                            Ok(due) => due.is_some_and(|due| due <= now),
-                            Err(error) => {
-                                tracing::warn!(%error, "记忆维护积压查询失败，下次常规维护重试");
-                                false
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, "记忆摄入恢复未完成，下次常规维护重试");
-                        false
-                    }
+            _ = memory_tick.tick(),if memory_maintenance.is_empty()=>{
+                let store=state.memory_maintenance.clone();
+                let scope=state.scope();
+                memory_maintenance.spawn(async move{store.maintain_memory_turns(&scope,32).await});
+            }
+            result=memory_maintenance.join_next(),if !memory_maintenance.is_empty()=>{
+                memory_due=match result {
+                    Some(Ok(Ok((_,due))))=>{
+                        let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0,|d|d.as_millis() as i64);
+                        due.is_some_and(|due|due<=now)
+                    },
+                    Some(Ok(Err(error)))=>{tracing::warn!(%error,"记忆维护未完成，保留原退避记录");false},
+                    Some(Err(error))=>{tracing::warn!(%error,"记忆维护任务异常结束");false},
+                    None=>false
                 };
-                if memory_due {
-                    memory_tick.reset_after(Duration::from_millis(100));
-                }
+                if memory_due{memory_tick.reset_after(Duration::from_millis(100));}
             }
             result = connections.join_next(), if !connections.is_empty() => {
                 if let Some(Err(error)) = result { tracing::warn!(%error, "daemon 连接任务异常结束"); }
@@ -124,16 +180,25 @@ pub async fn run_unix_server(
                     idle_since = Some(tokio::time::Instant::now());
                 }
             }
-            _ = lifecycle_tick.tick() => {
-                if accepted_any
-                    && !memory_due
-                    && clients == 0
-                    && !state.has_active_turns().await
-                    && !state.has_persistent_background_work().await
-                    && idle_since.is_some_and(|since| since.elapsed() >= Duration::from_secs(2))
-                {
-                    break;
+            _ = lifecycle_tick.tick(),if idle_probes.is_empty()=>{
+                if accepted_any && clients==0 && idle_since.is_some_and(|since|since.elapsed()>=Duration::from_secs(2)) {
+                    let publications=state.publication_store.clone();
+                    let hooks=state.hook_observation_store.clone();
+                    let candidate=idle_since;
+                    let scope=state.scope();
+                    idle_probes.spawn(async move {
+                        let publication_pending=!publications.pending_delivery_keys(&scope,1).await.map_err(agent_core::RepositoryError::from)?.is_empty();
+                        let hook_pending=!hooks.read_pending_hooks(&scope).await?.is_empty();
+                        Ok::<_,agent_core::RepositoryError>((candidate,!publication_pending && !hook_pending))
+                    });
                 }
+            }
+            result=idle_probes.join_next(),if !idle_probes.is_empty()=>{
+                if matches!(result,Some(Ok(Ok((candidate,true)))) if candidate==idle_since)
+                    && accepted_any && clients==0 && !memory_due && memory_maintenance.is_empty()
+                    && publications.is_empty() && hook_publications.is_empty()
+                    && !state.has_active_turns().await && !state.has_persistent_background_work().await
+                    && idle_since.is_some_and(|since|since.elapsed()>=Duration::from_secs(2)) {break;}
             }
             _ = state.shutdown.cancelled() => break,
             result = &mut interrupt => {
@@ -171,11 +236,41 @@ pub async fn run_unix_server(
         tracing::warn!(aborted, "daemon 受管任务超时，已中止并标记未确认 run");
     }
     state.run_coordinator.active.lock().await.clear();
-    let uncertain = state.maintenance_store.recover()?;
+    // Cron 的实际 native 执行体也必须先 join，不能与全局 recovery 交错。
+    state.join_background().await;
+    // 先停止并join生命周期producer，再join其已接受的Hook执行体。
+    while let Some(result) = hook_publications.join_next().await {
+        if !matches!(result, Ok(Ok(()))) {
+            tracing::warn!("关闭时生命周期Hook发布未确认，保留待发记录");
+        }
+    }
+    state.join_effects().await;
+    // 已开始的批次每个 SQL busy 上限 5 秒；等待其提交/回滚，关闭时的新事件留待重启续发。
+    while let Some(result) = publications.join_next().await {
+        if !matches!(result, Ok(Ok(_))) {
+            tracing::warn!("关闭时 outbox 批次未完成，持久记录保留待发");
+        }
+    }
+    while let Some(result) = memory_maintenance.join_next().await {
+        if !matches!(result, Ok(Ok(_))) {
+            tracing::warn!("关闭时记忆维护未完成，保留原持久证据");
+        }
+    }
+    while idle_probes.join_next().await.is_some() {}
+    // 包括awaiter已中止的已接受SQL worker；恢复不能越过晚claim的提交。
+    state.storage_work_drain.drain_admitted_work().await?;
+    let uncertain = state
+        .daemon_maintenance_store
+        .recover_interrupted_work(&state.scope())
+        .await?;
     if uncertain > 0 {
         tracing::warn!(uncertain, "关闭时将未确认 run 标为 unknown_after_restart");
     }
-    state.join_background().await;
+    if let Some(store) = &state.session_writers
+        && store.release_bound_writers().await.is_err()
+    {
+        tracing::warn!("关闭时 writer 释放未确认，保留 DB 租约到期与恢复证据");
+    }
     paths.cleanup().await;
     Ok(())
 }
@@ -278,14 +373,16 @@ async fn serve_unix_connection(stream: UnixStream, state: Arc<DaemonState>) -> R
         let owner = state.clone();
         if !state
             .spawn_owned(async move {
-                owner.handle_request(request, request_frames).await;
+                owner
+                    .handle_transport_request(request, request_frames)
+                    .await;
             })
             .await
         {
             let _ = frames.send(ServerFrame::Response(JsonRpcResponse::failure(
                 request_id,
-                -32001,
-                "daemon 正在关闭",
+                if state.shutdown.is_cancelled() { -32001 } else { -32051 },
+                if state.shutdown.is_cancelled() { "daemon 正在关闭" } else { "daemon 并发预算不可用" },
             )));
         }
     }
@@ -419,7 +516,7 @@ mod tests {
         let session_id =
             agent_storage::SessionId(state.session_supervisor.default_session.id.clone());
         let agent_storage::Admission::New(run) = state
-            .run_store
+            .legacy_run_store()
             .admit(
                 session_id.clone(),
                 RequestId::String("manual-repair".into()),
@@ -429,8 +526,13 @@ mod tests {
         else {
             panic!("new run")
         };
-        assert!(state.run_store.try_start_queued(&run.run_id).unwrap());
-        assert_eq!(state.maintenance_store.recover().unwrap(), 1);
+        assert!(
+            state
+                .legacy_run_store()
+                .try_start_queued(&run.run_id)
+                .unwrap()
+        );
+        assert_eq!(state.legacy_maintenance_store().recover().unwrap(), 1);
         let client = InMemoryServer::start(state.clone());
         let audit = rpc(&client, "run.audit", json!({"run_id":run.run_id}))
             .await
@@ -457,14 +559,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subscribe_gap_returns_snapshot_and_page_cursor() {
+    async fn subscribe_gap_returns_snapshot_and_last_delivered_cursor() {
         let provider = Arc::new(MockProvider {
             responses: Mutex::new(VecDeque::new()),
         });
         let (state, session_path) = state_with_provider(provider).await;
         let session_id = state.session_supervisor.default_session.id.clone();
         let agent_storage::Admission::New(run) = state
-            .run_store
+            .legacy_run_store()
             .admit(
                 agent_storage::SessionId(session_id.clone()),
                 RequestId::Number(77),
@@ -476,7 +578,7 @@ mod tests {
         };
         for index in 0..1000 {
             state
-                .run_store
+                .legacy_run_store()
                 .append_event(&run.run_id, "text_delta", &json!({"delta": index}))
                 .unwrap();
         }
@@ -495,15 +597,29 @@ mod tests {
         assert_eq!(data["kind"], "resync_required");
         assert_eq!(data["snapshot"]["run_id"], run.run_id.0);
         assert_eq!(data["last_seq"], 1001);
-        assert_eq!(data["cursor"], 1000);
-        let page = rpc(
-            &client,
-            "run.events",
-            json!({"run_id":run.run_id,"after_seq":1000,"limit":200}),
-        )
-        .await
-        .unwrap();
-        assert_eq!(page["events"][0]["seq"], 1001);
+        assert_eq!(data["cursor"], 0);
+        let mut cursor = 0u64;
+        let mut delivered = 0u64;
+        loop {
+            let page = rpc(
+                &client,
+                "run.events",
+                json!({"run_id":run.run_id,"after_seq":cursor,"limit":200}),
+            )
+            .await
+            .unwrap();
+            for event in page["events"].as_array().unwrap() {
+                assert_eq!(event["seq"], cursor + 1, "未交付事件不能被重连游标跳过");
+                cursor += 1;
+                delivered += 1;
+            }
+            assert_eq!(page["cursor"], cursor);
+            if page["has_more"] == false {
+                break;
+            }
+        }
+        assert_eq!(delivered, 1001);
+        assert_eq!(cursor, 1001);
         let _ = std::fs::remove_file(session_path);
     }
 
@@ -699,6 +815,10 @@ mod tests {
         let (state, path) = test_state().await;
         let key = agent_storage::SessionId(state.session_supervisor.default_session.id.clone());
         let snapshot = agent_core::RunSnapshot {
+            workflow: None,
+            installed_generation:None,
+            billing_policy: None,
+            artifact_store_id: None,
             entry_channel: agent_core::HookChannel::DaemonRpc,
             route: None,
             tools: vec![],
@@ -719,9 +839,10 @@ mod tests {
             config_generation: 0,
         };
         let agent_core::Admission::New(run) = state
-            .run_store
+            .legacy_run_store()
             .admit_run(
                 &agent_core::RunAdmission {
+                    workflow_node: None,
                     plan_execution: None,
                     session_key: key.clone(),
                     expected_lifetime: Some(
@@ -737,8 +858,11 @@ mod tests {
         else {
             panic!("new")
         };
-        state.run_store.try_start_queued(&run.run_id).unwrap();
-        let owner = state.run_store.run_owner(&run.run_id).unwrap();
+        state
+            .legacy_run_store()
+            .try_start_queued(&run.run_id)
+            .unwrap();
+        let owner = state.legacy_run_store().run_owner(&run.run_id).unwrap();
         let resource = state
             .start_background(owner.clone(), "printf ready; sleep 30".into())
             .await
@@ -749,7 +873,7 @@ mod tests {
                 tokio::pin!(notified);
                 notified.as_mut().enable();
                 if state
-                    .run_store
+                    .legacy_run_store()
                     .resource_logs(resource.id, 0, 20)
                     .unwrap()
                     .iter()
@@ -776,7 +900,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(stopped.state, "stopped");
-        let logs = state.run_store.resource_logs(resource.id, 0, 20).unwrap();
+        let logs = state
+            .legacy_run_store()
+            .resource_logs(resource.id, 0, 20)
+            .unwrap();
         assert!(logs.iter().any(|(_, text)| text.contains("ready")));
         state.shutdown.cancel();
         state.join_owned(Duration::from_secs(3)).await;
@@ -834,9 +961,9 @@ mod tests {
         let (state, _) = test_state().await;
         let client = InMemoryServer::start(state.clone());
         let key = SessionKey("session-readonly-contract.jsonl".into());
-        state.run_store.create_session(&key).unwrap();
+        state.legacy_run_store().create_session(&key).unwrap();
         let before = state
-            .run_store
+            .legacy_run_store()
             .session_readback(&key, HistoryReadMode::Canonical)
             .unwrap();
         let path = state.session.path_for_session(&key.0);
@@ -876,7 +1003,7 @@ mod tests {
         assert!(state.run_coordinator.active.lock().await.is_empty());
         assert_eq!(
             state
-                .run_store
+                .legacy_run_store()
                 .session_readback(&key, HistoryReadMode::Canonical)
                 .unwrap()
                 .snapshot_revision,
@@ -891,7 +1018,7 @@ mod tests {
         );
         assert!(
             state
-                .run_store
+                .legacy_run_store()
                 .session_metadata(&missing)
                 .unwrap()
                 .is_none()
@@ -1254,7 +1381,7 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
-        let run = state.run_store.read_run(&run_id).unwrap().unwrap();
+        let run = state.legacy_run_store().read_run(&run_id).unwrap().unwrap();
         assert!(matches!(
             run.status,
             agent_storage::RunStatus::Cancelled | agent_storage::RunStatus::UnknownAfterRestart

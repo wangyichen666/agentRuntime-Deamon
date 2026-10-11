@@ -149,6 +149,7 @@ impl HookDispatcher {
         )?;
         trusted(path, self.uid, true, true)
     }
+    pub fn matches_registry_refs(&self,refs:&[ExtensionRef])->bool {refs.iter().any(|r|r.digest==self.fingerprint && r.trust>=PluginTrust::OrganizationReviewed)}
     pub fn configured(&self, event: HookEvent) -> bool {
         self.config_failure.is_some() || self.commands.contains_key(&event)
     }
@@ -174,41 +175,97 @@ impl HookDispatcher {
         let result = match self.config_failure {
             Some(failure) => Err(failure),
             None => match self.commands.get(&payload.event) {
-                Some(command) => self.execute(command, &payload, cancel).await,
+                Some(command) => {
+                    let mut started = false;
+                    self.execute(command, &payload, cancel, &mut started).await
+                }
                 None => Ok(HookEffect::Observe {}),
             },
         };
-        let outcome = match result {
-            Ok(HookEffect::Continue { .. }) if payload.data["continuation_allowed"] == false => {
-                HookOutcome {
-                    payload,
-                    status: HookStatus::Failed,
-                    effect: None,
-                    failure: Some(HookFailure::BudgetExceeded),
-                }
-            }
-            Ok(effect) if payload.event.permits(&effect) => HookOutcome {
-                payload,
-                status: HookStatus::Succeeded,
-                effect: Some(effect),
-                failure: None,
-            },
-            Ok(_) => HookOutcome {
-                payload,
-                status: HookStatus::Failed,
-                effect: None,
-                failure: Some(HookFailure::InvalidEffect),
-            },
-            Err(failure) => HookOutcome {
-                payload,
-                status: HookStatus::Failed,
-                effect: None,
-                failure: Some(failure),
-            },
-        };
+        let outcome = make_outcome(payload, result);
         let settled = store.settle_hook(&outcome)?;
         claim.armed = false;
         effect_result(&settled)
+    }
+
+    pub async fn invoke_managed(
+        &self,
+        context: HookExecutionContext,
+        mut payload: HookPayload,
+        parent: &CancellationToken,
+    ) -> Result<HookEffect> {
+        if !self.configured(payload.event) {
+            return Ok(HookEffect::Observe {});
+        }
+        if !payload.data.is_object() {
+            bail!("hook数据必须是对象");
+        }
+        payload.data["hook_config_digest"] = serde_json::json!(self.fingerprint);
+        let HookExecutionContext {
+            store,
+            scope,
+            envelope,
+            tasks,
+        } = context;
+        let dispatcher = self.clone();
+        let cancellation = CancellationToken::new();
+        if parent.is_cancelled() {
+            cancellation.cancel();
+        }
+        let _cancel_on_drop = CancelHookOnDrop(cancellation.clone());
+        let actor_cancel = cancellation.clone();
+        let (completed, result) = tokio::sync::oneshot::channel();
+        let job = async move {
+            let run = async {
+                // await不能在取消时detach：已接受的claim收敛后才判定能否启动进程。
+                let claim = store
+                    .claim_hook_effect(&scope, envelope.as_ref(), &payload)
+                    .await?;
+                if let HookClaim::Existing(outcome) = claim {
+                    return effect_result(&outcome);
+                }
+                let mut started = false;
+                let execution = if actor_cancel.is_cancelled() {
+                    Err(HookFailure::Cancelled)
+                } else {
+                    match dispatcher.config_failure {
+                        Some(failure) => Err(failure),
+                        None => match dispatcher.commands.get(&payload.event) {
+                            Some(command) => {
+                                dispatcher
+                                    .execute(command, &payload, &actor_cancel, &mut started)
+                                    .await
+                            }
+                            None => Ok(HookEffect::Observe {}),
+                        },
+                    }
+                };
+                let uncertain = started
+                    && matches!(
+                        execution,
+                        Err(HookFailure::Cancelled | HookFailure::Timeout)
+                    );
+                let mut outcome = make_outcome(payload, execution);
+                if uncertain {
+                    outcome.status = HookStatus::UnknownAfterRestart;
+                    outcome.effect = None;
+                    outcome.failure = Some(HookFailure::UnknownAfterRestart);
+                }
+                let settled = store
+                    .settle_hook_effect(&scope, envelope.as_ref(), &outcome)
+                    .await?;
+                effect_result(&settled)
+            };
+            let _ = completed.send(run.await);
+        };
+        if !tasks.spawn_hook_job(Box::pin(job)).await {
+            bail!("hook执行owner已停止");
+        }
+        let mut result = result;
+        tokio::select! {
+            result=&mut result=>result.map_err(|_|anyhow::anyhow!("hook执行owner未返回结果"))?,
+            _=parent.cancelled()=>{cancellation.cancel();result.await.map_err(|_|anyhow::anyhow!("hook取消结果未确认"))?}
+        }
     }
 
     async fn execute(
@@ -216,6 +273,7 @@ impl HookDispatcher {
         command: &HookCommand,
         payload: &HookPayload,
         cancel: &CancellationToken,
+        started: &mut bool,
     ) -> std::result::Result<HookEffect, HookFailure> {
         self.validate_executable(&command.executable)?;
         if cancel.is_cancelled() {
@@ -234,6 +292,7 @@ impl HookDispatcher {
         #[cfg(unix)]
         process.process_group(0);
         let mut child = process.spawn().map_err(|_| HookFailure::SpawnFailed)?;
+        *started = true;
         let group = ProcessGroup(child.id());
         let mut input = child.stdin.take().ok_or(HookFailure::SpawnFailed)?;
         let stdout = child.stdout.take().ok_or(HookFailure::SpawnFailed)?;
@@ -270,6 +329,40 @@ impl HookDispatcher {
         }
         let _ = child.wait().await;
         result
+    }
+}
+
+fn make_outcome(
+    payload: HookPayload,
+    result: std::result::Result<HookEffect, HookFailure>,
+) -> HookOutcome {
+    match result {
+        Ok(HookEffect::Continue { .. }) if payload.data["continuation_allowed"] == false => {
+            HookOutcome {
+                payload,
+                status: HookStatus::Failed,
+                effect: None,
+                failure: Some(HookFailure::BudgetExceeded),
+            }
+        }
+        Ok(effect) if payload.event.permits(&effect) => HookOutcome {
+            payload,
+            status: HookStatus::Succeeded,
+            effect: Some(effect),
+            failure: None,
+        },
+        Ok(_) => HookOutcome {
+            payload,
+            status: HookStatus::Failed,
+            effect: None,
+            failure: Some(HookFailure::InvalidEffect),
+        },
+        Err(failure) => HookOutcome {
+            payload,
+            status: HookStatus::Failed,
+            effect: None,
+            failure: Some(failure),
+        },
     }
 }
 
@@ -360,11 +453,31 @@ fn trusted(
     Err(HookFailure::Untrusted)
 }
 
+/// 只拥有执行句柄；领域结果仍属于原SQL HookOutcome。
+#[async_trait::async_trait]
+pub trait HookTaskOwner: Send + Sync {
+    async fn spawn_hook_job(
+        &self,
+        job: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+    ) -> bool;
+}
+#[derive(Clone)]
+pub struct HookExecutionContext {
+    pub store: Arc<dyn agent_storage_ports::HookExecutionRepository>,
+    pub scope: TenantContext,
+    pub envelope: Option<EnterpriseOwnerEnvelope>,
+    pub tasks: Arc<dyn HookTaskOwner>,
+}
+struct CancelHookOnDrop(CancellationToken);
+impl Drop for CancelHookOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
 #[derive(Clone)]
 pub struct HookScope {
     pub dispatcher: Arc<HookDispatcher>,
-    pub store: Arc<dyn ControlRepository>,
-    pub owner: ExactOwner,
+    pub execution: HookExecutionContext,
 }
 tokio::task_local! {static ACTIVE_HOOKS:HookScope;}
 pub async fn with_scope<F: std::future::Future>(scope: HookScope, future: F) -> F::Output {
@@ -382,6 +495,12 @@ pub async fn current(
     if !scope.dispatcher.configured(event) {
         return Ok(HookEffect::Observe {});
     }
+    let envelope = scope
+        .execution
+        .envelope
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("run hook缺固定准入proof"))?;
+    let owner = &envelope.owner;
     if matches!(
         event,
         HookEvent::ApprovalRequested | HookEvent::ApprovalResolved
@@ -390,11 +509,12 @@ pub async fn current(
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("hook 缺 interaction 身份"))?;
         let record = scope
+            .execution
             .store
-            .read_interaction(&InteractionId(id.into()))?
+            .read_hook_interaction(envelope, &InteractionId(id.into()))
+            .await?
             .ok_or_else(|| anyhow::anyhow!("hook interaction 未持久发布"))?;
-        if record.owner_run_id != scope.owner.run_id || record.session_id != scope.owner.session_key
-        {
+        if record.owner_run_id != owner.run_id || record.session_id != owner.session_key {
             bail!("hook interaction owner 冲突");
         }
         if event == HookEvent::ApprovalResolved && record.status == "pending" {
@@ -409,10 +529,11 @@ pub async fn current(
                 .and_then(|response| response["approved"].as_bool())
         );
     }
-    let snapshot = scope
-        .store
-        .run_snapshot(&scope.owner.run_id)?
-        .ok_or_else(|| anyhow::anyhow!("hook run 缺冻结快照"))?;
+    let snapshot = scope.execution.store.read_hook_snapshot(envelope).await?;
+    if let Some(g)=&snapshot.installed_generation {
+        if g.effective.config.hook_refs.is_empty() {return Ok(HookEffect::Observe {});}
+        anyhow::ensure!(g.effective.config.hook_refs.iter().any(|r|r.digest==scope.dispatcher.fingerprint && r.trust>=PluginTrust::OrganizationReviewed),"当前Hook不属于冻结发行代");
+    }
     let route_digest = snapshot
         .route
         .as_ref()
@@ -421,9 +542,9 @@ pub async fn current(
     let payload = HookPayload {
         schema_version: 1,
         event,
-        session_key: scope.owner.session_key.clone(),
-        session_lifetime_id: scope.owner.session_lifetime_id.clone(),
-        owner: Some(scope.owner.clone()),
+        session_key: owner.session_key.clone(),
+        session_lifetime_id: owner.session_lifetime_id.clone(),
+        owner: Some(owner.clone()),
         cwd: snapshot.cwd,
         channel: snapshot.entry_channel.key().into(),
         permission_mode: snapshot.permission_mode,
@@ -431,7 +552,7 @@ pub async fn current(
         data,
         operation_id: format!(
             "hook:{event:?}:{}:{}",
-            scope.owner.run_id.0,
+            owner.run_id.0,
             if suffix.len() > 128 {
                 format!("{:x}", Sha256::digest(suffix.as_bytes()))
             } else {
@@ -441,7 +562,7 @@ pub async fn current(
     };
     scope
         .dispatcher
-        .invoke(&*scope.store, payload, cancel)
+        .invoke_managed(scope.execution.clone(), payload, cancel)
         .await
 }
 

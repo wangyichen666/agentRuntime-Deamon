@@ -1,0 +1,37 @@
+sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+.......+.+...+........+...+.........+++++++++++++++++++++++++++++++++++++++*....+...........+++++++++++++++++++++++++++++++++++++++*.............+............+...+.+.....................+..+.+.........+........+..........+.....+.......+.....+............+....+.....+....+.................+....+.........+.....+.+...........+......+....+...+.....+.+....................+.+......+...+.....+.+.....+.+.........+...++++++
+...+.+......+.....+.........+++++++++++++++++++++++++++++++++++++++*.......+.........+........+.+.....+.+...+...+..+......+++++++++++++++++++++++++++++++++++++++*...+..+....+...+......+..............+............+.+..+.+.....+.........+...++++++
+-----
+...+.....+.+........+......+.+............+++++++++++++++++++++++++++++++++++++++*...+...+++++++++++++++++++++++++++++++++++++++*..+..........+...............+...+.....+.+..+....+...+.....+......+.+......+........+............+.........+.+...+..+.......+......+...........+.........+.........+.+.....+......+....+............+............+.....+......+....+...+............+........+.............+..+....+........+.+..+...+......+................+..+.+............+..++++++
+.........+........+......+...+..........+........+.............+..+....+...+++++++++++++++++++++++++++++++++++++++*...+.........+.+.....+...+.......+...+.....+......+..........+...+..+...+...+...............+....+..............+.........+...+.......+...+........+.+...+..+.+...............+...+..+....+...+.....+...+...+.+......+++++++++++++++++++++++++++++++++++++++*......+.....+....++++++
+-----
+Certificate request self-signature ok
+subject=CN=localhost
+1bbbc00264877471a079b478fbf93c66b61ad428a154cacd5126ce41b3428e6d
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 19.87s
+     Running unittests src/lib.rs (target/debug/deps/agent_artifact-250a7a3cb74f2038)
+
+running 1 test
+test s3::tests::s3_actual_bytes_scope_isolation_tamper_and_certificate_failure ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.53s
+     Running tests/object_artifact_contract.rs (target/debug/deps/object_artifact_contract-043dd12b0eccf5a4)
+
+running 1 test
+test s3_native_receipt_idempotency_restart_and_commit_fault_contract ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.12s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.16s
+     Running tests/runtime_contract.rs (target/debug/deps/runtime_contract-ef559da8ec38e611)
+
+running 1 test
+test object_artifacts_use_original_tool_receipt_and_restart_without_provider_replay ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 6.37s
+
+codex-agent-s3-740220a45ba34cfcbcd2

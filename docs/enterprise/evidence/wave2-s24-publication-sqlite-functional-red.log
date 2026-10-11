@@ -1,0 +1,37 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.29s
+     Running tests/publication_contract.rs (target/debug/deps/publication_contract-aeb0e7f91586a409)
+
+running 10 tests
+test sqlite_shared_publication_contract ... ok
+test sqlite_receipt_foreign_scope_and_wrong_digest_are_rejected_by_database_foreign_key ... ok
+test sqlite_independent_connections_compete_with_controlled_barrier_and_single_lease_winner ... ok
+test sqlite_restart_after_inbox_commit_before_ack_replays_receipt_without_business_writes ... ok
+test sqlite_foreign_corrupt_outbox_must_be_forbidden_before_decode ... FAILED
+test sqlite_outbox_failure_rolls_back_original_event_and_terminal_transaction ... ok
+test sqlite_tamper_is_rejected_and_sql_trigger_prevents_body_rewrites ... ok
+test sqlite_async_delivery_write_yields_the_runtime_during_real_database_lock ... ok
+test sqlite_v21_migration_does_not_backfill_old_events_and_verified_backup_reopens ... ok
+test sqlite_outbox_sql_binding_mismatch_must_not_return_original_private_envelope ... FAILED
+
+failures:
+
+---- sqlite_foreign_corrupt_outbox_must_be_forbidden_before_decode stdout ----
+
+thread 'sqlite_foreign_corrupt_outbox_must_be_forbidden_before_decode' panicked at tests/publication_contract.rs:786:5:
+六维外域应在SQL拒绝，而非先解码私有payload：[(0, "ACK", Err(Corrupt)), (0, "inbox", Err(Corrupt)), (1, "ACK", Err(Corrupt)), (1, "inbox", Err(Corrupt)), (2, "ACK", Err(Corrupt)), (2, "inbox", Err(Corrupt)), (3, "ACK", Err(Corrupt)), (3, "inbox", Err(Corrupt)), (4, "ACK", Err(Corrupt)), (4, "inbox", Err(Corrupt)), (5, "ACK", Err(Corrupt)), (5, "inbox", Err(Corrupt))]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- sqlite_outbox_sql_binding_mismatch_must_not_return_original_private_envelope stdout ----
+
+thread 'sqlite_outbox_sql_binding_mismatch_must_not_return_original_private_envelope' panicked at tests/publication_contract.rs:886:5:
+保存SQL列与JSON不同，不能返回原私密envelope：[("organization_id", Ok(1)), ("tenant_id", Ok(1)), ("project_id", Ok(1)), ("agent_uid", Ok(1)), ("session_key", Ok(1)), ("lifetime", Ok(1))]
+
+
+failures:
+    sqlite_foreign_corrupt_outbox_must_be_forbidden_before_decode
+    sqlite_outbox_sql_binding_mismatch_must_not_return_original_private_envelope
+
+test result: FAILED. 8 passed; 2 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.59s
+
+error: test failed, to rerun pass `--test publication_contract`

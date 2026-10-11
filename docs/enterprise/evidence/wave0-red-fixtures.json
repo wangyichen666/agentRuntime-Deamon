@@ -1,0 +1,47 @@
+[
+  {
+    "case": "dependency",
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--test",
+      "architecture_contract",
+      "--all-features",
+      "enterprise_every_workspace_library_is_reviewed_and_checks_all_cargo_dependency_tables"
+    ],
+    "exit_code": 101,
+    "expected_guard_rejected": true,
+    "log": "docs/enterprise/evidence/wave0-red-dependency.log"
+  },
+  {
+    "case": "owner",
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--test",
+      "architecture_contract",
+      "--all-features",
+      "enterprise_workspace_has_no_second_mutable_business_owner"
+    ],
+    "exit_code": 101,
+    "expected_guard_rejected": true,
+    "log": "docs/enterprise/evidence/wave0-red-owner.log"
+  },
+  {
+    "case": "channel",
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--test",
+      "architecture_contract",
+      "--all-features",
+      "enterprise_channels_only_allow_exact_documented_legacy_sites_and_no_new_unbounded"
+    ],
+    "exit_code": 101,
+    "expected_guard_rejected": true,
+    "log": "docs/enterprise/evidence/wave0-red-channel.log"
+  }
+]

@@ -1,0 +1,137 @@
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+error[E0283]: type annotations needed
+   --> crates/storage/src/context_projection.rs:287:32
+    |
+287 |                         return Err(CoordinationError::Corrupt.into());
+    |                                ^^^                            ---- type must be known at this point
+    |                                |
+    |                                cannot infer type of the type parameter `E` declared on the enum `Result`
+    |
+note: multiple `impl`s satisfying `_: From<agent_core::CoordinationError>` found
+   --> crates/storage/src/lib.rs:64:20
+    |
+64  |     Coordination(#[from] agent_core::CoordinationError),
+    |                    ^^^^
+    = note: and another `impl` found in the `agent_core` crate: `impl From<agent_core::CoordinationError> for agent_core::RepositoryError;`
+    = note: required for `agent_core::CoordinationError` to implement `Into<_>`
+help: consider specifying the generic arguments
+    |
+287 |                         return Err::<agent_core::ProjectionGeneration, E>(CoordinationError::Corrupt.into());
+    |                                   +++++++++++++++++++++++++++++++++++++++
+
+error[E0283]: type annotations needed
+   --> crates/storage/src/context_projection.rs:287:32
+    |
+287 |                         return Err(CoordinationError::Corrupt.into());
+    |                                ^^^ cannot infer type of the type parameter `E` declared on the enum `Result`
+...
+290 |                         return Err(CoordinationError::Conflict.into());
+    |                                                                ---- type must be known at this point
+    |
+note: multiple `impl`s satisfying `_: From<agent_core::CoordinationError>` found
+   --> crates/storage/src/lib.rs:64:20
+    |
+64  |     Coordination(#[from] agent_core::CoordinationError),
+    |                    ^^^^
+    = note: and another `impl` found in the `agent_core` crate: `impl From<agent_core::CoordinationError> for agent_core::RepositoryError;`
+    = note: required for `agent_core::CoordinationError` to implement `Into<_>`
+help: consider specifying the generic arguments
+    |
+287 |                         return Err::<agent_core::ProjectionGeneration, E>(CoordinationError::Corrupt.into());
+    |                                   +++++++++++++++++++++++++++++++++++++++
+
+error[E0283]: type annotations needed
+   --> crates/storage/src/context_projection.rs:287:32
+    |
+287 |                         return Err(CoordinationError::Corrupt.into());
+    |                                ^^^ cannot infer type of the type parameter `E` declared on the enum `Result`
+...
+293 |                         return Err(CoordinationError::Conflict.into());
+    |                                                                ---- type must be known at this point
+    |
+note: multiple `impl`s satisfying `_: From<agent_core::CoordinationError>` found
+   --> crates/storage/src/lib.rs:64:20
+    |
+64  |     Coordination(#[from] agent_core::CoordinationError),
+    |                    ^^^^
+    = note: and another `impl` found in the `agent_core` crate: `impl From<agent_core::CoordinationError> for agent_core::RepositoryError;`
+    = note: required for `agent_core::CoordinationError` to implement `Into<_>`
+help: consider specifying the generic arguments
+    |
+287 |                         return Err::<agent_core::ProjectionGeneration, E>(CoordinationError::Corrupt.into());
+    |                                   +++++++++++++++++++++++++++++++++++++++
+
+error[E0283]: type annotations needed
+   --> crates/storage/src/context_projection.rs:287:32
+    |
+287 |                         return Err(CoordinationError::Corrupt.into());
+    |                                ^^^ cannot infer type of the type parameter `E` declared on the enum `Result`
+...
+306 |                         return Err(CoordinationError::Corrupt.into());
+    |                                                               ---- type must be known at this point
+    |
+note: multiple `impl`s satisfying `_: From<agent_core::CoordinationError>` found
+   --> crates/storage/src/lib.rs:64:20
+    |
+64  |     Coordination(#[from] agent_core::CoordinationError),
+    |                    ^^^^
+    = note: and another `impl` found in the `agent_core` crate: `impl From<agent_core::CoordinationError> for agent_core::RepositoryError;`
+    = note: required for `agent_core::CoordinationError` to implement `Into<_>`
+help: consider specifying the generic arguments
+    |
+287 |                         return Err::<agent_core::ProjectionGeneration, E>(CoordinationError::Corrupt.into());
+    |                                   +++++++++++++++++++++++++++++++++++++++
+
+error[E0283]: type annotations needed
+   --> crates/storage/src/context_projection.rs:287:32
+    |
+287 |                         return Err(CoordinationError::Corrupt.into());
+    |                                ^^^ cannot infer type of the type parameter `E` declared on the enum `Result`
+...
+301 |                             .ok_or(CoordinationError::Corrupt)?
+    |                                                               - type must be known at this point
+    |
+note: multiple `impl`s satisfying `_: From<agent_core::CoordinationError>` found
+   --> crates/storage/src/lib.rs:64:20
+    |
+64  |     Coordination(#[from] agent_core::CoordinationError),
+    |                    ^^^^
+    = note: and another `impl` found in the `agent_core` crate: `impl From<agent_core::CoordinationError> for agent_core::RepositoryError;`
+help: consider specifying the generic arguments
+    |
+287 |                         return Err::<agent_core::ProjectionGeneration, E>(CoordinationError::Corrupt.into());
+    |                                   +++++++++++++++++++++++++++++++++++++++
+
+error[E0283]: type annotations needed
+   --> crates/storage/src/context_projection.rs:287:32
+    |
+287 |                         return Err(CoordinationError::Corrupt.into());
+    |                                ^^^ cannot infer type of the type parameter `E` declared on the enum `Result`
+...
+311 |             .transpose()?;
+    |                         - type must be known at this point
+    |
+note: multiple `impl`s satisfying `RuntimeError: From<_>` found
+   --> crates/storage/src/lib.rs:62:16
+    |
+62  |     Artifact(#[from] agent_core::ArtifactError),
+    |                ^^^^
+63  |     #[error("持久协调错误: {0}")]
+64  |     Coordination(#[from] agent_core::CoordinationError),
+    |                    ^^^^
+65  |     #[error("授权错误: {0}")]
+66  |     Authorization(#[from] agent_core::AuthorizationError),
+    |                     ^^^^
+...
+78  |     Persistence(#[from] rusqlite::Error),
+    |                   ^^^^
+...
+87  | impl From<agent_core::RepositoryError> for RuntimeError {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: consider specifying the generic arguments
+    |
+287 |                         return Err::<agent_core::ProjectionGeneration, E>(CoordinationError::Corrupt.into());
+    |                                   +++++++++++++++++++++++++++++++++++++++
+
+For more information about this error, try `rustc --explain E0283`.
+error: could not compile `agent-storage` (lib) due to 6 previous errors

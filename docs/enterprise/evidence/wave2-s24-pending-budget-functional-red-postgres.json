@@ -1,0 +1,32 @@
+{
+  "backend": "PostgreSQL / 本机 Unix socket",
+  "database": "codex_agent_wave2_c5c864b0bc7a4a6894f4",
+  "results": [
+    {
+      "name": "server_version",
+      "exit_code": 0,
+      "seconds": 0.010662375018000603
+    },
+    {
+      "name": "create_isolated_database",
+      "exit_code": 0,
+      "seconds": 0.21810179110616446
+    },
+    {
+      "name": "build_worker",
+      "exit_code": 0,
+      "seconds": 0.13627629121765494
+    },
+    {
+      "name": "real_contracts",
+      "exit_code": 101,
+      "seconds": 0.2900320836342871
+    },
+    {
+      "name": "drop_only_created_database",
+      "exit_code": 0,
+      "seconds": 0.030415458139032125
+    }
+  ],
+  "verification": "failed/unverified"
+}

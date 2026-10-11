@@ -9,6 +9,12 @@ publish = false
 test-support = []
 
 [dependencies]
+agent-workflow = {version="=0.1.0",path="../workflow"}
+agent-registry = {version="=0.1.0",path="../registry"}
+agent-identity = { version = "=0.1.0", path = "../identity" }
+agent-artifact = { version="=0.1.0", path="../artifact" }
+agent-storage-ports = { version = "=0.1.0", path = "../storage-ports" }
+async-trait = "0.1"
 libc = "0.2"
 agent-core = { version = "=0.1.0", path = "../core" }
 rusqlite = { version = "0.37", features = ["bundled"] }
@@ -17,3 +23,9 @@ serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
 tracing = "0.1"
+rustix = { version="=1.1.4",features=["fs"] }
+
+tokio = { version="1", features=["rt","sync","time"] }
+
+[dev-dependencies]
+tokio = { version="1", features=["macros"] }

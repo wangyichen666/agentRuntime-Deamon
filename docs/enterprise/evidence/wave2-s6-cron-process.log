@@ -1,0 +1,25 @@
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.33s
+     Running tests/runtime_contract.rs (target/debug/deps/runtime_contract-ef559da8ec38e611)
+
+running 1 test
+test scheduled_native_cron_renews_and_recovers_without_provider_replay has been running for over 60 seconds
+test scheduled_native_cron_renews_and_recovers_without_provider_replay ... FAILED
+
+failures:
+
+---- scheduled_native_cron_renews_and_recovers_without_provider_replay stdout ----
+
+thread 'scheduled_native_cron_renews_and_recovers_without_provider_replay' panicked at tests/runtime_contract.rs:3403:14:
+真实定时触发、续租与退出恢复合同超时: Elapsed(())
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    scheduled_native_cron_renews_and_recovers_without_provider_replay
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 39 filtered out; finished in 60.01s
+
+error: test failed, to rerun pass `--test runtime_contract`

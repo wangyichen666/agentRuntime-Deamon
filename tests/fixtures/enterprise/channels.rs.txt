@@ -1,0 +1,8 @@
+use tokio::sync::mpsc::unbounded_channel as make_queue;
+use std::sync::mpsc as legacy;
+fn bad() {
+    let _ = tokio::sync::mpsc::unbounded_channel::<u8>();
+    let _ = make_queue::<u8>();
+    let _ = legacy::channel::<u8>();
+    let _ = tokio::sync::mpsc::channel::<u8>(0);
+}

@@ -1,0 +1,28 @@
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.33s
+     Running tests/runtime_contract.rs (target/debug/deps/runtime_contract-ef559da8ec38e611)
+
+running 3 tests
+test native_writer_cron_s3_preserves_original_receipt_and_never_falls_back_to_file ... ignored, 需要独立真实 TLS MinIO，验证原生后台 writer 和冻结对象 backend
+test native_writer_cron_uses_daemons_canonical_repository_and_proof ... ok
+test scheduled_native_cron_renews_and_recovers_without_provider_replay ... FAILED
+
+failures:
+
+---- scheduled_native_cron_renews_and_recovers_without_provider_replay stdout ----
+
+thread 'scheduled_native_cron_renews_and_recovers_without_provider_replay' panicked at tests/runtime_contract.rs:3405:13:
+assertion `left == right` failed: 中断 Provider 必须保留原 attempt 的未知收据
+  left: "started"
+ right: "outcome_unknown"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    scheduled_native_cron_renews_and_recovers_without_provider_replay
+
+test result: FAILED. 1 passed; 1 failed; 1 ignored; 0 measured; 37 filtered out; finished in 12.50s
+
+error: test failed, to rerun pass `--test runtime_contract`

@@ -54,8 +54,10 @@ impl ContextConfig {
     }
 }
 
-pub type SummaryAssembler =
-    Arc<dyn Fn(&[Message]) -> Result<agent_core::AssembledProviderRequest> + Send + Sync>;
+pub type SummaryAssemblyFuture = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<agent_core::AssembledProviderRequest>> + Send>,
+>;
+pub type SummaryAssembler = Arc<dyn Fn(Vec<Message>) -> SummaryAssemblyFuture + Send + Sync>;
 
 #[derive(Clone)]
 pub struct ContextManager {
@@ -70,6 +72,8 @@ pub struct ContextManager {
 }
 
 impl ContextManager {
+    pub fn with_registry_prompt(&self,prompt:String)->Self {let mut copy=self.clone();copy.system_prompt=prompt;copy}
+
     pub fn with_summary_assembler(&self, assembler: SummaryAssembler) -> Self {
         let mut copy = self.clone();
         copy.summary_assembler = Some(assembler);
@@ -454,7 +458,7 @@ impl ContextManager {
             Message::text(Role::User, source),
         ];
         let prepared = if let Some(assembler) = &self.summary_assembler {
-            assembler(&messages)?
+            assembler(messages.to_vec()).await?
         } else {
             agent_context::assemble_request(&agent_core::ProviderRequestInput {
                 purpose: agent_core::ProviderRequestPurpose::CompactSummary,
@@ -584,6 +588,53 @@ mod tests {
     fn token_estimate_treats_chinese_more_densely_than_ascii() {
         assert_eq!(estimate_text_tokens("中文中文中文"), 4);
         assert_eq!(estimate_text_tokens("abcdefghijkl"), 3);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn summary_capture_awaits_before_wire_and_failed_capture_never_calls_provider() {
+        let provider = Arc::new(SummaryProvider {
+            responses: Mutex::new(VecDeque::from([Response::Text("不应发送".into())])),
+            calls: Mutex::new(0),
+        });
+        let manager = ContextManager::new(
+            provider.clone(),
+            std::env::current_dir().unwrap(),
+            ContextConfig {
+                token_budget: 4096,
+                recent_messages: 2,
+                mild_compression_percent: 60,
+                strong_compression_percent: 85,
+                summary_chunk_tokens: 1000,
+            },
+            Arc::new(PlanStore::memory_only()),
+        )
+        .unwrap();
+        let seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = seen.clone();
+        let manager = manager.with_summary_assembler(Arc::new(move |messages| {
+            let observed = observed.clone();
+            Box::pin(async move {
+                assert_eq!(messages.len(), 2);
+                assert_eq!(messages[1].content.as_deref(), Some("原摘要材料"));
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                Err(agent_core::CoordinationError::StorageUnavailable.into())
+            })
+        }));
+        let begin = std::time::Instant::now();
+        let (result, timer) = tokio::join!(manager.request_summary("原摘要材料"), async {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            begin.elapsed()
+        });
+        assert!(
+            result
+                .unwrap_err()
+                .downcast_ref::<agent_core::CoordinationError>()
+                .is_some()
+        );
+        assert!(timer < std::time::Duration::from_millis(150));
+        assert!(seen.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(*provider.calls.lock().unwrap(), 0);
     }
 
     #[tokio::test]

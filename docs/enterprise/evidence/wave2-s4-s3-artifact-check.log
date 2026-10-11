@@ -1,0 +1,69 @@
+    Updating `rsproxy-sparse` index
+     Locking 8 packages to latest Rust 1.88 compatible versions
+      Adding h2 v0.4.20
+      Adding humantime v2.4.0
+      Adding md-5 v0.10.6
+      Adding object_store v0.12.4 (available: v0.12.5)
+      Adding openssl-probe v0.2.1
+      Adding quick-xml v0.38.4
+      Adding rustls-native-certs v0.8.4
+      Adding schannel v0.1.29
+ Downloading crates ...
+  Downloaded h2 v0.4.20 (registry `rsproxy-sparse`)
+  Downloaded humantime v2.4.0 (registry `rsproxy-sparse`)
+  Downloaded rustls-native-certs v0.8.4 (registry `rsproxy-sparse`)
+  Downloaded quick-xml v0.38.4 (registry `rsproxy-sparse`)
+    Checking mio v1.2.3
+    Checking serde_core v1.0.229
+   Compiling ring v0.17.14
+    Checking futures-io v0.3.34
+    Checking tracing-core v0.1.36
+    Checking hashbrown v0.17.1
+    Checking fnv v1.0.7
+    Checking bitflags v2.13.1
+    Checking log v0.4.34
+    Checking itertools v0.14.0
+    Checking rand v0.9.5
+    Checking futures-util v0.3.34
+    Checking md-5 v0.10.6
+    Checking security-framework v3.7.0
+    Checking tracing v0.1.44
+    Checking tokio v1.53.1
+    Checking indexmap v2.14.2
+    Checking humantime v2.4.0
+    Checking serde v1.0.229
+    Checking serde_json v1.0.151
+    Checking rustls-native-certs v0.8.4
+   Compiling rustls v0.23.45
+    Checking futures-executor v0.3.34
+    Checking serde_urlencoded v0.7.1
+    Checking quick-xml v0.38.4
+    Checking agent-core v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/core)
+    Checking chrono v0.4.45
+    Checking tokio-util v0.7.19
+    Checking tower v0.5.3
+    Checking rustls-webpki v0.103.15
+    Checking futures v0.3.34
+    Checking tower-http v0.6.11
+    Checking h2 v0.4.20
+error[E0277]: the trait bound `enterprise::EnterpriseOwnerEnvelope: std::cmp::Eq` is not satisfied
+  --> crates/core/src/artifact.rs:79:5
+   |
+75 | #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+   |                                   -- in this derive macro expansion
+...
+79 |     pub envelope: crate::EnterpriseOwnerEnvelope,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `std::cmp::Eq` is not implemented for `enterprise::EnterpriseOwnerEnvelope`
+   |
+note: required by a bound in `AssertParamIsEq`
+  --> /rustc/6b00bc3880198600130e1cf62b8f8a93494488cc/library/core/src/cmp.rs:364:1
+help: consider annotating `enterprise::EnterpriseOwnerEnvelope` with `#[derive(Eq)]`
+  --> crates/core/src/enterprise.rs:171:1
+   |
+171+ #[derive(Eq)]
+172| pub struct EnterpriseOwnerEnvelope {
+   |
+
+For more information about this error, try `rustc --explain E0277`.
+error: could not compile `agent-core` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

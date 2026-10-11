@@ -1,0 +1,14 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.22s
+     Running tests/run_fact_contract.rs (target/debug/deps/run_fact_contract-4c047fc82807f7a0)
+
+running 6 tests
+test provider_history_does_not_trust_inner_json_owner_fields ... ok
+test all_run_fact_ports_filter_every_scope_dimension_and_absent_before_reading ... ok
+test run_fact_readback_never_reveals_foreign_content ... ok
+test damaged_stamp_and_database_fault_are_typed_and_never_leak_sql ... ok
+test run_fact_projection_reuses_original_facts_after_restart_and_retired_lifetime ... ok
+test run_readback_rejects_byte_and_row_overflow_and_corrupted_provider_identity ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s
+

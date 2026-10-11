@@ -4,12 +4,23 @@ use thiserror::Error;
 
 pub use agent_core::{ProviderDiagnostic, ProviderErrorKind, TimeoutPhase};
 
+// 仅驱动的连接失败/明确拒绝和 canonical 完成路径可提供证据；
+// 上游诊断字符串、没有收到输出或 Connect 标签都不能证明没有执行。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DispatchEvidence {
+    Unknown,
+    NotSent,
+    Rejected,
+    Completed,
+}
+
 #[derive(Clone, Debug, Error)]
 #[error("Provider {kind:?}: {diagnostic_message}")]
 pub struct ProviderError {
     pub kind: ProviderErrorKind,
     pub diagnostic: ProviderDiagnostic,
     diagnostic_message: &'static str,
+    dispatch: DispatchEvidence,
 }
 
 impl ProviderError {
@@ -21,6 +32,7 @@ impl ProviderError {
                 ..Default::default()
             },
             diagnostic_message: message,
+            dispatch: DispatchEvidence::Unknown,
         }
     }
 
@@ -29,11 +41,29 @@ impl ProviderError {
     }
 
     pub fn from_reqwest(error: &reqwest::Error) -> Self {
-        if error.is_timeout() {
-            Self::timeout(TimeoutPhase::Connect)
+        let not_sent = error.is_connect() || error.is_builder();
+        let mut classified = if error.is_timeout() {
+            Self::timeout(if not_sent {
+                TimeoutPhase::Connect
+            } else {
+                TimeoutPhase::Overall
+            })
         } else {
             Self::new(ProviderErrorKind::Transport, "Provider 网络传输失败")
+        };
+        if not_sent {
+            classified.dispatch = DispatchEvidence::NotSent;
         }
+        classified
+    }
+
+    pub(crate) fn outcome_unknown(&self) -> bool {
+        self.dispatch == DispatchEvidence::Unknown
+    }
+
+    pub(crate) fn completed(mut self) -> Self {
+        self.dispatch = DispatchEvidence::Completed;
+        self
     }
 
     pub fn from_http(
@@ -105,6 +135,12 @@ impl ProviderError {
                 redacted_message: message.into(),
             },
             diagnostic_message: message,
+            // 4xx 是明确拒绝；5xx、代理故障或响应丢失不能证明没有执行。
+            dispatch: if status.is_client_error() {
+                DispatchEvidence::Rejected
+            } else {
+                DispatchEvidence::Unknown
+            },
         }
     }
 }

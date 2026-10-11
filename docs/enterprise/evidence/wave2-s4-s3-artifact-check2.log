@@ -1,0 +1,10 @@
+    Checking hyper v1.11.1
+    Checking tokio-rustls v0.26.4
+    Checking agent-core v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/core)
+    Checking hyper-util v0.1.20
+    Checking hyper-rustls v0.27.9
+    Checking agent-storage-ports v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-ports)
+    Checking reqwest v0.12.28
+    Checking object_store v0.12.4
+    Checking agent-artifact v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/artifact)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 9.61s

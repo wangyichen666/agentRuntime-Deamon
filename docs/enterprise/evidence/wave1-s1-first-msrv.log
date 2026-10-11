@@ -1,0 +1,43 @@
+    Checking agent-core v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/core)
+error[E0283]: type annotations needed
+   --> crates/core/src/enterprise.rs:267:45
+    |
+267 |             TenantId::try_from("tenant-001".into()).unwrap().as_str(),
+    |             --------                        ^^^^
+    |             |
+    |             type must be known at this point
+    |
+note: multiple `impl`s satisfying `enterprise::TenantId: TryFrom<_>` found
+   --> crates/core/src/enterprise.rs:13:9
+    |
+13  |           impl TryFrom<String> for $name {
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+25  | / opaque_ids!(
+26  | |     OrganizationId,
+27  | |     TenantId,
+28  | |     ProjectId,
+...   |
+32  | |     PolicyVersion
+33  | | );
+    | |_- in this macro invocation
+    = note: and another `impl` found in the `core` crate:
+            - impl<T, U> TryFrom<U> for T
+              where U: Into<T>;
+    = note: this error originates in the macro `opaque_ids` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: try using a fully qualified path to specify the expected types
+    |
+267 -             TenantId::try_from("tenant-001".into()).unwrap().as_str(),
+267 +             TenantId::try_from(<&str as Into<T>>::into("tenant-001")).unwrap().as_str(),
+    |
+
+For more information about this error, try `rustc --explain E0283`.
+    Checking agent-daemon-protocol v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-protocol)
+    Checking agent-memory v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/memory)
+    Checking agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+    Checking agent-context v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/context)
+    Checking agent-sandbox v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/sandbox)
+    Checking agent-policy v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/policy)
+    Checking agent-identity v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/identity)
+error: could not compile `agent-core` (lib test) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

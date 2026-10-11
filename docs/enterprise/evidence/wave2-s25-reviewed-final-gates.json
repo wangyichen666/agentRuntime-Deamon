@@ -1,0 +1,135 @@
+[
+  {
+    "name": "fmt",
+    "command": [
+      "cargo",
+      "fmt",
+      "--all",
+      "--",
+      "--check"
+    ],
+    "exit_code": 0,
+    "seconds": 0.814042,
+    "started_at_utc": "2026-10-09T03:31:21.574434+00:00",
+    "log": "docs/enterprise/evidence/wave2-s25-reviewed-final-fmt.log",
+    "verification": "locally verified"
+  },
+  {
+    "name": "tests",
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--workspace",
+      "--all-targets",
+      "--all-features"
+    ],
+    "exit_code": 0,
+    "seconds": 922.753482,
+    "started_at_utc": "2026-10-09T03:31:22.388858+00:00",
+    "log": "docs/enterprise/evidence/wave2-s25-reviewed-final-tests.log",
+    "verification": "locally verified"
+  },
+  {
+    "name": "clippy",
+    "command": [
+      "cargo",
+      "clippy",
+      "--locked",
+      "--workspace",
+      "--all-targets",
+      "--all-features",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "exit_code": 0,
+    "seconds": 0.769496,
+    "started_at_utc": "2026-10-09T03:46:45.143259+00:00",
+    "log": "docs/enterprise/evidence/wave2-s25-reviewed-final-clippy.log",
+    "verification": "locally verified"
+  },
+  {
+    "name": "msrv",
+    "command": [
+      "cargo",
+      "+1.88.0",
+      "check",
+      "--locked",
+      "--workspace",
+      "--all-targets",
+      "--all-features"
+    ],
+    "exit_code": 0,
+    "seconds": 67.687613,
+    "started_at_utc": "2026-10-09T03:46:45.913051+00:00",
+    "log": "docs/enterprise/evidence/wave2-s25-reviewed-final-msrv.log",
+    "verification": "locally verified"
+  },
+  {
+    "name": "release",
+    "command": [
+      "cargo",
+      "build",
+      "--locked",
+      "--release"
+    ],
+    "exit_code": 0,
+    "seconds": 33.768215,
+    "started_at_utc": "2026-10-09T03:47:53.601701+00:00",
+    "log": "docs/enterprise/evidence/wave2-s25-reviewed-final-release.log",
+    "verification": "locally verified"
+  },
+  {
+    "name": "web",
+    "command": [
+      "node",
+      "--test",
+      "web/app.test.cjs"
+    ],
+    "exit_code": 0,
+    "seconds": 0.216689,
+    "started_at_utc": "2026-10-09T03:48:27.370364+00:00",
+    "log": "docs/enterprise/evidence/wave2-s25-reviewed-final-web.log",
+    "verification": "locally verified"
+  },
+  {
+    "name": "js",
+    "command": [
+      "node",
+      "--check",
+      "web/app.js"
+    ],
+    "exit_code": 0,
+    "seconds": 0.039468,
+    "started_at_utc": "2026-10-09T03:48:27.587442+00:00",
+    "log": "docs/enterprise/evidence/wave2-s25-reviewed-final-js.log",
+    "verification": "locally verified"
+  },
+  {
+    "name": "deny",
+    "command": [
+      "cargo",
+      "deny",
+      "check"
+    ],
+    "exit_code": 0,
+    "seconds": 1.592952,
+    "started_at_utc": "2026-10-09T03:48:27.627231+00:00",
+    "log": "docs/enterprise/evidence/wave2-s25-reviewed-final-deny.log",
+    "verification": "locally verified"
+  },
+  {
+    "name": "diff",
+    "command": [
+      "git",
+      "diff",
+      "--check"
+    ],
+    "exit_code": 0,
+    "seconds": 0.039899,
+    "started_at_utc": "2026-10-09T03:48:29.220524+00:00",
+    "log": "docs/enterprise/evidence/wave2-s25-reviewed-final-diff.log",
+    "verification": "locally verified"
+  }
+]

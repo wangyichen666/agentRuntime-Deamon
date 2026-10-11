@@ -1,0 +1,22 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.37s
+     Running tests/publication_contract.rs (target/debug/deps/publication_contract-e8e473e589cc2af5)
+
+running 1 test
+test sqlite_async_delivery_write_yields_the_runtime_during_real_database_lock ... FAILED
+
+failures:
+
+---- sqlite_async_delivery_write_yields_the_runtime_during_real_database_lock stdout ----
+
+thread 'sqlite_async_delivery_write_yields_the_runtime_during_real_database_lock' panicked at tests/publication_contract.rs:722:5:
+异步端口不能在执行器中同步等五秒SQLite写锁：Ok(Err(StorageUnavailable))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    sqlite_async_delivery_write_yields_the_runtime_during_real_database_lock
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 13 filtered out; finished in 5.21s
+
+error: test failed, to rerun pass `--test publication_contract`

@@ -1,0 +1,17 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+error[E0369]: binary operation `==` cannot be applied to type `Result<usize, syn::Error>`
+    --> tests/architecture_contract.rs:1133:246
+     |
+1133 | ...tches!(&lit.lit, syn::Lit::Int(n) if n.base10_parse::<usize>() == Ok(0)))) {
+     |                                         ------------------------- ^^ ----- Result<usize, syn::Error>
+     |                                         |
+     |                                         Result<usize, syn::Error>
+     |
+note: the foreign item type `syn::Error` doesn't implement `PartialEq`
+    --> /Users/pilot/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/syn-2.0.119/src/error.rs:105:1
+     |
+105  | pub struct Error {
+     | ^^^^^^^^^^^^^^^^ not implement `PartialEq`
+
+For more information about this error, try `rustc --explain E0369`.
+error: could not compile `my-agent` (test "architecture_contract") due to 1 previous error

@@ -8,30 +8,8 @@ fn error(e: impl std::fmt::Display) -> RuntimeError {
     RuntimeError::Protocol(e.to_string())
 }
 
-fn definition_digest(definition: &PlanDefinition) -> Result<String, RuntimeError> {
-    Ok(format!(
-        "{:x}",
-        Sha256::digest(definition.canonical_bytes().map_err(error)?)
-    ))
-}
-
 pub(crate) fn validate_document(document: &PlanDocument) -> Result<(), RuntimeError> {
-    document.validate().map_err(error)?;
-    if definition_digest(&document.definition)? != document.content_digest {
-        return Err(error("计划定义摘要损坏"));
-    }
-    let markdown = document.markdown();
-    let artifact = document
-        .artifact
-        .as_ref()
-        .ok_or_else(|| error("计划 artifact 缺失"))?;
-    if artifact.byte_length != markdown.len()
-        || artifact.content_digest != format!("{:x}", Sha256::digest(markdown.as_bytes()))
-        || artifact.media_type != "text/markdown; charset=utf-8"
-    {
-        return Err(error("计划 artifact 元数据损坏"));
-    }
-    Ok(())
+    agent_storage_ports::validate_plan_document(document).map_err(error)
 }
 
 pub(crate) fn validate_legacy_plan(value: &serde_json::Value) -> Result<(), RuntimeError> {
@@ -45,52 +23,7 @@ pub(crate) fn stage_document(
     current: &PlanSnapshot,
     value: &serde_json::Value,
 ) -> Result<PlanDocument, RuntimeError> {
-    let definition: PlanDefinition = serde_json::from_value(value.clone()).map_err(error)?;
-    let digest = definition_digest(&definition)?;
-    let previous = if current.value.get("plan_id").is_some() {
-        let doc: PlanDocument = serde_json::from_value(current.value.clone()).map_err(error)?;
-        validate_document(&doc)?;
-        Some(doc)
-    } else {
-        validate_legacy_plan(&current.value)?;
-        None
-    };
-    let changed = previous.as_ref().is_none_or(|p| p.content_digest != digest);
-    let revision = if changed {
-        current
-            .revision
-            .checked_add(1)
-            .filter(|n| *n <= i64::MAX as u64)
-            .ok_or_else(|| error("plan revision 耗尽"))?
-    } else {
-        current.revision
-    };
-    let plan_id = previous.as_ref().map_or_else(
-        || format!("plan:{}:{}", owner.session_lifetime_id.0, owner.run_id.0),
-        |p| p.plan_id.clone(),
-    );
-    let review = if changed {
-        PlanReviewStatus::PendingReview
-    } else {
-        previous
-            .as_ref()
-            .map_or(PlanReviewStatus::PendingReview, |p| p.review)
-    };
-    let mut document = PlanDocument {
-        plan_id,
-        revision,
-        content_digest: digest,
-        definition,
-        review,
-        artifact: None,
-    };
-    let markdown = document.markdown();
-    document.artifact = Some(PlanArtifact {
-        content_digest: format!("{:x}", Sha256::digest(markdown.as_bytes())),
-        byte_length: markdown.len(),
-        media_type: "text/markdown; charset=utf-8".into(),
-    });
-    Ok(document)
+    agent_storage_ports::stage_plan_document(owner, current, value).map_err(error)
 }
 
 pub(crate) fn publish_document(
@@ -298,11 +231,21 @@ impl RunStore {
         &self,
         key: &SessionKey,
     ) -> Result<PlanReadback, RuntimeError> {
+        self.read_plan_document_scoped(&agent_core::TenantContext::local(), key)
+    }
+    pub(crate) fn read_plan_document_scoped(
+        &self,
+        scope: &agent_core::TenantContext,
+        key: &SessionKey,
+    ) -> Result<PlanReadback, RuntimeError> {
         let mut db = self.lock_connection()?;
         let tx = db.transaction()?;
+        super::enterprise::check_session_scope_in(&tx, scope, key)?;
         let meta = sessions::metadata_in(&tx, key)?
             .filter(|m| !m.deleted)
             .ok_or_else(|| error("session 不存在或已删除"))?;
+        sessions::lifetime_owner_in(&tx, key, &meta.lifetime)?;
+        super::plan_controls::plan_control_budget_in(&tx, &meta.lifetime)?;
         let raw: Option<String> = tx
             .query_row(
                 "SELECT data_json FROM session_plans WHERE lifetime=?1",
@@ -336,7 +279,7 @@ impl RunStore {
             [],
             |r| r.get(0),
         )?);
-        super::views::commit(tx)?;
+        tx.commit()?;
         Ok(PlanReadback {
             session_key: key.clone(),
             lifetime: meta.lifetime,
@@ -353,11 +296,30 @@ impl RunStore {
         lifetime: &SessionLifetimeId,
         identity: &PlanExecution,
     ) -> Result<PlanDecisionReceipt, RuntimeError> {
+        self.discard_plan_document_scoped(
+            &agent_core::TenantContext::local(),
+            key,
+            lifetime,
+            identity,
+        )
+    }
+    pub(crate) fn discard_plan_document_scoped(
+        &self,
+        scope: &agent_core::TenantContext,
+        key: &SessionKey,
+        lifetime: &SessionLifetimeId,
+        identity: &PlanExecution,
+    ) -> Result<PlanDecisionReceipt, RuntimeError> {
         let mut db = self.lock_connection()?;
-        let tx = db.transaction()?;
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        super::enterprise::check_session_scope_in(&tx, scope, key)?;
         let meta = sessions::metadata_in(&tx, key)?
             .filter(|m| !m.deleted && m.lifetime == *lifetime)
             .ok_or_else(|| error("stale plan lifetime"))?;
+        sessions::lifetime_owner_in(&tx, key, lifetime)?;
+        super::plan_controls::plan_control_budget_in(&tx, lifetime)?;
+        super::writer::acquire_in(&tx, key, lifetime)?;
+        super::writer::fence_in(&tx, key, lifetime)?;
         if let Some(receipt) = receipt_in(
             &tx,
             key,
@@ -396,18 +358,68 @@ impl RunStore {
     }
 
     pub(crate) fn begin_plan_execution(&self, owner: &ExactOwner) -> Result<(), RuntimeError> {
+        self.begin_plan_execution_scoped(owner, None)
+    }
+    pub(crate) fn begin_plan_execution_scoped(
+        &self,
+        owner: &ExactOwner,
+        envelope: Option<&EnterpriseOwnerEnvelope>,
+    ) -> Result<(), RuntimeError> {
         let mut db = self.lock_connection()?;
-        let tx = db.transaction()?;
+        let tx = db.transaction_with_behavior(if envelope.is_some() {
+            rusqlite::TransactionBehavior::Immediate
+        } else {
+            rusqlite::TransactionBehavior::Deferred
+        })?;
+        if let Some(envelope) = envelope {
+            crate::execution::check_execution_in(&tx, envelope)?;
+            super::turns::plan_bytes_in(&tx, owner)?;
+            let status: String = tx.query_row(
+                "SELECT status FROM runs WHERE id=?1",
+                [&owner.run_id.0],
+                |row| row.get(0),
+            )?;
+            if status != "running" {
+                return Err(CoordinationError::Conflict.into());
+            }
+        }
         sessions::fence_in(&tx, owner)?;
-        let row: Option<String> = tx
+        if envelope.is_some() {
+            let large: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM plan_decisions WHERE run_id=?1 AND decision='execute' AND (length(CAST(receipt_json AS BLOB))>1048576 OR length(CAST(identity_json AS BLOB))>1048576))", [&owner.run_id.0], |row|row.get(0))?;
+            if large {
+                return Err(CoordinationError::Corrupt.into());
+            }
+        }
+        let row: Option<(String,String,String,String,String)> = tx
             .query_row(
-                "SELECT receipt_json FROM plan_decisions WHERE run_id=?1 AND decision='execute'",
+                "SELECT receipt_json,operation_id,session_id,lifetime,identity_json FROM plan_decisions WHERE run_id=?1 AND decision='execute'",
                 params![owner.run_id.0],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)),
             )
             .optional()?;
-        if let Some(raw) = row {
-            let receipt: PlanDecisionReceipt = serde_json::from_str(&raw).map_err(error)?;
+        if let Some((raw, operation, key, lifetime, identity)) = row {
+            let receipt: PlanDecisionReceipt = serde_json::from_str(&raw).map_err(|decode| {
+                if envelope.is_some() {
+                    CoordinationError::Corrupt.into()
+                } else {
+                    error(decode)
+                }
+            })?;
+            if envelope.is_some() {
+                let saved: PlanExecution =
+                    serde_json::from_str(&identity).map_err(|_| CoordinationError::Corrupt)?;
+                if receipt.run_id.as_ref() != Some(&owner.run_id)
+                    || receipt.decision != PlanDecision::Execute
+                    || receipt.session_key != owner.session_key
+                    || receipt.lifetime != owner.session_lifetime_id
+                    || receipt.identity != saved
+                    || receipt.identity.operation_id != operation
+                    || key != owner.session_key.0
+                    || lifetime != owner.session_lifetime_id.0
+                {
+                    return Err(CoordinationError::Corrupt.into());
+                }
+            }
             let status: String = tx.query_row(
                 "SELECT status FROM runs WHERE id=?1",
                 params![owner.run_id.0],
@@ -460,6 +472,10 @@ mod tests {
 
     fn snapshot() -> RunSnapshot {
         RunSnapshot {
+            workflow: None,
+            installed_generation:None,
+            billing_policy: None,
+            artifact_store_id: None,
             entry_channel: agent_core::HookChannel::DaemonRpc,
             route: None,
             tools: vec![],
@@ -516,6 +532,7 @@ mod tests {
 
     fn admission(read: &PlanReadback, id: PlanExecution) -> RunAdmission {
         RunAdmission {
+            workflow_node: None,
             session_key: read.session_key.clone(),
             expected_lifetime: Some(read.lifetime.clone()),
             request_id: RequestId::Number(2),
@@ -863,6 +880,7 @@ mod tests {
         store
             .import_legacy_plan("old-file", "digest", &key, &serde_json::json!({"steps":[]}))
             .unwrap();
+        crate::enterprise::remove_v21_for_fixture(&store.lock_connection().unwrap());
         store.lock_connection().unwrap().execute_batch("DROP TABLE provider_requests; DROP TABLE event_view_stamps; DROP TABLE tool_discoveries; DROP TABLE compact_run_links; DROP TABLE plan_versions; DROP TABLE plan_decisions; DROP TABLE plan_legacy_evidence; DROP TABLE hook_outcomes; DROP TABLE hook_publications; DROP TABLE hook_continuations; DELETE FROM schema_migrations WHERE version>=15; CREATE TRIGGER migration_fault BEFORE INSERT ON schema_migrations WHEN NEW.version=15 BEGIN SELECT RAISE(ABORT,'migration fault'); END;").unwrap();
         drop(store);
         assert!(RunStore::open(&path).is_err());
@@ -889,7 +907,7 @@ mod tests {
         store
             .lock_connection()
             .unwrap()
-            .execute("INSERT INTO schema_migrations VALUES(21,0)", [])
+            .execute("INSERT INTO schema_migrations VALUES(28,0)", [])
             .unwrap();
         drop(store);
         assert!(RunStore::open(&path).is_err());

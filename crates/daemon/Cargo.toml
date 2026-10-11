@@ -9,6 +9,13 @@ publish = false
 test-support = ["agent-runtime/test-support", "agent-storage/test-support", "dep:agent-daemon-client"]
 
 [dependencies]
+agent-workflow = {version="=0.1.0",path="../workflow"}
+rustix = { version="1", features=["fs"] }
+agent-storage-postgres = { version = "=0.1.0", path = "../storage-postgres" }
+agent-artifact = { version="=0.1.0", path="../artifact" }
+agent-storage-ports = { version = "=0.1.0", path = "../storage-ports" }
+agent-identity = { version = "=0.1.0", path = "../identity" }
+agent-policy = { version = "=0.1.0", path = "../policy" }
 agent-runtime = { version = "=0.1.0", path = "../runtime" }
 agent-sandbox = { version = "=0.1.0", path = "../sandbox" }
 agent-storage = { version = "=0.1.0", path = "../storage" }

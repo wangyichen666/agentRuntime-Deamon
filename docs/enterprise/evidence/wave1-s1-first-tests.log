@@ -1,0 +1,51 @@
+   Compiling agent-gateway v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/gateway)
+   Compiling agent-cli v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/cli)
+   Compiling agent-acp v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/acp)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-daemon-client v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-client)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+   Compiling agent-sandbox v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/sandbox)
+   Compiling agent-entry-support v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/entry-support)
+   Compiling agent-context v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/context)
+   Compiling agent-daemon-protocol v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-protocol)
+   Compiling agent-policy v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/policy)
+   Compiling agent-identity v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/identity)
+   Compiling agent-core v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/core)
+   Compiling agent-memory v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/memory)
+error[E0283]: type annotations needed
+   --> crates/core/src/enterprise.rs:267:45
+    |
+267 |             TenantId::try_from("tenant-001".into()).unwrap().as_str(),
+    |             --------                        ^^^^
+    |             |
+    |             type must be known at this point
+    |
+note: multiple `impl`s satisfying `enterprise::TenantId: TryFrom<_>` found
+   --> crates/core/src/enterprise.rs:13:9
+    |
+13  |           impl TryFrom<String> for $name {
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+25  | / opaque_ids!(
+26  | |     OrganizationId,
+27  | |     TenantId,
+28  | |     ProjectId,
+...   |
+32  | |     PolicyVersion
+33  | | );
+    | |_- in this macro invocation
+    = note: and another `impl` found in the `core` crate:
+            - impl<T, U> TryFrom<U> for T
+              where U: Into<T>;
+    = note: this error originates in the macro `opaque_ids` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: try using a fully qualified path to specify the expected types
+    |
+267 -             TenantId::try_from("tenant-001".into()).unwrap().as_str(),
+267 +             TenantId::try_from(<&str as Into<T>>::into("tenant-001")).unwrap().as_str(),
+    |
+
+For more information about this error, try `rustc --explain E0283`.
+error: could not compile `agent-core` (lib test) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

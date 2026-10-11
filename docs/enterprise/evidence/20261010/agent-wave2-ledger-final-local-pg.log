@@ -1,0 +1,65 @@
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling agent-storage-postgres v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-postgres)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+warning: fields `run_store` and `maintenance_store` are never read
+  --> crates/daemon/src/lib.rs:47:16
+   |
+40 | pub struct DaemonState {
+   |            ----------- fields in this struct
+...
+47 |     pub(crate) run_store: Option<Arc<dyn ControlRepository>>,
+   |                ^^^^^^^^^
+...
+52 |     pub(crate) maintenance_store: Option<Arc<dyn MaintenanceRepository>>,
+   |                ^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: methods `legacy_run_store` and `legacy_maintenance_store` are never used
+   --> crates/daemon/src/lib.rs:853:8
+    |
+852 | impl DaemonState {
+    | ---------------- methods in this implementation
+853 |     fn legacy_run_store(&self) -> &Arc<dyn ControlRepository> {
+    |        ^^^^^^^^^^^^^^^^
+...
+856 |     fn legacy_maintenance_store(&self) -> &Arc<dyn MaintenanceRepository> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `stop_resource`, `start_background`, and `wait_resource` are never used
+   --> crates/daemon/src/resources.rs:184:25
+    |
+36  | impl DaemonState {
+    | ---------------- methods in this implementation
+...
+184 |     pub(crate) async fn stop_resource(
+    |                         ^^^^^^^^^^^^^
+...
+225 |     pub(crate) async fn start_background(
+    |                         ^^^^^^^^^^^^^^^^
+...
+240 |     pub(crate) async fn wait_resource(
+    |                         ^^^^^^^^^^^^^
+
+warning: `agent-daemon` (lib) generated 3 warnings
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 33.89s
+     Running tests/ledger_contract.rs (target/debug/deps/ledger_contract-e100c54ee450d2c8)
+
+running 2 tests
+
+thread 'postgres_quota_admission_terminal_idempotency_and_audit_scope' panicked at tests/ledger_contract.rs:175:50:
+called `Result::unwrap()` on an `Err` value: NotPresent
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test postgres_quota_admission_terminal_idempotency_and_audit_scope ... FAILED
+test sqlite_quota_admission_terminal_idempotency_and_audit_scope ... ok
+
+failures:
+
+failures:
+    postgres_quota_admission_terminal_idempotency_and_audit_scope
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+error: test failed, to rerun pass `--test ledger_contract`

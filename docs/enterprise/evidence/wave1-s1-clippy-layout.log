@@ -1,0 +1,30 @@
+    Checking agent-daemon-client v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-client)
+    Checking agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+    Checking agent-policy v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/policy)
+    Checking agent-daemon-protocol v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-protocol)
+    Checking agent-entry-support v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/entry-support)
+    Checking agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+    Checking agent-gateway v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/gateway)
+    Checking agent-cli v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/cli)
+    Checking agent-acp v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/acp)
+    Checking agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+    Checking my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+error[E0382]: borrow of moved value: `child`
+    --> tests/runtime_contract.rs:2335:147
+     |
+2320 | ...et child = spawned["result"]["child"]["child_run_id"].as_str().unwrap().to_owned();
+     |       ----- move occurs because `child` has type `std::string::String`, which does not implement the `Copy` trait
+...
+2334 | ...et inherited:String=db.query_row("SELECT snapshot_json FROM run_authorizations WHERE run_id=?1",[child],|r|r.get(0)).unwrap();
+     |                                                                                                     ----- value moved here
+2335 | ...et inherited:Value=serde_json::from_str(&inherited).unwrap();assert_eq!(inherited["context"]["principal"]["subject_id"],"local-subject");assert_eq!(inherited["envelope"]["owner"]["run_id"],child);
+     |                                                                                                                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ value borrowed here after move
+     |
+     = note: this error originates in the macro `assert_eq` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider cloning the value if the performance cost is acceptable
+     |
+2334 |         let inherited:String=db.query_row("SELECT snapshot_json FROM run_authorizations WHERE run_id=?1",[child.clone()],|r|r.get(0)).unwrap();
+     |                                                                                                                ++++++++
+
+For more information about this error, try `rustc --explain E0382`.
+error: could not compile `my-agent` (test "runtime_contract") due to 1 previous error

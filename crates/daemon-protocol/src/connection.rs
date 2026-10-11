@@ -127,6 +127,21 @@ impl NegotiatedCapabilities {
 }
 fn required_capability(method: &str) -> Option<&'static str> {
     match method {
+        "workflow.publish" => Some("configuration"),
+        "workflow.message" | "workflow.start" | "workflow.control" | "workflow.read" => Some("runs"),
+        "registry.generation" | "registry.mutate" | "registry.readback" => Some("configuration"),
+        "runtime.endpoint" => Some("configuration"),
+        "oauth.begin" | "oauth.consume" => Some("configuration"),
+        "credential.issue" | "credential.revoke" | "credential.status" => Some("configuration"),
+        "directory.create" | "directory.find" | "directory.resolve" | "access.acquire" | "access.release" => {
+            Some("session")
+        }
+        "billing.configure" | "billing.readback" | "billing.accounts" | "billing.usage" | "identity.readback" | "identity.manage" | "quota.readback" | "quota.configure" => {
+            Some("configuration")
+        }
+        "audit.readback" => Some("maintenance"),
+        "outbox.readback" => Some("maintenance"),
+        "run.authorization" => Some("runs"),
         "ping" | "session.new" | "session.load" | "session.load_page" | "session.list"
         | "session.resume" | "session.clear" | "session.delete" | "session.fork"
         | "session.trace" | "session.trace_page" | "session.close" => Some("session"),

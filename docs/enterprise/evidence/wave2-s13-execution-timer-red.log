@@ -1,0 +1,22 @@
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.28s
+     Running unittests src/lib.rs (target/debug/deps/agent_storage-b7b74a3771e61d0e)
+
+running 1 test
+test execution_timer_contract::execution_terminal_does_not_block_current_thread_when_connection_is_owned ... FAILED
+
+failures:
+
+---- execution_timer_contract::execution_terminal_does_not_block_current_thread_when_connection_is_owned stdout ----
+
+thread 'execution_timer_contract::execution_terminal_does_not_block_current_thread_when_connection_is_owned' panicked at crates/storage/src/lib.rs:2845:9:
+真实Connection锁不能阻塞current_thread timer，耗时 715.923333ms
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    execution_timer_contract::execution_terminal_does_not_block_current_thread_when_connection_is_owned
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 80 filtered out; finished in 0.75s
+
+error: test failed, to rerun pass `-p agent-storage --lib`

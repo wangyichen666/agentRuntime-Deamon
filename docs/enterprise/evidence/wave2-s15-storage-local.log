@@ -1,0 +1,93 @@
+   Compiling agent-core v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/core)
+   Compiling agent-storage-ports v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-ports)
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 20.65s
+     Running unittests src/lib.rs (target/debug/deps/agent_storage-f4d26138d89f611c)
+
+running 83 tests
+test blocking::tests::cancelled_callers_keep_the_shared_sqlite_budget_until_real_work_finishes ... ok
+test context_projection::tests::durable_compact_rejects_tool_closed_candidate_that_loses_current_input ... ok
+test context_projection::tests::compact_cas_preserves_concurrent_suffix_and_rejects_competing_head ... ok
+test context_projection::tests::restart_keeps_projection_and_settles_uncommitted_intent ... ok
+test artifact_publication::tests::second_database_connection_gc_cannot_cross_reference_publication_transaction ... ok
+test artifact_publication::tests::process_kill_after_finalize_rolls_back_reference_and_preserves_original_running_receipt ... ok
+test context_projection::tests::usage_anchor_requires_committed_turn_exact_provider_and_projection_generation ... ok
+test delegation::context_tests::delegation_freezes_explicit_evidence_and_does_not_implicitly_pass_it_on ... ok
+test delegation::context_tests::delegation_rejects_foreign_owner_bad_digest_duplicates_and_budget_overflow_atomically ... ok
+test compact_runs::tests::native_admission_source_cas_idempotency_busy_and_terminal_are_atomic_on_both_backends ... ok
+test execution::commit_cancellation_contract::execution_committed_turn_survives_cancelled_awaiter_and_keeps_budget_until_worker_returns ... ok
+test compact_runs::tests::schema16_compact_upgrade_has_verified_backup_rollback_and_future_rejection ... ok
+test compact_runs::tests::native_no_gain_cancel_failure_recovery_and_corruption_fail_closed ... ok
+test enterprise::async_contract::identity_async_port_yields_while_original_connection_is_occupied ... ok
+test events::async_contract::event_readback_yields_during_real_connection_contention ... ok
+test flywheel::tests::clear_purges_shared_learning_and_readonly_never_learns_or_ingests ... ok
+test discovery::tests::discovery_exact_owner_generation_idempotency_cancel_rollback_and_corruption ... ok
+test flywheel::tests::feedback_cannot_cross_lifetime_and_forget_purges_learning_without_resurrection ... ok
+test discovery::tests::schema17_discovery_upgrade_backup_transaction_rollback_and_future_rejection ... ok
+test flywheel::tests::feedback_is_durable_idempotent_and_bound_to_exposure_and_digest ... ok
+test flywheel::tests::recovery_failures_backoff_without_starving_good_turns_and_exhaust_visibly ... ok
+test memory::tests::automatic_excerpt_filters_credentials_and_keeps_safe_evidence ... ok
+test flywheel::tests::unattempted_ingest_is_immediately_due_without_a_wall_clock_race ... ok
+test memory::tests::episode_excerpt_is_utf8_bounded_and_marks_loss ... ok
+test flywheel::tests::restart_recovers_bounded_missing_ingests_and_never_revives_forgotten_episode ... ok
+test hooks::tests::hook_publication_failure_rolls_back_the_lifecycle_receipt_and_head ... ok
+test memory::tests::empty_ingest_commits_receipt_without_memory_and_large_turn_is_bounded ... ok
+test memory::tests::evidence_does_not_expand_cross_session_authorization_or_accept_bad_digest ... ok
+test flywheel::tests::schema12_migration_preserves_memory_and_adds_empty_learning_tables ... ok
+test memory::tests::evidence_has_unicode_and_serialized_page_budgets ... ok
+test hooks::tests::continuation_admission_is_atomic_frozen_bounded_and_restart_safe ... ok
+test hooks::tests::hook_claim_effect_fence_recovery_and_lifecycle_outbox_share_both_backends ... ok
+test memory::tests::evidence_pages_verify_sources_redact_secrets_and_obey_forget ... ok
+test hooks::tests::paged_hook_readback_is_readonly_and_rejects_corrupt_identity_or_effect ... ok
+test execution_timer_contract::execution_terminal_does_not_block_current_thread_when_connection_is_owned ... ok
+test hooks::tests::schema15_hook_upgrade_rolls_back_preserves_backup_and_rejects_future ... ok
+test memory::tests::forget_receipt_replays_exact_result_and_old_lifetime_is_rejected ... ok
+test memory::tests::visibility_and_completed_ingest_obey_lifetime_and_commit_barriers ... ok
+test memory::tests::read_only_blocks_memory_write_and_forget_and_restart_preserves_scope ... ok
+test plans::tests::committed_progress_keeps_definition_version_and_changed_definition_preserves_history ... ok
+test plans::tests::markdown_publication_fault_rolls_back_plan_terminal_and_revision ... ok
+test plans::tests::discard_pending_plan_cancels_only_the_exact_unstarted_run ... ok
+test plans::tests::pending_plan_survives_restart_without_automatic_execution_and_old_plan_stays_readonly ... ok
+test readback::tests::failed_terminal_rolls_back_snapshot_revision_and_pending_state ... ok
+test readback::tests::corrupt_transcript_cannot_be_forked_or_recovered_as_empty_and_sparse_read_is_explicit ... ok
+test plans::tests::plan_decisions_are_exact_idempotent_and_share_file_and_memory_contract ... ok
+test readback::tests::canonical_message_ids_use_native_turn_and_reject_foreign_batch_owner ... ok
+test plans::tests::schema14_upgrade_is_backed_up_atomic_and_rejects_future_versions ... ok
+test readback::tests::canonical_readback_and_lifecycle_fences_share_file_and_memory_contract ... ok
+test resources::tests::resources_reconcile_as_orphans_and_late_callbacks_cannot_write_new_lifetime ... ok
+test requests::tests::captures_are_atomic_idempotent_exact_and_readback_is_zero_write_on_both_backends ... ok
+test run_facts::async_contract::run_fact_readback_yields_while_original_connection_is_occupied ... ok
+test readback::tests::schema13_upgrade_keeps_identity_and_restarts_with_same_cursor ... ok
+test readback::tests::simultaneous_reader_and_writer_connections_never_mix_turn_boundaries ... ok
+test sessions::tests::cancelled_lifecycle_caller_keeps_committed_operation_and_budget_until_real_work_finishes ... ok
+test requests::tests::schema19_capture_migration_keeps_legacy_unavailable_and_rolls_back_on_fault ... ok
+test sessions::tests::snapshot_and_lifetime_survive_restart_and_corruption_fails_closed ... ok
+test sessions::tests::lifetime_transcript_contract_is_shared_by_file_and_memory_sqlite ... ok
+test tests::artifact_gc_keeps_referenced_evidence_and_cleans_only_unreferenced_files ... ok
+test tests::cancellation_after_confirmed_side_effect_is_not_confirmed_cancel ... ok
+test tests::concurrent_delegation_admission_respects_root_budget_and_tool_cap ... ok
+test sessions::tests::close_receipts_preserve_lifetime_history_and_are_idempotent_on_both_backends ... ok
+test tests::interaction_claim_checks_owner_revision_and_idempotency ... ok
+test tests::delegation_is_atomic_bounded_and_result_reservation_is_recoverable ... ok
+test tests::delegation_depth_and_total_spawn_limits_are_transactional ... ok
+test tests::jsonl_assistant_without_sqlite_terminal_does_not_imply_completion ... ok
+test tests::prepared_tool_batch_is_atomic_and_cancel_with_incomplete_receipt_is_unknown ... ok
+test tests::control_fact_contract_is_shared_by_memory_and_file_sqlite_backends ... ok
+test tests::manual_resolution_requires_exact_owner_and_event_cursor ... ok
+test tests::migration_sequence_and_terminal_are_durable_and_idempotent ... ok
+test tests::restart_marks_uncertain_run_unknown_without_replaying ... ok
+test tests::queue_is_ordered_single_writer_and_survives_restart ... ok
+test tests::tool_receipt_crash_window_is_unknown_and_never_replayed ... ok
+test tests::v1_database_upgrades_in_place_and_future_version_fails_closed ... ok
+test tests::queue_budget_rejects_new_work_but_allows_exact_readback ... ok
+test turns::tests::interrupted_tool_batch_is_closed_atomically_with_typed_unknown_and_not_executed ... ok
+test turns::tests::plan_definition_revision_ignores_progress_and_publishes_stable_digest ... ok
+test tools::commit_cancellation_contract::committed_file_receipt_survives_cancelled_awaiter_without_releasing_worker_budget ... ok
+test turns::tests::terminal_fault_rolls_back_assistant_plan_usage_and_transcript_revision ... ok
+test views::tests::pending_and_resolved_interaction_revisions_come_from_the_publishing_transaction ... ok
+test tests::terminal_write_failure_rolls_back_content_state_and_event_cursor ... ok
+test views::tests::transaction_versions_seal_atomically_and_read_only_replay_keeps_source_on_both_backends ... ok
+test views::tests::schema18_stamp_upgrade_keeps_unversioned_history_and_rolls_back_on_fault ... ok
+
+test result: ok. 83 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.53s
+

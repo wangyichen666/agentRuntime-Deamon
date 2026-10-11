@@ -77,6 +77,78 @@ enum Command {
     Status,
     #[command(about = "读取 daemon 的存储、恢复与凭据来源诊断")]
     Doctor,
+    #[command(about = "读取 canonical run、工具或 Provider 事实，不启动执行")]
+    RunRead {
+        run: String,
+        #[arg(long,default_value="fact",value_parser=["fact","tools","provider"])]
+        view: String,
+    },
+    #[command(about = "读取 canonical run 事件分页，不创建会话或 run")]
+    RunEvents {
+        run: String,
+        #[arg(long, default_value_t = 0)]
+        after: u64,
+        #[arg(long, default_value_t = 200)]
+        limit: u32,
+    },
+    /// 读取 daemon 的可信主体、作用域与策略版本
+    /// 分页读取受授权的canonical审计链
+    Audit {
+        #[arg(long, default_value_t = 0)]
+        after: u64,
+        #[arg(long, default_value_t = 64)]
+        limit: u32,
+    },
+    /// 读取或创建配额窗口；省略budget为读取
+    Quota {
+        metric: String,
+        #[arg(long)]
+        start: i64,
+        #[arg(long)]
+        end: Option<i64>,
+        #[arg(long)]
+        budget: Option<u64>,
+    },
+    #[command(about="发布冻结价格和分层费用预算；省略policy时读取当前策略")]
+    Billing {#[arg(long)] policy:Option<PathBuf>,#[arg(long)] operation:Option<String>},
+    #[command(about="读取原Provider/tool/sandbox事务产生的费用账本")]
+    BillingUsage {#[arg(long,default_value_t=0)] after:u64,#[arg(long,default_value_t=32)] limit:u32},
+    #[command(about="读取注册表，或提交签名包/信任根/灰度/回滚事务JSON")]
+    Workflow {#[arg(long,value_parser=["publish","start","control","read"])] action:String,#[arg(long)] request:PathBuf},
+    Registry {#[arg(long,conflicts_with="generation")] request:Option<PathBuf>,#[arg(long)] generation:Option<String>},
+    Identity,
+    #[command(about = "管理主体、角色、不可变策略或显式撤销；由daemon在原事务鉴权")]
+    IdentityManage {
+        request: PathBuf,
+        #[arg(long)]
+        operation: String,
+    },
+    #[command(about = "读取 canonical 会话快照，不创建新会话或 run")]
+    SessionRead {
+        session: String,
+        #[arg(long, default_value = "canonical", value_parser = ["canonical", "model", "omitted"])]
+        history_mode: String,
+    },
+    #[command(about = "读取持久 outbox 的元数据分页")]
+    Outbox {
+        #[arg(long, default_value_t = 0)]
+        after: u64,
+        #[arg(long, default_value_t = 32)]
+        limit: u32,
+    },
+    #[command(about = "按原 tool receipt 读取 artifact 分页")]
+    Artifact {
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        run: String,
+        #[arg(long)]
+        reference: String,
+        #[arg(long, default_value_t = 0)]
+        offset: u64,
+        #[arg(long, default_value_t = 16384)]
+        limit: usize,
+    },
     #[command(subcommand, about = "记忆数据飞轮：报告、用户反馈与离线质量评测")]
     Flywheel(FlywheelCommand),
     #[command(about = "优雅停止当前工作区 daemon")]
@@ -151,6 +223,180 @@ pub async fn run(host: &dyn CommandHost) -> Result<()> {
         Command::Editor { acp_v2 } => host.run_editor(&workspace, acp_v2).await,
         Command::Daemon => host.run_daemon(&workspace).await,
         Command::Status => write_message(&host.status_message(&workspace).await?),
+        Command::Artifact {
+            session,
+            run,
+            reference,
+            offset,
+            limit,
+        } => {
+            let client = host.connect_workspace(&workspace).await?;
+            let result=request_result(&client,"artifacts.read",json!({"session_id":session,"run_id":run,"artifact_ref":reference,"offset":offset,"limit":limit})).await?;
+            writeln!(
+                std::io::stdout().lock(),
+                "{}",
+                serde_json::to_string_pretty(&result)?
+            )?;
+            Ok(())
+        }
+        Command::Outbox { after, limit } => {
+            let client = host.connect_workspace(&workspace).await?;
+            let result = request_result(
+                &client,
+                "outbox.readback",
+                json!({"after":after,"limit":limit}),
+            )
+            .await?;
+            writeln!(
+                std::io::stdout().lock(),
+                "{}",
+                serde_json::to_string_pretty(&result)?
+            )?;
+            Ok(())
+        }
+        Command::RunRead { run, view } => {
+            let client = host.connect_workspace(&workspace).await?;
+            let method = match view.as_str() {
+                "tools" => "run.tools",
+                "provider" => "run.provider_attempts",
+                _ => "run.read",
+            };
+            let value = request_result(&client, method, json!({"run_id":run})).await?;
+            writeln!(
+                std::io::stdout().lock(),
+                "{}",
+                serde_json::to_string_pretty(&value)?
+            )?;
+            Ok(())
+        }
+        Command::RunEvents { run, after, limit } => {
+            let client = host.connect_workspace(&workspace).await?;
+            let value = request_result(
+                &client,
+                "run.events",
+                json!({"run_id":run,"after_seq":after,"limit":limit}),
+            )
+            .await?;
+            writeln!(
+                std::io::stdout().lock(),
+                "{}",
+                serde_json::to_string_pretty(&value)?
+            )?;
+            Ok(())
+        }
+        Command::Audit { after, limit } => {
+            let client = host.connect_workspace(&workspace).await?;
+            let value = request_result(
+                &client,
+                "audit.readback",
+                json!({"after":after,"limit":limit}),
+            )
+            .await?;
+            writeln!(
+                std::io::stdout().lock(),
+                "{}",
+                serde_json::to_string_pretty(&value)?
+            )?;
+            Ok(())
+        }
+        Command::Workflow{action,request}=>{let client=host.connect_workspace(&workspace).await?;let mut options=std::fs::OpenOptions::new();options.read(true);#[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);}let mut file=options.open(request)?;anyhow::ensure!(file.metadata()?.is_file(),"工作流请求必须为普通文件");let mut bytes=Vec::new();std::io::Read::read_to_end(&mut std::io::Read::take(&mut file,1024*1024+1),&mut bytes)?;anyhow::ensure!(bytes.len()<=1024*1024,"工作流请求超过预算");let value:serde_json::Value=serde_json::from_slice(&bytes)?;let method=format!("workflow.{action}");let result=request_result(&client,&method,value).await?;writeln!(std::io::stdout().lock(),"{}",serde_json::to_string_pretty(&result)?)?;Ok(())}
+        Command::Registry{request,generation}=>{
+            let client=host.connect_workspace(&workspace).await?;
+            let(method,params)=if let Some(path)=request {let mut options=std::fs::OpenOptions::new();options.read(true);
+                #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);}
+                let mut file=options.open(path)?;anyhow::ensure!(file.metadata()?.is_file(),"发行请求必须为普通文件");let mut bytes=Vec::new();std::io::Read::read_to_end(&mut std::io::Read::take(&mut file,3*1024*1024+1),&mut bytes)?;anyhow::ensure!(bytes.len()<=3*1024*1024,"注册表请求超过预算");let mutation:agent_core::RegistryMutation=serde_json::from_slice(&bytes)?;("registry.mutate",json!(mutation))}else if let Some(digest)=generation{("registry.generation",json!({"digest":digest}))}else{("registry.readback",json!({}))};
+            let result=request_result(&client,method,params).await?;writeln!(std::io::stdout().lock(),"{}",serde_json::to_string_pretty(&result)?)?;Ok(())
+        }
+        Command::Billing {policy,operation}=> {
+            let client=host.connect_workspace(&workspace).await?;
+            let (method,params)=match policy {
+                Some(path)=>{let bytes=std::fs::read(&path)?;anyhow::ensure!(bytes.len()<=65536,"费用策略超过64KiB");let policy:agent_core::BillingPolicy=serde_json::from_slice(&bytes)?;
+                    ("billing.configure",json!({"policy":policy,"operation_id":operation.context("发布必须指定operation")?}))},
+                None=>("billing.readback",json!({})),
+            };
+            let result=request_result(&client,method,params).await?;writeln!(std::io::stdout().lock(),"{}",serde_json::to_string_pretty(&result)?)?;Ok(())
+        }
+        Command::BillingUsage {after,limit}=> {
+            let client=host.connect_workspace(&workspace).await?;let result=request_result(&client,"billing.usage",json!({"after":after,"limit":limit})).await?;
+            writeln!(std::io::stdout().lock(),"{}",serde_json::to_string_pretty(&result)?)?;Ok(())
+        }
+        Command::Quota {
+            metric,
+            start,
+            end,
+            budget,
+        } => {
+            let (method, params) = match (end, budget) {
+                (Some(end), Some(budget)) => (
+                    "quota.configure",
+                    json!({"metric":metric,"window_start_ms":start,"window_end_ms":end,"budget":budget}),
+                ),
+                (None, None) => (
+                    "quota.readback",
+                    json!({"metric":metric,"window_start_ms":start}),
+                ),
+                _ => anyhow::bail!("创建配额须同时提供end和budget"),
+            };
+            let client = host.connect_workspace(&workspace).await?;
+            let value = request_result(&client, method, params).await?;
+            writeln!(
+                std::io::stdout().lock(),
+                "{}",
+                serde_json::to_string_pretty(&value)?
+            )?;
+            Ok(())
+        }
+        Command::IdentityManage { request, operation } => {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            std::fs::File::open(request)?
+                .take(1048577)
+                .read_to_end(&mut bytes)?;
+            anyhow::ensure!(bytes.len() <= 1048576, "管理命令超预算");
+            let command: agent_core::IdentityCommand = serde_json::from_slice(&bytes)?;
+            let client = host.connect_workspace(&workspace).await?;
+            let value = request_result(
+                &client,
+                "identity.manage",
+                json!({"command":command,"operation_id":operation}),
+            )
+            .await?;
+            writeln!(
+                std::io::stdout().lock(),
+                "{}",
+                serde_json::to_string_pretty(&value)?
+            )?;
+            Ok(())
+        }
+        Command::Identity => {
+            let client = host.connect_workspace(&workspace).await?;
+            writeln!(
+                std::io::stdout().lock(),
+                "{}",
+                serde_json::to_string_pretty(
+                    &request_result(&client, "identity.readback", json!({})).await?
+                )?
+            )?;
+            Ok(())
+        }
+        Command::SessionRead {
+            session,
+            history_mode,
+        } => {
+            let client = host.connect_workspace(&workspace).await?;
+            let value = request_result(
+                &client,
+                "sessions.read",
+                json!({"session_id":session,"history_mode":history_mode}),
+            )
+            .await?;
+            writeln!(
+                std::io::stdout().lock(),
+                "{}",
+                serde_json::to_string_pretty(&value)?
+            )?;
+            Ok(())
+        }
         Command::Doctor => {
             let client = host.connect_workspace(&workspace).await?;
             writeln!(

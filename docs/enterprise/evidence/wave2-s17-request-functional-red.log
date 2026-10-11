@@ -1,0 +1,37 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.66s
+     Running tests/run_request_contract.rs (target/debug/deps/run_request_contract-44b803d0c443a02a)
+
+running 4 tests
+
+thread 'complete_valid_json_cannot_override_selected_sql_capture_identity' panicked at tests/run_request_contract.rs:119:2:
+assertion failed: f.store.provider_request(&f.capture.owner.session_key,
+        &f.capture.owner.session_lifetime_id, None, None).is_err()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'source_read_denies_foreign_scope' panicked at tests/run_request_contract.rs:102:2:
+assertion failed: f.store.request_context_source(&f.capture.owner, "primary",
+        "identity").is_err()
+
+thread 'capture_write_denies_foreign_scope' panicked at tests/run_request_contract.rs:107:2:
+assertion failed: f.store.record_provider_request(&f.capture, &f.context).is_err()
+
+thread 'readback_denies_foreign_scope' panicked at tests/run_request_contract.rs:112:2:
+assertion failed: f.store.provider_request(&f.capture.owner.session_key,
+        &f.capture.owner.session_lifetime_id, None, None).is_err()
+test source_read_denies_foreign_scope ... FAILED
+test complete_valid_json_cannot_override_selected_sql_capture_identity ... FAILED
+test capture_write_denies_foreign_scope ... FAILED
+test readback_denies_foreign_scope ... FAILED
+
+failures:
+
+failures:
+    capture_write_denies_foreign_scope
+    complete_valid_json_cannot_override_selected_sql_capture_identity
+    readback_denies_foreign_scope
+    source_read_denies_foreign_scope
+
+test result: FAILED. 0 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+error: test failed, to rerun pass `--test run_request_contract`

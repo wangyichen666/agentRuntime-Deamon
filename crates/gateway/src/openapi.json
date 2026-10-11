@@ -1,0 +1,3534 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Agent 企业访问面",
+    "version": "0.1.0"
+  },
+  "security": [
+    {
+      "bearer": []
+    }
+  ],
+  "paths": {
+    "/enterprise/sessions": {
+      "post": {
+        "summary": "幂等创建 opaque 会话",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "operation_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  }
+                },
+                "required": [
+                  "operation_id"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "400": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "session_id": {
+                      "type": "string",
+                      "pattern": "^ds-[0-9a-fA-F-]{32,36}$"
+                    }
+                  },
+                  "required": [
+                    "session_id"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "X-Agent-Scope",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "description": "受保护配置别名；API key在非默认scope必填，完整验签与数据库授权仍执行"
+          }
+        ]
+      }
+    },
+    "/enterprise/rpc": {
+      "post": {
+        "summary": "投影 canonical 会话命令",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "session_id": {
+                    "type": "string",
+                    "pattern": "^ds-[0-9a-fA-F-]{32,36}$"
+                  },
+                  "method": {
+                    "type": "string",
+                    "enum": [
+                      "chat.send",
+                      "session.load",
+                      "session.clear",
+                      "session.close",
+                      "session.delete",
+                      "compact.start",
+                      "context.readback",
+                      "sessions.plan.readback",
+                      "sessions.plan.discard",
+                      "hooks.readback",
+                      "run.read"
+                    ]
+                  },
+                  "params": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "session_id",
+                  "method",
+                  "params"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "400": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "X-Agent-Scope",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "description": "受保护配置别名；API key在非默认scope必填，完整验签与数据库授权仍执行"
+          }
+        ]
+      }
+    },
+    "/enterprise/credentials/issue": {
+      "post": {
+        "summary": "发行凭据；明文仅首次响应",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "subject_id": {
+                    "type": "string"
+                  },
+                  "ttl_secs": {
+                    "type": "integer",
+                    "minimum": 60,
+                    "maximum": 86400
+                  },
+                  "operation_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  }
+                },
+                "required": [
+                  "subject_id",
+                  "ttl_secs",
+                  "operation_id"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "400": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "X-Agent-Scope",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "description": "受保护配置别名；API key在非默认scope必填，完整验签与数据库授权仍执行"
+          }
+        ]
+      }
+    },
+    "/enterprise/credentials/revoke": {
+      "post": {
+        "summary": "撤销凭据及其主体旧 epoch",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "key_id": {
+                    "type": "string"
+                  },
+                  "operation_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  }
+                },
+                "required": [
+                  "key_id",
+                  "operation_id"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "400": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "X-Agent-Scope",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "description": "受保护配置别名；API key在非默认scope必填，完整验签与数据库授权仍执行"
+          }
+        ]
+      }
+    },
+    "/auth/login": {
+      "get": {
+        "security": [],
+        "summary": "创建一次性登录并跳转授权端点",
+        "responses": {
+          "400": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "303": {
+            "description": "S256 PKCE 授权跳转；HttpOnly SameSite 登录 cookie"
+          }
+        }
+      }
+    },
+    "/auth/callback": {
+      "get": {
+        "security": [],
+        "summary": "消费 state 并兑换授权码；不可自动重放",
+        "parameters": [
+          {
+            "name": "code",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "iss",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "短期 access token；Cache-Control no-store",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "access_token": {
+                      "type": "string",
+                      "writeOnly": true
+                    },
+                    "token_type": {
+                      "const": "Bearer"
+                    },
+                    "expires_at": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "access_token",
+                    "token_type",
+                    "expires_at"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ws": {
+      "get": {
+        "security": [],
+        "summary": "首帧必须有 token 和 opaque session_id；溢出 detach，cursor 恢复",
+        "responses": {
+          "400": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "101": {
+            "description": "WebSocket 切换"
+          }
+        }
+      }
+    },
+    "/enterprise/billing/configure": {
+      "post": {
+        "summary": "事务发布不可变价格和分层预算；管理员授权",
+        "responses": {
+          "200": {
+            "description": "canonical 事务事实",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FrozenBillingPolicy"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BillingConfigure"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "X-Agent-Scope",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "description": "受保护配置别名；API key在非默认scope必填，完整验签与数据库授权仍执行"
+          }
+        ]
+      }
+    },
+    "/enterprise/billing": {
+      "get": {
+        "summary": "读取当前冻结费用策略",
+        "responses": {
+          "200": {
+            "description": "canonical 事务事实",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/FrozenBillingPolicy"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "X-Agent-Scope",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "description": "受保护配置别名；API key在非默认scope必填，完整验签与数据库授权仍执行"
+          }
+        ]
+      }
+    },
+    "/enterprise/billing/accounts": {
+      "get": {
+        "summary": "读取当前策略各维度的预占和消费",
+        "responses": {
+          "200": {
+            "description": "canonical 事务事实",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "accounts": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/BillingAccount"
+                      }
+                    }
+                  },
+                  "required": [
+                    "accounts"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "X-Agent-Scope",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "description": "受保护配置别名；API key在非默认scope必填，完整验签与数据库授权仍执行"
+          }
+        ]
+      }
+    },
+    "/enterprise/billing/usage": {
+      "get": {
+        "summary": "按原 durable seq 读取费用账本；未知费用保留 null",
+        "responses": {
+          "200": {
+            "description": "canonical 事务事实",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "稳定错误信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "after",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9223372036854775807
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 64
+            }
+          },
+          {
+            "name": "X-Agent-Scope",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "description": "受保护配置别名；API key在非默认scope必填，完整验签与数据库授权仍执行"
+          }
+        ]
+      }
+    },
+    "/enterprise/registry": {
+      "get": {
+        "summary": "读取注册表revision和不可变代索引",
+        "parameters": [
+          {
+            "name": "X-Agent-Scope",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "description": "受保护配置别名；API key在非默认scope必填，完整验签与数据库授权仍执行"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "原canonical事务投影",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegistryReadback"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "包/信任根/灰度/回滚事务",
+        "parameters": [
+          {
+            "name": "X-Agent-Scope",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "description": "受保护配置别名；API key在非默认scope必填，完整验签与数据库授权仍执行"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegistryMutation"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "原canonical事务投影",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegistryReceipt"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/enterprise/registry/generation": {
+      "get": {
+        "summary": "读取不可变EffectiveConfig和来源",
+        "parameters": [
+          {
+            "name": "X-Agent-Scope",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "description": "受保护配置别名；API key在非默认scope必填，完整验签与数据库授权仍执行"
+          },
+          {
+            "name": "digest",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "原canonical事务投影",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstalledGeneration"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/enterprise/workflows": {
+      "post": {
+        "summary": "发布定义或启动持久DAG",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkflowHttpCommand"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "原事务提交/原operation幂等读回"
+          },
+          "400": {
+            "description": "边界或DTO错误"
+          },
+          "401": {
+            "description": "身份无效"
+          },
+          "403": {
+            "description": "原事务授权拒绝"
+          },
+          "409": {
+            "description": "revision/operation冲突"
+          },
+          "503": {
+            "description": "结果未确认；先读回原operation"
+          }
+        },
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Agent-Scope",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "description": "受保护Gateway profile别名；不能声明任意tenant"
+          }
+        ]
+      }
+    },
+    "/enterprise/workflows/control": {
+      "post": {
+        "summary": "pause/resume/cancel；取消传播到原child",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkflowControl"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "原事务提交/原operation幂等读回"
+          },
+          "400": {
+            "description": "边界或DTO错误"
+          },
+          "401": {
+            "description": "身份无效"
+          },
+          "403": {
+            "description": "原事务授权拒绝"
+          },
+          "409": {
+            "description": "revision/operation冲突"
+          },
+          "503": {
+            "description": "结果未确认；先读回原operation"
+          }
+        },
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Agent-Scope",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "description": "受保护Gateway profile别名；不能声明任意tenant"
+          }
+        ]
+      }
+    },
+    "/enterprise/workflows/read": {
+      "get": {
+        "summary": "原canonical工作流与游标读回",
+        "security": [],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128
+            }
+          },
+          {
+            "in": "query",
+            "name": "after",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 128,
+              "default": 64
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Agent-Scope",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "description": "受保护Gateway profile别名；不能声明任意tenant"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "有界canonical读回",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowReadback"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/a2a": {
+      "post": {
+        "summary": "A2A0.3 JSON-RPC；message/stream使用SSE、断流仅detach",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/A2ARequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "原事务提交/原operation幂等读回"
+          },
+          "400": {
+            "description": "边界或DTO错误"
+          },
+          "401": {
+            "description": "身份无效"
+          },
+          "403": {
+            "description": "原事务授权拒绝"
+          },
+          "409": {
+            "description": "revision/operation冲突"
+          },
+          "503": {
+            "description": "结果未确认；先读回原operation"
+          }
+        },
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Agent-Scope",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "description": "受保护Gateway profile别名；不能声明任意tenant"
+          }
+        ]
+      }
+    },
+    "/.well-known/agent-card.json": {
+      "get": {
+        "summary": "受信公开URL与实际能力Agent Card",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "A2A0.3 AgentCard"
+          },
+          "503": {
+            "description": "AGENT_A2A_PUBLIC_URL未配置"
+          }
+        },
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Agent-Scope",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "description": "受保护Gateway profile别名；不能声明任意tenant"
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT 或 ak API key"
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "retryable": {
+                "type": "boolean"
+              },
+              "safe_auto_retry": {
+                "const": false
+              },
+              "request_id": {
+                "type": "string"
+              },
+              "recovery_action": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "retryable",
+              "request_id",
+              "recovery_action",
+              "safe_auto_retry"
+            ]
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
+      "ModelPrice": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "input_per_million": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9223372036854775807
+          },
+          "output_per_million": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9223372036854775807
+          },
+          "cache_read_per_million": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9223372036854775807
+          },
+          "cache_creation_per_million": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9223372036854775807
+          }
+        },
+        "required": [
+          "input_per_million",
+          "output_per_million",
+          "cache_read_per_million",
+          "cache_creation_per_million"
+        ]
+      },
+      "BillingLimits": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "max_rounds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 64
+          },
+          "max_provider_attempts": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 256
+          },
+          "max_input_tokens": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 16777216
+          },
+          "max_output_tokens_per_attempt": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 32768
+          },
+          "max_tool_calls": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1024
+          },
+          "max_sandbox_wall_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400000
+          },
+          "max_sandbox_wall_ms_per_resource": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400000
+          }
+        },
+        "required": [
+          "max_rounds",
+          "max_provider_attempts",
+          "max_input_tokens",
+          "max_output_tokens_per_attempt",
+          "max_tool_calls",
+          "max_sandbox_wall_ms",
+          "max_sandbox_wall_ms_per_resource"
+        ]
+      },
+      "BillingDimension": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "tenant",
+                  "project",
+                  "agent"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "type": "string",
+                "const": "model"
+              },
+              "model": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              }
+            },
+            "required": [
+              "kind",
+              "model"
+            ]
+          }
+        ]
+      },
+      "BillingBudget": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "dimension": {
+            "$ref": "#/components/schemas/BillingDimension"
+          },
+          "hard_micros": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9223372036854775807
+          },
+          "soft_micros": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9223372036854775807
+          }
+        },
+        "required": [
+          "dimension",
+          "hard_micros",
+          "soft_micros"
+        ]
+      },
+      "BillingPolicy": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "version": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "currency": {
+            "type": "string",
+            "pattern": "^[A-Z]{3}$"
+          },
+          "window_start_ms": {
+            "type": "integer"
+          },
+          "window_end_ms": {
+            "type": "integer"
+          },
+          "models": {
+            "type": "object",
+            "minProperties": 1,
+            "maxProperties": 64,
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ModelPrice"
+            }
+          },
+          "tool_call_micros": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9223372036854775807
+          },
+          "sandbox_per_million_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9223372036854775807
+          },
+          "limits": {
+            "$ref": "#/components/schemas/BillingLimits"
+          },
+          "budgets": {
+            "type": "array",
+            "minItems": 4,
+            "maxItems": 67,
+            "items": {
+              "$ref": "#/components/schemas/BillingBudget"
+            }
+          }
+        },
+        "required": [
+          "version",
+          "currency",
+          "window_start_ms",
+          "window_end_ms",
+          "models",
+          "tool_call_micros",
+          "sandbox_per_million_ms",
+          "limits",
+          "budgets"
+        ]
+      },
+      "FrozenBillingPolicy": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "digest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/BillingPolicy"
+          }
+        },
+        "required": [
+          "digest",
+          "policy"
+        ]
+      },
+      "BillingConfigure": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "policy": {
+            "$ref": "#/components/schemas/BillingPolicy"
+          },
+          "operation_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "required": [
+          "policy",
+          "operation_id"
+        ]
+      },
+      "BillingAccount": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "dimension": {
+            "$ref": "#/components/schemas/BillingDimension"
+          },
+          "currency": {
+            "type": "string"
+          },
+          "hard_micros": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9223372036854775807
+          },
+          "soft_micros": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9223372036854775807
+          },
+          "reserved_micros": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9223372036854775807
+          },
+          "consumed_micros": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9223372036854775807
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9223372036854775807
+          },
+          "window_start_ms": {
+            "type": "integer"
+          },
+          "window_end_ms": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "dimension",
+          "currency",
+          "hard_micros",
+          "soft_micros",
+          "reserved_micros",
+          "consumed_micros",
+          "revision",
+          "window_start_ms",
+          "window_end_ms"
+        ]
+      },
+      "ExtensionRef": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "coordinate": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "path": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "digest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "trust": {
+            "type": "string",
+            "enum": [
+              "untrusted",
+              "project_local",
+              "organization_reviewed",
+              "builtin"
+            ]
+          }
+        },
+        "required": [
+          "coordinate",
+          "path",
+          "digest",
+          "trust"
+        ]
+      },
+      "AgentSandboxPolicy": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "backends": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "native",
+                "container",
+                "kubernetes"
+              ]
+            },
+            "maxItems": 3
+          },
+          "network": {
+            "type": "boolean"
+          },
+          "secrets": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "backends",
+          "network",
+          "secrets"
+        ]
+      },
+      "AgentResourceProfile": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "max_rounds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 64
+          },
+          "max_tool_calls": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1024
+          },
+          "context_tokens": {
+            "type": "integer",
+            "minimum": 1024,
+            "maximum": 16777216
+          }
+        },
+        "required": [
+          "max_rounds",
+          "max_tool_calls",
+          "context_tokens"
+        ]
+      },
+      "AgentConfig": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "system_prompt": {
+            "type": "string",
+            "maxLength": 32768
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "maxItems": 64
+          },
+          "tool_allowlist": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "maxItems": 512
+          },
+          "skill_refs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExtensionRef"
+            },
+            "maxItems": 128
+          },
+          "mcp_refs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExtensionRef"
+            },
+            "maxItems": 128
+          },
+          "hook_refs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExtensionRef"
+            },
+            "maxItems": 128
+          },
+          "sandbox": {
+            "$ref": "#/components/schemas/AgentSandboxPolicy"
+          },
+          "resources": {
+            "$ref": "#/components/schemas/AgentResourceProfile"
+          },
+          "labels": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "maxProperties": 64
+          },
+          "secret_refs": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string",
+              "pattern": "^secret://"
+            },
+            "maxProperties": 64
+          }
+        },
+        "required": [
+          "system_prompt",
+          "models",
+          "tool_allowlist",
+          "skill_refs",
+          "mcp_refs",
+          "hook_refs",
+          "sandbox",
+          "resources",
+          "labels",
+          "secret_refs"
+        ]
+      },
+      "AgentConfigPatch": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "system_prompt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 32768
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "models": {
+            "anyOf": [
+              {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                },
+                "maxItems": 64
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tool_allowlist": {
+            "anyOf": [
+              {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                },
+                "maxItems": 512
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "skill_refs": {
+            "anyOf": [
+              {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ExtensionRef"
+                },
+                "maxItems": 128
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "mcp_refs": {
+            "anyOf": [
+              {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ExtensionRef"
+                },
+                "maxItems": 128
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "hook_refs": {
+            "anyOf": [
+              {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ExtensionRef"
+                },
+                "maxItems": 128
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sandbox": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentSandboxPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "resources": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentResourceProfile"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "labels": {
+            "anyOf": [
+              {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "maxProperties": 64
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "secret_refs": {
+            "anyOf": [
+              {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string",
+                  "pattern": "^secret://"
+                },
+                "maxProperties": 64
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": []
+      },
+      "ConfigLayers": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "defaults": {
+            "$ref": "#/components/schemas/AgentConfig"
+          },
+          "organization": {
+            "$ref": "#/components/schemas/AgentConfigPatch"
+          },
+          "tenant": {
+            "$ref": "#/components/schemas/AgentConfigPatch"
+          },
+          "project": {
+            "$ref": "#/components/schemas/AgentConfigPatch"
+          },
+          "agent": {
+            "$ref": "#/components/schemas/AgentConfigPatch"
+          },
+          "session_override": {
+            "$ref": "#/components/schemas/AgentConfigPatch"
+          }
+        },
+        "required": [
+          "defaults",
+          "organization",
+          "tenant",
+          "project",
+          "agent",
+          "session_override"
+        ]
+      },
+      "AgentDefinition": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "scope": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "organization_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,128}$"
+              },
+              "tenant_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,128}$"
+              },
+              "project_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,128}$"
+              },
+              "agent_uid": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,128}$"
+              }
+            },
+            "required": [
+              "organization_id",
+              "tenant_id",
+              "project_id",
+              "agent_uid"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "version": {
+            "type": "string",
+            "description": "严格SemVer"
+          },
+          "layers": {
+            "$ref": "#/components/schemas/ConfigLayers"
+          }
+        },
+        "required": [
+          "scope",
+          "name",
+          "version",
+          "layers"
+        ]
+      },
+      "PackManifest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "schema_version": {
+            "const": 1
+          },
+          "definition": {
+            "$ref": "#/components/schemas/AgentDefinition"
+          },
+          "files": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "maxProperties": 256
+          },
+          "trust": {
+            "type": "string",
+            "enum": [
+              "untrusted",
+              "project_local",
+              "organization_reviewed",
+              "builtin"
+            ]
+          }
+        },
+        "required": [
+          "schema_version",
+          "definition",
+          "files",
+          "trust"
+        ]
+      },
+      "PackFile": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "digest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "content_base64": {
+            "type": "string",
+            "contentEncoding": "base64",
+            "maxLength": 524288
+          }
+        },
+        "required": [
+          "path",
+          "digest",
+          "content_base64"
+        ]
+      },
+      "SignedAgentPack": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "manifest": {
+            "$ref": "#/components/schemas/PackManifest"
+          },
+          "contents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PackFile"
+            },
+            "maxItems": 256
+          },
+          "key_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "signature_base64": {
+            "type": "string",
+            "contentEncoding": "base64",
+            "minLength": 88,
+            "maxLength": 88
+          }
+        },
+        "required": [
+          "manifest",
+          "contents",
+          "key_id",
+          "signature_base64"
+        ]
+      },
+      "RegistryTrustRoot": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "key_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "public_key_base64": {
+            "type": "string",
+            "contentEncoding": "base64",
+            "minLength": 44,
+            "maxLength": 44
+          },
+          "maximum_trust": {
+            "type": "string",
+            "enum": [
+              "untrusted",
+              "project_local",
+              "organization_reviewed",
+              "builtin"
+            ]
+          }
+        },
+        "required": [
+          "key_id",
+          "public_key_base64",
+          "maximum_trust"
+        ]
+      },
+      "RegistryTrust": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "version": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "roots": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RegistryTrustRoot"
+            },
+            "maxItems": 32
+          }
+        },
+        "required": [
+          "version",
+          "roots"
+        ]
+      },
+      "RegistryMutation": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "operation_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "command": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "action": {
+                    "const": "configure_trust"
+                  },
+                  "trust": {
+                    "$ref": "#/components/schemas/RegistryTrust"
+                  }
+                },
+                "required": [
+                  "action",
+                  "trust"
+                ]
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "action": {
+                    "const": "publish"
+                  },
+                  "pack": {
+                    "$ref": "#/components/schemas/SignedAgentPack"
+                  }
+                },
+                "required": [
+                  "action",
+                  "pack"
+                ]
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "action": {
+                    "const": "rollout"
+                  },
+                  "stable": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "canary": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "canary_basis_points": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 10000
+                  }
+                },
+                "required": [
+                  "action",
+                  "stable",
+                  "canary",
+                  "canary_basis_points"
+                ]
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "action": {
+                    "const": "rollback"
+                  },
+                  "digest": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "action",
+                  "digest"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "operation_id",
+          "expected_revision",
+          "command"
+        ]
+      },
+      "EffectiveAgentConfig": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "config": {
+            "$ref": "#/components/schemas/AgentConfig"
+          },
+          "digest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "sources": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 2304
+          }
+        },
+        "required": [
+          "config",
+          "digest",
+          "sources",
+          "evidence"
+        ]
+      },
+      "InstalledGeneration": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "scope": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "organization_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,128}$"
+              },
+              "tenant_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,128}$"
+              },
+              "project_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,128}$"
+              },
+              "agent_uid": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,128}$"
+              }
+            },
+            "required": [
+              "organization_id",
+              "tenant_id",
+              "project_id",
+              "agent_uid"
+            ]
+          },
+          "pack_digest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "trust_digest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "manifest": {
+            "$ref": "#/components/schemas/PackManifest"
+          },
+          "effective": {
+            "$ref": "#/components/schemas/EffectiveAgentConfig"
+          },
+          "scan_digest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "skill_materials": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "maxProperties": 128
+          }
+        },
+        "required": [
+          "scope",
+          "pack_digest",
+          "trust_digest",
+          "manifest",
+          "effective",
+          "scan_digest",
+          "skill_materials"
+        ]
+      },
+      "RegistryRollout": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "stable": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "canary": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "canary_basis_points": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10000
+          },
+          "revision": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "stable",
+          "canary",
+          "canary_basis_points",
+          "revision"
+        ]
+      },
+      "RegistryState": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "revision": {
+            "type": "integer"
+          },
+          "trust": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RegistryTrust"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rollout": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RegistryRollout"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "revision",
+          "trust",
+          "rollout"
+        ]
+      },
+      "RegistryReceipt": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "revision": {
+            "type": "integer"
+          },
+          "generation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InstalledGeneration"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rollout": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RegistryRollout"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state_digest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        "required": [
+          "revision",
+          "generation",
+          "rollout",
+          "state_digest"
+        ]
+      },
+      "RegistryGenerationSummary": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "digest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "version": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "effective_config_digest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "trust_digest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "scan_digest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        "required": [
+          "digest",
+          "version",
+          "effective_config_digest",
+          "trust_digest",
+          "scan_digest"
+        ]
+      },
+      "RegistryReadback": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "state": {
+            "$ref": "#/components/schemas/RegistryState"
+          },
+          "generations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RegistryGenerationSummary"
+            },
+            "maxItems": 64
+          }
+        },
+        "required": [
+          "state",
+          "generations"
+        ]
+      },
+      "WorkflowNodeKind": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "agent_run"
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 32768
+              }
+            },
+            "required": [
+              "kind",
+              "message"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "tool_call"
+              },
+              "call": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "maxLength": 128
+                  },
+                  "name": {
+                    "type": "string",
+                    "maxLength": 128
+                  },
+                  "arguments": {}
+                },
+                "required": [
+                  "id",
+                  "name",
+                  "arguments"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "call"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "approval"
+              },
+              "prompt": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 32768
+              }
+            },
+            "required": [
+              "kind",
+              "prompt"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "condition"
+              },
+              "path": {
+                "type": "array",
+                "maxItems": 16,
+                "items": {
+                  "type": "string",
+                  "maxLength": 128
+                }
+              },
+              "equals": {}
+            },
+            "required": [
+              "kind",
+              "path",
+              "equals"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "parallel"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "join"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "wait_until"
+              },
+              "timestamp_ms": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "kind",
+              "timestamp_ms"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "webhook"
+              },
+              "url": {
+                "type": "string",
+                "pattern": "^https://",
+                "maxLength": 2048
+              },
+              "body": {},
+              "idempotency_key": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 256
+              }
+            },
+            "required": [
+              "kind",
+              "url",
+              "body",
+              "idempotency_key"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "sub_workflow"
+              },
+              "definition_digest": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "input": {}
+            },
+            "required": [
+              "kind",
+              "definition_digest",
+              "input"
+            ]
+          }
+        ]
+      },
+      "WorkflowRetryClass": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "class": {
+                "const": "pure"
+              }
+            },
+            "required": [
+              "class"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "class": {
+                "const": "never"
+              }
+            },
+            "required": [
+              "class"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "class": {
+                "const": "idempotent"
+              },
+              "key": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              }
+            },
+            "required": [
+              "class",
+              "key"
+            ]
+          }
+        ]
+      },
+      "WorkflowNodeDefinition": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "dependencies": {
+            "type": "array",
+            "uniqueItems": true,
+            "maxItems": 256,
+            "items": {
+              "type": "string",
+              "maxLength": 128
+            }
+          },
+          "kind": {
+            "$ref": "#/components/schemas/WorkflowNodeKind"
+          },
+          "input": {},
+          "retry": {
+            "$ref": "#/components/schemas/WorkflowRetryClass"
+          },
+          "max_attempts": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 8
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 86400000
+          },
+          "compensation": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "id",
+          "dependencies",
+          "kind",
+          "input",
+          "retry",
+          "max_attempts",
+          "timeout_ms",
+          "compensation"
+        ]
+      },
+      "WorkflowDefinition": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "schema_version": {
+            "const": 1
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "version": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "nodes": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 256,
+            "items": {
+              "$ref": "#/components/schemas/WorkflowNodeDefinition"
+            }
+          }
+        },
+        "required": [
+          "schema_version",
+          "name",
+          "version",
+          "nodes"
+        ]
+      },
+      "WorkflowPublish": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "operation_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "definition": {
+            "$ref": "#/components/schemas/WorkflowDefinition"
+          }
+        },
+        "required": [
+          "operation_id",
+          "definition"
+        ]
+      },
+      "WorkflowStart": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "operation_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "definition_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "input": {}
+        },
+        "required": [
+          "operation_id",
+          "definition_digest",
+          "input"
+        ]
+      },
+      "WorkflowControl": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "operation_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "instance_id": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "action": {
+            "enum": [
+              "pause",
+              "resume",
+              "cancel"
+            ]
+          }
+        },
+        "required": [
+          "operation_id",
+          "instance_id",
+          "expected_revision",
+          "action"
+        ]
+      },
+      "WorkflowHttpCommand": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "command": {
+                "const": "publish"
+              },
+              "value": {
+                "$ref": "#/components/schemas/WorkflowPublish"
+              }
+            },
+            "required": [
+              "command",
+              "value"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "command": {
+                "const": "start"
+              },
+              "value": {
+                "$ref": "#/components/schemas/WorkflowStart"
+              }
+            },
+            "required": [
+              "command",
+              "value"
+            ]
+          }
+        ]
+      },
+      "WorkflowInstance": {
+        "type": "object",
+        "description": "canonical workflow instance；状态、creator、frozen输入、definition digest、revision与稳定task_id来自原事务。",
+        "required": [
+          "id",
+          "scope",
+          "definition_digest",
+          "input_digest",
+          "creator",
+          "status",
+          "revision",
+          "task_id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "task_id": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "definition_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "status": {
+            "enum": [
+              "running",
+              "paused",
+              "cancelling",
+              "compensating",
+              "cancelled",
+              "completed",
+              "failed",
+              "unknown"
+            ]
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "WorkflowReadback": {
+        "type": "object",
+        "required": [
+          "instance",
+          "definition",
+          "nodes",
+          "events",
+          "next_cursor"
+        ],
+        "properties": {
+          "instance": {
+            "$ref": "#/components/schemas/WorkflowInstance"
+          },
+          "definition": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "digest": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "definition": {
+                "$ref": "#/components/schemas/WorkflowDefinition"
+              }
+            },
+            "required": [
+              "digest",
+              "definition"
+            ]
+          },
+          "nodes": {
+            "type": "array",
+            "maxItems": 512,
+            "items": {
+              "type": "object",
+              "description": "immutable input digest、lease epoch、revision、原native run/child/artifact引用"
+            }
+          },
+          "events": {
+            "type": "array",
+            "maxItems": 128,
+            "items": {
+              "type": "object",
+              "description": "append-only cursor/revision/digest/time"
+            }
+          },
+          "next_cursor": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "A2ATextPart": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "text"
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32768
+          },
+          "metadata": {
+            "type": "object",
+            "maxProperties": 0
+          }
+        },
+        "required": [
+          "kind",
+          "text"
+        ]
+      },
+      "A2AMessage": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "message"
+          },
+          "role": {
+            "const": "user"
+          },
+          "parts": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 32,
+            "items": {
+              "$ref": "#/components/schemas/A2ATextPart"
+            }
+          },
+          "messageId": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "taskId": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "contextId": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "metadata": {
+            "type": "object",
+            "maxProperties": 0
+          },
+          "referenceTaskIds": {
+            "type": "array",
+            "maxItems": 0
+          }
+        },
+        "required": [
+          "role",
+          "parts",
+          "messageId"
+        ]
+      },
+      "A2ASend": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "message": {
+            "$ref": "#/components/schemas/A2AMessage"
+          },
+          "configuration": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "acceptedOutputModes": {
+                "type": "array",
+                "items": {
+                  "const": "text/plain"
+                }
+              },
+              "historyLength": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 128
+              },
+              "blocking": {
+                "type": "boolean"
+              },
+              "pushNotificationConfig": {}
+            },
+            "required": []
+          },
+          "metadata": {
+            "type": "object",
+            "maxProperties": 0
+          }
+        },
+        "required": [
+          "message"
+        ]
+      },
+      "A2ATaskQuery": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "historyLength": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 128
+          },
+          "metadata": {
+            "type": "object",
+            "maxProperties": 0
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "A2ARequest": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "jsonrpc": {
+                "const": "2.0"
+              },
+              "id": {
+                "type": [
+                  "string",
+                  "integer"
+                ]
+              },
+              "method": {
+                "enum": [
+                  "message/send",
+                  "message/stream"
+                ]
+              },
+              "params": {
+                "$ref": "#/components/schemas/A2ASend"
+              }
+            },
+            "required": [
+              "jsonrpc",
+              "id",
+              "method",
+              "params"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "jsonrpc": {
+                "const": "2.0"
+              },
+              "id": {
+                "type": [
+                  "string",
+                  "integer"
+                ]
+              },
+              "method": {
+                "enum": [
+                  "tasks/get",
+                  "tasks/cancel"
+                ]
+              },
+              "params": {
+                "$ref": "#/components/schemas/A2ATaskQuery"
+              }
+            },
+            "required": [
+              "jsonrpc",
+              "id",
+              "method",
+              "params"
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

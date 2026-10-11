@@ -1,0 +1,54 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+error[E0599]: no method named `health_report` found for struct `RunStore` in the current scope
+   --> tests/run_event_contract.rs:419:25
+    |
+419 |     assert_eq!(upgraded.health_report().unwrap()["schema_version"], 26);
+    |                         ^^^^^^^^^^^^^ method not found in `RunStore`
+    |
+   ::: /Users/pilot/Documents/myproject/agent-rust/crates/storage/src/ports.rs:493:8
+    |
+493 |     fn health_report(&self) -> Result<Value, RuntimeError>;
+    |        ------------- the method is available for `RunStore` here
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `MaintenanceRepository` which provides `health_report` is implemented but not in scope; perhaps you want to import it
+    |
+2   + use agent_storage::MaintenanceRepository;
+    |
+
+error[E0599]: no method named `health_report` found for struct `RunStore` in the current scope
+   --> tests/run_event_contract.rs:514:25
+    |
+514 |     assert_eq!(upgraded.health_report().unwrap()["schema_version"], 26);
+    |                         ^^^^^^^^^^^^^ method not found in `RunStore`
+    |
+   ::: /Users/pilot/Documents/myproject/agent-rust/crates/storage/src/ports.rs:493:8
+    |
+493 |     fn health_report(&self) -> Result<Value, RuntimeError>;
+    |        ------------- the method is available for `RunStore` here
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `MaintenanceRepository` which provides `health_report` is implemented but not in scope; perhaps you want to import it
+    |
+2   + use agent_storage::MaintenanceRepository;
+    |
+
+error[E0599]: no method named `health_report` found for struct `RunStore` in the current scope
+   --> tests/run_event_contract.rs:532:25
+    |
+532 |     assert_eq!(restored.health_report().unwrap()["schema_version"], 26);
+    |                         ^^^^^^^^^^^^^ method not found in `RunStore`
+    |
+   ::: /Users/pilot/Documents/myproject/agent-rust/crates/storage/src/ports.rs:493:8
+    |
+493 |     fn health_report(&self) -> Result<Value, RuntimeError>;
+    |        ------------- the method is available for `RunStore` here
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `MaintenanceRepository` which provides `health_report` is implemented but not in scope; perhaps you want to import it
+    |
+2   + use agent_storage::MaintenanceRepository;
+    |
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `my-agent` (test "run_event_contract") due to 3 previous errors

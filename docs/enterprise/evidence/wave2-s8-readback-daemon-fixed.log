@@ -1,0 +1,27 @@
+   Compiling agent-daemon-client v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-client)
+   Compiling agent-entry-support v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/entry-support)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling agent-cli v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/cli)
+   Compiling agent-acp v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/acp)
+   Compiling agent-gateway v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/gateway)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 20.43s
+     Running tests/runtime_contract.rs (target/debug/deps/runtime_contract-ef559da8ec38e611)
+
+running 1 test
+
+thread 'scoped_async_session_readback_is_consistent_across_six_entries_and_restart' panicked at tests/runtime_contract.rs:70:9:
+assertion `left == right` failed
+  left: 18
+ right: 12
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test scoped_async_session_readback_is_consistent_across_six_entries_and_restart ... FAILED
+
+failures:
+
+failures:
+    scoped_async_session_readback_is_consistent_across_six_entries_and_restart
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 40 filtered out; finished in 4.01s
+
+error: test failed, to rerun pass `--test runtime_contract`

@@ -1,0 +1,16 @@
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.64s
+     Running tests/writer_contract.rs (target/debug/deps/writer_contract-12f2878073cdb615)
+
+running 5 tests
+test sqlite_writer_repository_uses_database_time_complete_scope_and_epoch_cas ... ok
+test native_writer_renewal_preserves_epoch_and_does_not_advance_business_event_clock ... ok
+test writer_two_independent_connections_have_one_winner_with_controlled_barrier ... ok
+test native_writer_expired_process_cannot_self_reacquire_and_unconfigured_store_cannot_bypass ... ok
+test native_writer_old_callback_terminal_transcript_and_recovery_are_fenced_after_takeover ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+

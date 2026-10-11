@@ -27,6 +27,30 @@ enum PlanError {
     MissingStep(String),
 }
 
+async fn bound_plan() -> Result<Option<agent_core::RunPlanReadback>> {
+    if let Some((envelope, turns)) = crate::loop_engine::current_turn_repository() {
+        return Ok(Some(
+            turns
+                .read_run_plan(&envelope)
+                .await
+                .map_err(agent_storage::RuntimeError::from)?,
+        ));
+    }
+    if let Some((store, owner)) = crate::loop_engine::current_session_repository() {
+        let snapshot = store.read_plan(&owner)?;
+        let has_legacy_plan = snapshot.value.get("plan_id").is_none()
+            && store
+                .plan_readback(&owner.session_key)?
+                .legacy_plan
+                .is_some();
+        return Ok(Some(agent_core::RunPlanReadback {
+            snapshot,
+            has_legacy_plan,
+        }));
+    }
+    Ok(None)
+}
+
 pub struct PlanStore {
     path: Option<PathBuf>,
     state: RwLock<PlanState>,
@@ -36,7 +60,7 @@ pub struct PlanStore {
 impl PlanStore {
     pub async fn from_env(
         workspace: &Path,
-        store: &dyn agent_storage::MaintenanceRepository,
+        store: &dyn agent_storage_ports::PlanControlRepository,
     ) -> Result<Self> {
         let path = match env::var_os("PLAN_PATH") {
             Some(value) if value.is_empty() || value == "off" => None,
@@ -51,26 +75,54 @@ impl PlanStore {
             None => Some(workspace.join(".my-agent/plan.json")),
         };
         if let Some(path) = &path
-            && store.legacy_plan_imported(&path.to_string_lossy())?
+            && store
+                .read_legacy_plan_import(
+                    &agent_core::TenantContext::local(),
+                    &path.to_string_lossy(),
+                )
+                .await?
         {
             return Ok(Self::memory_only());
         }
         Self::new(path).await
     }
 
-    pub async fn migrate_legacy(
+    pub async fn migrate_legacy<T>(&self, store: &T, key: &agent_core::SessionKey) -> Result<()>
+    where
+        T: agent_storage_ports::PlanControlRepository
+            + agent_storage_ports::SessionControlRepository
+            + ?Sized,
+    {
+        self.migrate_legacy_with_ports(store, store, key).await
+    }
+
+    pub async fn migrate_legacy_with_ports<P, S>(
         &self,
-        store: &dyn agent_storage::MaintenanceRepository,
+        store: &P,
+        sessions: &S,
         key: &agent_core::SessionKey,
-    ) -> Result<()> {
+    ) -> Result<()>
+    where
+        P: agent_storage_ports::PlanControlRepository + ?Sized,
+        S: agent_storage_ports::SessionControlRepository + ?Sized,
+    {
+        let scope = agent_core::TenantContext::local();
         let Some(path) = self.path.as_ref().filter(|p| p.exists()) else {
             return Ok(());
         };
         let source = path.to_string_lossy();
-        if store.legacy_plan_imported(&source)? {
+        if store.read_legacy_plan_import(&scope, &source).await? {
             return Ok(());
         }
+        let metadata = sessions
+            .read_session_metadata(&scope, key)
+            .await?
+            .filter(|m| !m.deleted)
+            .ok_or_else(|| anyhow::anyhow!("旧计划导入缺少有效会话"))?;
+        let size = tokio::fs::metadata(path).await?.len();
+        anyhow::ensure!(size <= 1024 * 1024, "旧计划文件超过导入预算");
         let bytes = tokio::fs::read(path).await?;
+        anyhow::ensure!(bytes.len() <= 1024 * 1024, "旧计划文件读取超过导入预算");
         let backup = path.with_extension("json.pre-repository.backup");
         if !backup.exists() {
             use tokio::io::AsyncWriteExt;
@@ -87,12 +139,16 @@ impl PlanStore {
             );
         }
         use sha2::{Digest, Sha256};
-        store.import_legacy_plan(
-            &source,
-            &format!("{:x}", Sha256::digest(&bytes)),
-            key,
-            &serde_json::to_value(&*self.state.read().await)?,
-        )?;
+        store
+            .import_legacy_plan_file(
+                &scope,
+                &source,
+                &format!("{:x}", Sha256::digest(&bytes)),
+                key,
+                &metadata.lifetime,
+                &serde_json::to_value(&*self.state.read().await)?,
+            )
+            .await?;
         Ok(())
     }
 
@@ -159,24 +215,23 @@ impl PlanStore {
     }
 
     pub async fn context_block(&self) -> Option<String> {
-        if let Some((store, owner)) = crate::loop_engine::current_session_repository() {
-            match store.read_plan(&owner) {
-                Ok(snapshot) if snapshot.value.get("plan_id").is_some() => {
-                    return match serde_json::from_value::<agent_core::PlanDocument>(snapshot.value)
-                    {
-                        Ok(document) => Some(format!(
-                            "当前任务计划（{}，版本 {}，审阅 {:?}）：\n{}",
-                            document.plan_id,
-                            document.revision,
-                            document.review,
-                            document.markdown()
-                        )),
-                        Err(error) => Some(format!("[plan_unavailable] {error}")),
-                    };
-                }
-                Err(error) => return Some(format!("[plan_unavailable] {error}")),
-                _ => {}
+        match bound_plan().await {
+            Ok(Some(readback)) if readback.snapshot.value.get("plan_id").is_some() => {
+                return match serde_json::from_value::<agent_core::PlanDocument>(
+                    readback.snapshot.value,
+                ) {
+                    Ok(document) => Some(format!(
+                        "当前任务计划（{}，版本 {}，审阅 {:?}）：\n{}",
+                        document.plan_id,
+                        document.revision,
+                        document.review,
+                        document.markdown()
+                    )),
+                    Err(error) => Some(format!("[plan_unavailable] {error}")),
+                };
             }
+            Err(error) => return Some(format!("[plan_unavailable] {error}")),
+            Ok(_) => {}
         }
         let state = match self.current_state().await {
             Ok(state) => state,
@@ -186,8 +241,8 @@ impl PlanStore {
     }
 
     async fn current_state(&self) -> Result<PlanState> {
-        if let Some((store, owner)) = crate::loop_engine::current_session_repository() {
-            let value = store.read_plan(&owner)?.value;
+        if let Some(readback) = bound_plan().await? {
+            let value = readback.snapshot.value;
             return if value.get("plan_id").is_some() {
                 Ok(serde_json::from_value::<agent_core::PlanDocument>(value)?.definition)
             } else {
@@ -198,21 +253,31 @@ impl PlanStore {
     }
 
     async fn require_versioned_mutation(&self) -> Result<()> {
-        if let Some((store, owner)) = crate::loop_engine::current_session_repository() {
-            if store.read_plan(&owner)?.value.get("plan_id").is_none() {
-                anyhow::ensure!(
-                    store
-                        .plan_readback(&owner.session_key)?
-                        .legacy_plan
-                        .is_none(),
-                    "旧计划仅可读取；请显式 set 新计划定义后再更新"
-                );
-            }
+        if let Some(readback) = bound_plan().await? {
+            anyhow::ensure!(
+                readback.snapshot.value.get("plan_id").is_some() || !readback.has_legacy_plan,
+                "旧计划仅可读取；请显式 set 新计划定义后再更新"
+            );
         }
         Ok(())
     }
 
     async fn commit(&self, next: PlanState) -> Result<String> {
+        if let Some((envelope, turns)) = crate::loop_engine::current_turn_repository() {
+            let current = turns
+                .read_run_plan(&envelope)
+                .await
+                .map_err(agent_storage::RuntimeError::from)?;
+            turns
+                .stage_run_plan(
+                    &envelope,
+                    current.snapshot.revision,
+                    &serde_json::to_value(&next)?,
+                )
+                .await
+                .map_err(agent_storage::RuntimeError::from)?;
+            return Ok(render_plan(&next.steps));
+        }
         if let Some((store, owner)) = crate::loop_engine::current_session_repository() {
             let current = store.read_plan(&owner)?;
             store.stage_plan(&owner, current.revision, &serde_json::to_value(&next)?)?;
@@ -397,9 +462,14 @@ async fn load_state(path: &Path) -> Result<PlanState> {
     if !path.exists() {
         return Ok(PlanState::default());
     }
+    anyhow::ensure!(
+        tokio::fs::metadata(path).await?.len() <= 1024 * 1024,
+        "计划文件超过读取预算"
+    );
     let bytes = tokio::fs::read(path)
         .await
         .with_context(|| format!("读取计划失败: {}", path.display()))?;
+    anyhow::ensure!(bytes.len() <= 1024 * 1024, "计划文件读取超过预算");
     serde_json::from_slice(&bytes).with_context(|| format!("解析计划失败: {}", path.display()))
 }
 

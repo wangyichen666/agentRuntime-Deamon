@@ -1,0 +1,44 @@
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 31.00s
+     Running tests/hook_observation_contract.rs (target/debug/deps/hook_observation_contract-4cd8e1608e4d6c21)
+
+running 14 tests
+test original_pending_hook_ack_preserves_retired_publication_identity_and_idempotence ... FAILED
+test hook_history_foreign_must_be_forbidden_before_corrupt_private_json ... ok
+test hook_readback_does_not_create_a_new_snapshot_revision ... ok
+test hook_publication_ack_foreign_must_not_write_dispatched ... ok
+test pending_hook_publications_do_not_expose_foreign_lifecycle ... ok
+test async_ack_foreign_scope_precedes_corrupt_publication_and_never_dispatches ... ok
+test async_hook_history_preserves_scope_errors_cursor_and_retired_lifetime_without_writer ... FAILED
+test pending_sql_scope_filter_precedes_limit_and_never_starves_local_publications ... ok
+test legal_hook_pages_reject_cumulative_budget_without_truncation_or_any_write ... ok
+test publication_budget_preserves_legitimate_escaped_session_keys ... ok
+test saved_hook_publication_operation_must_match_original_sql_key ... ok
+test saved_hook_run_owner_must_match_canonical_run_incarnation ... ok
+test saved_legal_hook_effect_has_whole_outcome_byte_budget ... ok
+test oversized_or_malformed_saved_hook_publication_is_not_skipped_or_repaired ... ok
+
+failures:
+
+---- original_pending_hook_ack_preserves_retired_publication_identity_and_idempotence stdout ----
+
+thread 'original_pending_hook_ack_preserves_retired_publication_identity_and_idempotence' panicked at tests/hook_observation_contract.rs:333:41:
+called `Result::unwrap()` on an `Err` value: Protocol("session 已存在")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- async_hook_history_preserves_scope_errors_cursor_and_retired_lifetime_without_writer stdout ----
+
+thread 'async_hook_history_preserves_scope_errors_cursor_and_retired_lifetime_without_writer' panicked at tests/hook_observation_contract.rs:291:41:
+called `Result::unwrap()` on an `Err` value: Protocol("session 已存在")
+
+
+failures:
+    async_hook_history_preserves_scope_errors_cursor_and_retired_lifetime_without_writer
+    original_pending_hook_ack_preserves_retired_publication_identity_and_idempotence
+
+test result: FAILED. 12 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.55s
+
+error: test failed, to rerun pass `-p my-agent --test hook_observation_contract`

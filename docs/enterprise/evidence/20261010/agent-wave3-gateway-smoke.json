@@ -1,0 +1,1 @@
+{"verified": true, "scope": {"organization_id": "mock-org", "tenant_id": "mock-tenant", "project_id": "mock-project", "agent_uid": "mock-agent"}, "directory_opaque": true, "foreign_token_status": 401, "model_calls": 1, "transport": "HTTP Gateway delegation + UDS + canonical PostgreSQL", "note": "本机测试签名钥匙；登录、远程OIDC和轮转另验"}

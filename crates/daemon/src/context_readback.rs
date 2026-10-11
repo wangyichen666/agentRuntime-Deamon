@@ -5,19 +5,26 @@ use agent_daemon_protocol::params::ContextReadParams;
 use serde_json::Value;
 
 impl DaemonState {
-    pub(super) fn context_readback(
+    pub(super) async fn context_readback(
         &self,
         params: ContextReadParams,
     ) -> Result<Value, (i64, String)> {
-        let fail = |error: agent_storage::RuntimeError| (-32001, error.to_string());
+        let fail = |error: RepositoryError| match error {
+            RepositoryError::Authorization(error) => (error.rpc_code(), error.to_string()),
+            RepositoryError::Coordination(error) => (error.rpc_code(), error.to_string()),
+            RepositoryError::Artifact(error) => (error.rpc_code(), error.to_string()),
+            RepositoryError::Ledger(error) => (error.rpc_code(), error.to_string()),
+        };
         let (capture, frozen) = self
-            .run_store
-            .provider_request(
+            .run_request_store
+            .read_provider_request(
+                &self.scope(),
                 &SessionKey(params.session_id),
                 &params.expected_lifetime,
                 params.run_id.as_ref(),
                 params.capture_id.as_deref(),
             )
+            .await
             .map_err(fail)?;
         let assembled = agent_context::assemble_request(&capture.input)
             .map_err(|error| (-32001, error.to_string()))?;

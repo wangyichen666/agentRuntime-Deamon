@@ -1,0 +1,37 @@
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 31.38s
+     Running tests/run_discovery_contract.rs (target/debug/deps/run_discovery_contract-10274f22e49e13bc)
+
+running 13 tests
+test discovery_cancellation_denies_foreign_without_canonical_cancel_event ... ok
+test discovery_publication_denies_foreign_before_any_permit_or_event ... ok
+test discovery_readback_denies_foreign_before_loading_private_definitions ... ok
+test discovered_execution_permission_denies_foreign_before_catalog_and_receipt ... ok
+test native_discovery_all_scope_and_owner_dimensions_fail_before_receipts_or_cancel ... ok
+test discovery_saved_frozen_snapshot_has_budget_before_decoding_legal_json ... ok
+test native_discovery_restarts_after_lifetime_retirement_without_reacquiring_writer ... ok
+test native_discovery_and_cancellation_faults_roll_back_original_event_stamp_and_outbox ... ok
+test retired_discovery_readback_uses_permanent_lifetime_without_current_writer ... ok
+test two_real_connections_publish_one_receipt_and_cancel_event_under_concurrency ... FAILED
+test native_discovery_revocation_and_writer_expiry_deny_execution_but_preserve_scoped_history ... ok
+test native_discovery_corrupt_saved_identity_digest_and_sql_budget_fail_without_clock_write ... ok
+test native_discovery_cumulative_bytes_reject_before_insert_and_keep_previous_receipts_readable ... ok
+
+failures:
+
+---- two_real_connections_publish_one_receipt_and_cancel_event_under_concurrency stdout ----
+
+thread 'two_real_connections_publish_one_receipt_and_cancel_event_under_concurrency' panicked at tests/run_discovery_contract.rs:474:18:
+called `Result::unwrap()` on an `Err` value: SqlInputError { error: Error { code: Unknown, extended_code: 1 }, msg: "no such column: event_seq", sql: "SELECT count(*) FROM event_view_stamps WHERE run_id=?1 AND event_seq=?2", offset: 59 }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    two_real_connections_publish_one_receipt_and_cancel_event_under_concurrency
+
+test result: FAILED. 12 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.92s
+
+error: test failed, to rerun pass `--test run_discovery_contract`

@@ -1,0 +1,32 @@
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 29.78s
+     Running tests/run_execution_contract.rs (target/debug/deps/run_execution_contract-6f2d9774357a83c7)
+
+running 2 tests
+test execution_terminal_keeps_admitted_owner_instead_of_adopting_later_generation ... FAILED
+test execution_terminal_rejects_foreign_legacy_run_without_frozen_authorization ... FAILED
+
+failures:
+
+---- execution_terminal_keeps_admitted_owner_instead_of_adopting_later_generation stdout ----
+
+thread 'execution_terminal_keeps_admitted_owner_instead_of_adopting_later_generation' panicked at tests/run_execution_contract.rs:42:5:
+迟到caller不得重读并采用后来的generation，实际为 Ok(RunRecord { kind: Chat, run_id: RunId("run-1"), turn_id: TurnId("turn-1"), session_id: SessionKey("execution"), request_id: Number(1), status: Completed, last_seq: EventSeq(4), content: Some("私密结果"), error_code: None, error_message: None })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- execution_terminal_rejects_foreign_legacy_run_without_frozen_authorization stdout ----
+
+thread 'execution_terminal_rejects_foreign_legacy_run_without_frozen_authorization' panicked at tests/run_execution_contract.rs:33:5:
+旧无授权记录也必须按完整scope拒绝terminal，实际为 Ok(RunRecord { kind: Chat, run_id: RunId("run-1"), turn_id: TurnId("turn-1"), session_id: SessionKey("execution"), request_id: Number(1), status: Completed, last_seq: EventSeq(4), content: Some("私密结果"), error_code: None, error_message: None })
+
+
+failures:
+    execution_terminal_keeps_admitted_owner_instead_of_adopting_later_generation
+    execution_terminal_rejects_foreign_legacy_run_without_frozen_authorization
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+error: test failed, to rerun pass `--test run_execution_contract`

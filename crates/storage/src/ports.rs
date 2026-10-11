@@ -9,6 +9,13 @@ use agent_core::*;
 use serde_json::Value;
 
 pub trait RunRepository: Send + Sync {
+    fn admit_authorized_run(
+        &self,
+        admission: &RunAdmission,
+        snapshot: &RunSnapshot,
+        authorization: &AuthorizationRequest,
+        verifier: &dyn AuthorizationVerifier,
+    ) -> Result<Admission, RuntimeError>;
     fn admit_run(
         &self,
         admission: &RunAdmission,
@@ -113,6 +120,15 @@ pub trait RunRepository: Send + Sync {
 }
 
 impl RunRepository for RunStore {
+    fn admit_authorized_run(
+        &self,
+        admission: &RunAdmission,
+        snapshot: &RunSnapshot,
+        authorization: &AuthorizationRequest,
+        verifier: &dyn AuthorizationVerifier,
+    ) -> Result<Admission, RuntimeError> {
+        RunStore::admit_authorized_run(self, admission, snapshot, authorization, verifier)
+    }
     fn admit_run(
         &self,
         admission: &RunAdmission,
@@ -297,6 +313,12 @@ impl InteractionRepository for RunStore {
 }
 
 pub trait ArtifactRepository: Send + Sync {
+    fn finish_owned_tool_output(
+        &self,
+        owner: &ExactOwner,
+        completion: &ToolArtifactCompletion,
+        content: &str,
+    ) -> Result<String, RuntimeError>;
     fn store_tool_output(&self, content: &str) -> Result<String, RuntimeError>;
     fn store_owned_output(&self, owner: &ExactOwner, content: &str)
     -> Result<String, RuntimeError>;
@@ -310,6 +332,14 @@ pub trait ArtifactRepository: Send + Sync {
 }
 
 impl ArtifactRepository for RunStore {
+    fn finish_owned_tool_output(
+        &self,
+        owner: &ExactOwner,
+        completion: &ToolArtifactCompletion,
+        content: &str,
+    ) -> Result<String, RuntimeError> {
+        RunStore::finish_owned_tool_output(self, owner, completion, content)
+    }
     fn store_owned_output(
         &self,
         owner: &ExactOwner,
@@ -317,7 +347,9 @@ impl ArtifactRepository for RunStore {
     ) -> Result<String, RuntimeError> {
         let db = self.lock_connection()?;
         crate::sessions::fence_in(&db, owner)?;
-        self.store_tool_output(content)
+        let reference = self.store_tool_output(content)?;
+        crate::sessions::fence_in(&db, owner)?;
+        Ok(reference)
     }
     fn read_run_artifact(
         &self,
@@ -326,76 +358,7 @@ impl ArtifactRepository for RunStore {
         offset: u64,
         limit: usize,
     ) -> Result<Vec<u8>, RuntimeError> {
-        use sha2::{Digest, Sha256};
-        use std::io::Read;
-        let db = self.lock_connection()?;
-        crate::sessions::fence_in(&db, owner)?;
-        let count: i64 = db.query_row(
-            "SELECT count(*) FROM tool_executions WHERE run_id=?1 AND artifact_ref=?2",
-            rusqlite::params![owner.run_id.0, reference],
-            |r| r.get(0),
-        )?;
-        if count == 0 {
-            return Err(RuntimeError::Protocol("artifact 不属于 exact run".into()));
-        }
-        let path = std::path::Path::new(reference);
-        if path.parent() != Some(self.artifact_dir.as_path()) {
-            return Err(RuntimeError::Protocol("artifact 路径越界".into()));
-        }
-        let mut options = std::fs::OpenOptions::new();
-        options.read(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.custom_flags(libc::O_NOFOLLOW);
-        }
-        let mut file = options
-            .open(path)
-            .map_err(|e| RuntimeError::Internal(e.to_string()))?;
-        let metadata = file
-            .metadata()
-            .map_err(|e| RuntimeError::Internal(e.to_string()))?;
-        if !metadata.is_file() || metadata.len() > 64 * 1024 * 1024 {
-            return Err(RuntimeError::Protocol(
-                "artifact 非普通文件或超过完整性扫描预算".into(),
-            ));
-        }
-        let expected = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .and_then(|n| n.strip_prefix("sha256-"))
-            .and_then(|n| n.strip_suffix(".txt"))
-            .ok_or_else(|| RuntimeError::Protocol("artifact 身份无效".into()))?;
-        let mut hasher = Sha256::new();
-        let mut position = 0u64;
-        let mut bytes = Vec::new();
-        let end = offset.saturating_add(limit.clamp(1, 16384) as u64);
-        let mut chunk = [0u8; 65536];
-        loop {
-            let count = file
-                .read(&mut chunk)
-                .map_err(|e| RuntimeError::Internal(e.to_string()))?;
-            if count == 0 {
-                break;
-            }
-            let next = position + count as u64;
-            if next > 64 * 1024 * 1024 {
-                return Err(RuntimeError::Protocol("artifact 扫描超过预算".into()));
-            }
-            hasher.update(&chunk[..count]);
-            let start = offset.max(position);
-            let stop = end.min(next);
-            if start < stop {
-                bytes.extend_from_slice(
-                    &chunk[(start - position) as usize..(stop - position) as usize],
-                );
-            }
-            position = next;
-        }
-        if format!("{:x}", hasher.finalize()) != expected {
-            return Err(RuntimeError::Protocol("artifact digest 损坏".into()));
-        }
-        Ok(bytes)
+        self.read_legacy_artifact_scoped(&TenantContext::local(), owner, reference, offset, limit)
     }
     fn store_tool_output(&self, content: &str) -> Result<String, RuntimeError> {
         RunStore::store_tool_output(self, content)
@@ -526,101 +489,47 @@ impl MaintenanceRepository for RunStore {
         kind: &str,
         outcome: &str,
     ) -> Result<(), RuntimeError> {
-        let db = self.lock_connection()?;
+        let mut connection = self.lock_connection()?;
+        let db = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         super::sessions::fence_in(&db, owner)?;
-        db.execute("INSERT INTO maintenance_diagnostics VALUES(?1,?2,?3) ON CONFLICT(run_id,kind) DO UPDATE SET diagnostic=excluded.diagnostic",rusqlite::params![owner.run_id.0,kind,outcome])?;
+        maintenance_diagnostic_in(&db, owner, kind, outcome)?;
+        db.commit()?;
         Ok(())
     }
     fn health_report(&self) -> Result<Value, RuntimeError> {
-        let db = self.lock_connection()?;
-        let integrity: String = db.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
-        let version: i64 = db.query_row("SELECT max(version) FROM schema_migrations", [], |r| {
-            r.get(0)
-        })?;
-        let mut counts = serde_json::Map::new();
-        for (name, sql) in [
-            (
-                "sessions",
-                "SELECT count(*) FROM session_heads WHERE deleted=0",
-            ),
-            ("queued", "SELECT count(*) FROM runs WHERE status='queued'"),
-            (
-                "maintenance_failed",
-                "SELECT count(*) FROM maintenance_diagnostics WHERE diagnostic='failed'",
-            ),
-            (
-                "maintenance_skipped",
-                "SELECT count(*) FROM maintenance_diagnostics WHERE diagnostic='skipped_read_only'",
-            ),
-            (
-                "running",
-                "SELECT count(*) FROM runs WHERE status IN ('running','waiting_interaction')",
-            ),
-            (
-                "unknown_runs",
-                "SELECT count(*) FROM runs WHERE status='unknown_after_restart'",
-            ),
-            (
-                "orphaned_resources",
-                "SELECT count(*) FROM resources WHERE state='orphaned'",
-            ),
-            (
-                "pending_compacts",
-                "SELECT count(*) FROM compact_operations WHERE state='pending'",
-            ),
-            (
-                "legacy_quarantined_memories",
-                "SELECT count(*) FROM memories WHERE scope='legacy'",
-            ),
-        ] {
-            counts.insert(
-                name.into(),
-                Value::from(db.query_row(sql, [], |r| r.get::<_, i64>(0))?),
-            );
-        }
-        Ok(
-            serde_json::json!({"schema_version":version,"integrity":integrity,"counts":counts,"budgets":{"active_resources":16,"queued_per_session":64,"queued_total":1024,"tool_calls_per_batch":64,"resource_log_bytes":65536,"artifact_page_bytes":16384},"transaction_wait_ms":self.wait_ms.load(std::sync::atomic::Ordering::Relaxed),"transaction_lock_count":self.lock_count.load(std::sync::atomic::Ordering::Relaxed)}),
-        )
+        self.storage_health_scoped(&TenantContext::local())
     }
     fn gc_artifacts(&self, retention: std::time::Duration) -> Result<usize, RuntimeError> {
-        let db = self.lock_connection()?;
+        let mut connection = self.lock_connection()?;
+        // 跨 RunStore/进程共享同一写锁：不能与引用发布事务交错删除对象。
+        let db = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let mut deleted = 0;
-        if !self.artifact_dir.exists() {
-            return Ok(0);
-        }
-        for file in std::fs::read_dir(&self.artifact_dir)
-            .map_err(|e| RuntimeError::Internal(e.to_string()))?
-            .take(1000)
-        {
-            let file = file.map_err(|e| RuntimeError::Internal(e.to_string()))?;
-            let path = file.path();
-            if !file
-                .file_type()
-                .map_err(|e| RuntimeError::Internal(e.to_string()))?
-                .is_file()
-            {
-                continue;
-            }
-            let old = file
-                .metadata()
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|m| m.elapsed().ok())
-                .is_some_and(|age| age >= retention);
-            let name = file.file_name();
-            if !old || !name.to_string_lossy().starts_with("sha256-") {
-                continue;
-            }
+        for path in self.file_artifacts.candidates()? {
             let references: i64 = db.query_row(
                 "SELECT count(*) FROM tool_executions WHERE artifact_ref=?1",
                 rusqlite::params![path.to_string_lossy()],
                 |r| r.get(0),
             )?;
-            if references == 0 {
-                std::fs::remove_file(path).map_err(|e| RuntimeError::Internal(e.to_string()))?;
+            let hash = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_prefix("sha256-"))
+                .and_then(|n| n.strip_suffix(".txt"))
+                .ok_or(ArtifactError::InvalidReference)?;
+            let prepared: i64 = db.query_row(
+                "SELECT count(*) FROM artifact_publications WHERE store_id=?1 AND sha256=?2",
+                rusqlite::params![self.file_artifacts.store_id(), hash],
+                |r| r.get(0),
+            )?;
+            if references == 0
+                && prepared == 0
+                && self.file_artifacts.remove_if_old(&path, retention)?
+            {
                 deleted += 1;
             }
         }
+        deleted += self.file_artifacts.clean_abandoned_temporary(retention)?;
+        db.commit()?;
         Ok(deleted)
     }
     fn legacy_plan_imported(&self, source: &str) -> Result<bool, RuntimeError> {
@@ -676,6 +585,7 @@ pub trait SessionRepository:
     + crate::RequestRepository
     + crate::ViewRepository
     + crate::DiscoveryRepository
+    + crate::IdentityRepository
 {
 }
 impl<
@@ -694,10 +604,21 @@ impl<
         + crate::CompactRunRepository
         + crate::RequestRepository
         + crate::ViewRepository
-        + crate::DiscoveryRepository,
+        + crate::DiscoveryRepository
+        + crate::IdentityRepository,
 > ControlRepository for T
 {
 }
 
 /// Wave 1 兼容名称，指向同一个组合能力而非另一套 owner。
 pub use SessionRepository as ControlRepository;
+
+pub(crate) fn maintenance_diagnostic_in(
+    db: &rusqlite::Connection,
+    owner: &ExactOwner,
+    kind: &str,
+    outcome: &str,
+) -> Result<(), RuntimeError> {
+    db.execute("INSERT INTO maintenance_diagnostics VALUES(?1,?2,?3) ON CONFLICT(run_id,kind) DO UPDATE SET diagnostic=excluded.diagnostic",rusqlite::params![owner.run_id.0,kind,outcome])?;
+    Ok(())
+}

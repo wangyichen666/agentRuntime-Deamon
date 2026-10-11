@@ -1,0 +1,53 @@
+    Checking agent-storage-ports v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-ports)
+    Checking agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+    Checking agent-artifact v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/artifact)
+    Checking agent-storage-postgres v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-postgres)
+    Checking agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+    Checking agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+    Checking my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Checking agent-acp v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/acp)
+    Checking agent-cli v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/cli)
+error: using `clone` on type `RepositoryError` which implements the `Copy` trait
+   --> tests/run_discovery_contract.rs:238:17
+    |
+238 |             Err(expected.clone()),
+    |                 ^^^^^^^^^^^^^^^^ help: try removing the `clone` call: `expected`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#clone_on_copy
+    = note: `-D clippy::clone-on-copy` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::clone_on_copy)]`
+
+error: using `clone` on type `RepositoryError` which implements the `Copy` trait
+   --> tests/run_discovery_contract.rs:249:17
+    |
+249 |             Err(expected.clone()),
+    |                 ^^^^^^^^^^^^^^^^ help: try removing the `clone` call: `expected`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#clone_on_copy
+
+error: using `clone` on type `RepositoryError` which implements the `Copy` trait
+   --> tests/run_discovery_contract.rs:254:17
+    |
+254 |             Err(expected.clone()),
+    |                 ^^^^^^^^^^^^^^^^ help: try removing the `clone` call: `expected`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#clone_on_copy
+
+error: using `clone` on type `RepositoryError` which implements the `Copy` trait
+   --> tests/run_discovery_contract.rs:594:17
+    |
+594 |             Err(expected.clone())
+    |                 ^^^^^^^^^^^^^^^^ help: try removing the `clone` call: `expected`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#clone_on_copy
+
+error: using `clone` on type `RepositoryError` which implements the `Copy` trait
+   --> tests/run_discovery_contract.rs:604:17
+    |
+604 |             Err(expected.clone())
+    |                 ^^^^^^^^^^^^^^^^ help: try removing the `clone` call: `expected`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#clone_on_copy
+
+error: could not compile `my-agent` (test "run_discovery_contract") due to 5 previous errors
+warning: build failed, waiting for other jobs to finish...

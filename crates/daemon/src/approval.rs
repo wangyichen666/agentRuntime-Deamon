@@ -8,9 +8,11 @@ use async_trait::async_trait;
 use serde_json::json;
 use tokio::sync::{Mutex, oneshot};
 
+use agent_core::InteractionRecord;
 use agent_daemon_protocol::{EventFrame, EventKind, RequestId, ServerFrame};
 use agent_runtime::safety::Approval;
-use agent_storage::{InteractionRecord, RuntimeError};
+#[cfg(any(test, feature = "test-support"))]
+use agent_storage::RuntimeError;
 
 tokio::task_local! {
     static ACTIVE_APPROVAL_CONTEXT: ApprovalContext;
@@ -102,17 +104,32 @@ impl ApprovalBroker {
             .map_err(|_| anyhow::anyhow!("审批请求已结束: {approval_id}"))
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn respond_claimed(
         &self,
         approval_id: &str,
         approved: bool,
         claim: impl FnOnce() -> std::result::Result<InteractionRecord, RuntimeError>,
     ) -> Result<InteractionRecord> {
+        self.respond_claimed_async(approval_id, approved, async { Ok(claim()?) })
+            .await
+    }
+    pub(crate) async fn respond_claimed_async(
+        &self,
+        approval_id: &str,
+        approved: bool,
+        claim: impl Future<Output = Result<InteractionRecord>>,
+    ) -> Result<InteractionRecord> {
         let mut pending = self.inner.pending.lock().await;
         if !pending.contains_key(approval_id) {
             bail!("审批执行体不存在: {approval_id}");
         }
-        let record = claim()?;
+        let record = claim.await?;
+        // 第一票只推进原interaction revision，执行体继续等待。断线或投票
+        // 不足不能送出批准/拒绝；只有原canonical终态CAS成功才唤醒。
+        if record.status == "pending" {
+            return Ok(record);
+        }
         let waiter = pending
             .remove(approval_id)
             .ok_or_else(|| anyhow::anyhow!("审批执行体不存在: {approval_id}"))?;

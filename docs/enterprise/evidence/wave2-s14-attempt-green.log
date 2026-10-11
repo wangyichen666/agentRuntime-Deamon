@@ -1,0 +1,43 @@
+   Compiling agent-storage-ports v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-ports)
+   Compiling agent-artifact v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/artifact)
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling agent-storage-postgres v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-postgres)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `agent_storage_ports`
+  --> crates/runtime/src/loop_engine.rs:39:17
+   |
+39 |         Arc<dyn agent_storage_ports::RunAttemptRepository>,
+   |                 ^^^^^^^^^^^^^^^^^^^ use of unresolved module or unlinked crate `agent_storage_ports`
+   |
+help: there is a crate or module with a similar name
+   |
+39 -         Arc<dyn agent_storage_ports::RunAttemptRepository>,
+39 +         Arc<dyn agent_storage::RunAttemptRepository>,
+   |
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `agent_storage_ports`
+  --> crates/runtime/src/loop_engine.rs:68:23
+   |
+68 |     attempts: Arc<dyn agent_storage_ports::RunAttemptRepository>,
+   |                       ^^^^^^^^^^^^^^^^^^^ use of unresolved module or unlinked crate `agent_storage_ports`
+   |
+help: there is a crate or module with a similar name
+   |
+68 -     attempts: Arc<dyn agent_storage_ports::RunAttemptRepository>,
+68 +     attempts: Arc<dyn agent_storage::RunAttemptRepository>,
+   |
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `agent_storage_ports`
+  --> crates/runtime/src/loop_engine.rs:85:17
+   |
+85 |         Arc<dyn agent_storage_ports::RunAttemptRepository>,
+   |                 ^^^^^^^^^^^^^^^^^^^ use of unresolved module or unlinked crate `agent_storage_ports`
+   |
+help: there is a crate or module with a similar name
+   |
+85 -         Arc<dyn agent_storage_ports::RunAttemptRepository>,
+85 +         Arc<dyn agent_storage::RunAttemptRepository>,
+   |
+
+For more information about this error, try `rustc --explain E0433`.
+error: could not compile `agent-runtime` (lib) due to 3 previous errors

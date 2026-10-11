@@ -1,0 +1,24 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.58s
+     Running tests/run_attempt_contract.rs (target/debug/deps/run_attempt_contract-98ba908b28a59509)
+
+running 1 test
+test native_provider_start_must_match_the_frozen_route_in_original_transaction ... FAILED
+
+failures:
+
+---- native_provider_start_must_match_the_frozen_route_in_original_transaction stdout ----
+
+thread 'native_provider_start_must_match_the_frozen_route_in_original_transaction' panicked at tests/run_attempt_contract.rs:357:9:
+assertion `left == right` failed: route维度 0
+  left: Ok(())
+ right: Err(Coordination(Conflict))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    native_provider_start_must_match_the_frozen_route_in_original_transaction
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.04s
+
+error: test failed, to rerun pass `--test run_attempt_contract`

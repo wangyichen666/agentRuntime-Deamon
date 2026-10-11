@@ -1,0 +1,23 @@
+    Checking agent-core v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/core)
+    Checking agent-daemon-protocol v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-protocol)
+    Checking agent-storage-ports v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-ports)
+    Checking agent-sandbox v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/sandbox)
+    Checking agent-memory v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/memory)
+    Checking agent-context v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/context)
+    Checking agent-policy v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/policy)
+    Checking agent-identity v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/identity)
+error[E0412]: cannot find type `Arc` in this scope
+   --> crates/storage-ports/src/lib.rs:315:19
+    |
+315 |         verifier: Arc<dyn AuthorizationVerifier>,
+    |                   ^^^ not found in this scope
+    |
+help: consider importing this struct
+    |
+3   + use std::sync::Arc;
+    |
+
+For more information about this error, try `rustc --explain E0412`.
+error: could not compile `agent-storage-ports` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `agent-storage-ports` (lib test) due to 1 previous error

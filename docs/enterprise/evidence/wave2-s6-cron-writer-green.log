@@ -1,0 +1,64 @@
+   Compiling agent-core v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/core)
+   Compiling agent-daemon-protocol v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-protocol)
+   Compiling agent-storage-ports v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-ports)
+   Compiling agent-sandbox v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/sandbox)
+   Compiling agent-context v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/context)
+   Compiling agent-memory v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/memory)
+   Compiling agent-policy v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/policy)
+   Compiling agent-identity v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/identity)
+   Compiling agent-artifact v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/artifact)
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling agent-storage-postgres v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-postgres)
+   Compiling agent-daemon-client v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-client)
+   Compiling agent-entry-support v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/entry-support)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-cli v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/cli)
+   Compiling agent-acp v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/acp)
+   Compiling agent-gateway v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/gateway)
+error[E0422]: cannot find struct, variant or union type `RunOutcomeUnknown` in crate `agent_core`
+   --> crates/runtime/src/cron.rs:405:44
+    |
+405 |                     return Err(agent_core::RunOutcomeUnknown { run_id: run.run_id }.into());
+    |                                            ^^^^^^^^^^^^^^^^^ help: a struct with a similar name exists: `ToolOutcomeUnknown`
+    |
+   ::: /Users/pilot/Documents/myproject/agent-rust/crates/core/src/tool.rs:73:1
+    |
+73  | pub struct ToolOutcomeUnknown(pub String);
+    | ----------------------------- similarly named struct `ToolOutcomeUnknown` defined here
+
+error[E0422]: cannot find struct, variant or union type `RunOutcomeUnknown` in crate `agent_core`
+   --> crates/runtime/src/cron.rs:417:44
+    |
+417 |                     return Err(agent_core::RunOutcomeUnknown { run_id: run.run_id }.into());
+    |                                            ^^^^^^^^^^^^^^^^^ help: a struct with a similar name exists: `ToolOutcomeUnknown`
+    |
+   ::: /Users/pilot/Documents/myproject/agent-rust/crates/core/src/tool.rs:73:1
+    |
+73  | pub struct ToolOutcomeUnknown(pub String);
+    | ----------------------------- similarly named struct `ToolOutcomeUnknown` defined here
+
+error[E0422]: cannot find struct, variant or union type `RunOutcomeUnknown` in crate `agent_core`
+   --> crates/runtime/src/cron.rs:428:33
+    |
+428 |                 Err(agent_core::RunOutcomeUnknown { run_id: run.run_id }.into())
+    |                                 ^^^^^^^^^^^^^^^^^ help: a struct with a similar name exists: `ToolOutcomeUnknown`
+    |
+   ::: /Users/pilot/Documents/myproject/agent-rust/crates/core/src/tool.rs:73:1
+    |
+73  | pub struct ToolOutcomeUnknown(pub String);
+    | ----------------------------- similarly named struct `ToolOutcomeUnknown` defined here
+
+error[E0412]: cannot find type `RunOutcomeUnknown` in crate `agent_core`
+   --> crates/runtime/src/cron.rs:576:37
+    |
+576 |         .downcast_ref::<agent_core::RunOutcomeUnknown>()
+    |                                     ^^^^^^^^^^^^^^^^^ help: a struct with a similar name exists: `ToolOutcomeUnknown`
+    |
+   ::: /Users/pilot/Documents/myproject/agent-rust/crates/core/src/tool.rs:73:1
+    |
+73  | pub struct ToolOutcomeUnknown(pub String);
+    | ----------------------------- similarly named struct `ToolOutcomeUnknown` defined here
+
+Some errors have detailed explanations: E0412, E0422.
+For more information about an error, try `rustc --explain E0412`.
+error: could not compile `agent-runtime` (lib) due to 4 previous errors

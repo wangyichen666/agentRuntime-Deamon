@@ -32,6 +32,11 @@ pub struct FrozenRoute {
 }
 
 impl FrozenRoute {
+    pub fn restrict_models(mut self,models:&[String])->Result<Self> {
+        anyhow::ensure!(self.providers.len()==self.snapshot.candidates.len(),"路由provider映射无效");
+        let pairs=self.snapshot.candidates.into_iter().zip(self.providers).filter(|(c,_)|models.contains(&c.model)).collect::<Vec<_>>();
+        anyhow::ensure!(!pairs.is_empty(),"注册表无获准模型路由");let(candidates,providers)=pairs.into_iter().unzip();self.snapshot.candidates=candidates;self.providers=providers;Ok(self)
+    }
     pub fn primary(&self) -> Arc<dyn Provider> {
         self.providers[0].clone()
     }

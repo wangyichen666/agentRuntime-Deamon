@@ -1,0 +1,157 @@
+    Checking agent-core v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/core)
+    Checking agent-daemon-protocol v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-protocol)
+    Checking agent-storage-ports v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-ports)
+    Checking agent-memory v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/memory)
+    Checking agent-context v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/context)
+    Checking agent-sandbox v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/sandbox)
+    Checking agent-policy v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/policy)
+    Checking agent-identity v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/identity)
+    Checking agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+    Checking agent-artifact v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/artifact)
+    Checking agent-daemon-client v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-client)
+    Checking agent-storage-postgres v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-postgres)
+    Checking agent-entry-support v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/entry-support)
+error[E0599]: no method named `compact_result_scoped` found for struct `RunStore` in the current scope
+   --> crates/storage/src/run_compacts.rs:47:18
+    |
+46  | /             store
+47  | |                 .compact_result_scoped(
+    | |_________________-^^^^^^^^^^^^^^^^^^^^^
+    |
+   ::: crates/storage/src/lib.rs:119:1
+    |
+119 |   pub struct RunStore {
+    |   ------------------- method `compact_result_scoped` not found for this struct
+    |
+help: there is a method `compact_result` with a similar name, but with different arguments
+   --> crates/storage/src/context_projection.rs:18:5
+    |
+18  | /     fn compact_result(
+19  | |         &self,
+20  | |         owner: &ExactOwner,
+21  | |         operation: &str,
+22  | |         expected_revision: Option<TranscriptSeq>,
+23  | |     ) -> Result<Option<ProjectionGeneration>, RuntimeError>;
+    | |____________________________________________________________^
+
+error[E0599]: no method named `begin_compact_scoped` found for struct `RunStore` in the current scope
+   --> crates/storage/src/run_compacts.rs:71:18
+    |
+70  | /             store
+71  | |                 .begin_compact_scoped(&intent, Some(&envelope))
+    | |_________________-^^^^^^^^^^^^^^^^^^^^
+    |
+   ::: crates/storage/src/lib.rs:119:1
+    |
+119 |   pub struct RunStore {
+    |   ------------------- method `begin_compact_scoped` not found for this struct
+    |
+help: there is a method `begin_compact` with a similar name, but with different arguments
+   --> crates/storage/src/context_projection.rs:35:5
+    |
+35  |     fn begin_compact(&self, intent: &CompactIntent) -> Result<(), RuntimeError>;
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `settle_compact_scoped` found for struct `RunStore` in the current scope
+   --> crates/storage/src/run_compacts.rs:102:18
+    |
+101 | /             store
+102 | |                 .settle_compact_scoped(&intent, replacement.as_deref(), &reason, Some(&envelope))
+    | |_________________-^^^^^^^^^^^^^^^^^^^^^
+    |
+   ::: crates/storage/src/lib.rs:119:1
+    |
+119 |   pub struct RunStore {
+    |   ------------------- method `settle_compact_scoped` not found for this struct
+    |
+help: there is a method `settle_compact` with a similar name, but with different arguments
+   --> crates/storage/src/context_projection.rs:36:5
+    |
+36  | /     fn settle_compact(
+37  | |         &self,
+38  | |         intent: &CompactIntent,
+39  | |         replacement: Option<&[Message]>,
+40  | |         reason: &str,
+41  | |     ) -> Result<ProjectionGeneration, RuntimeError>;
+    | |____________________________________________________^
+
+error[E0599]: no method named `admit_compact_owned` found for struct `RunStore` in the current scope
+   --> crates/storage/src/run_compacts.rs:125:18
+    |
+124 | /             store
+125 | |                 .admit_compact_owned(&request, &snapshot, &authorization, verifier.as_ref())
+    | |_________________-^^^^^^^^^^^^^^^^^^^
+    |
+   ::: crates/storage/src/lib.rs:119:1
+    |
+119 |   pub struct RunStore {
+    |   ------------------- method `admit_compact_owned` not found for this struct
+    |
+help: there is a method `admit_compact_run` with a similar name, but with different arguments
+   --> crates/storage/src/compact_runs.rs:8:5
+    |
+8   | /     fn admit_compact_run(
+9   | |         &self,
+10  | |         request: &CompactRunRequest,
+11  | |         snapshot: &RunSnapshot,
+12  | |     ) -> Result<Admission, RuntimeError>;
+    | |_________________________________________^
+
+error[E0599]: no method named `compact_fact_scoped` found for struct `RunStore` in the current scope
+   --> crates/storage/src/run_compacts.rs:140:19
+    |
+140 |             store.compact_fact_scoped(&scope, &run).map_err(read_error)
+    |                   ^^^^^^^^^^^^^^^^^^^ method not found in `RunStore`
+    |
+   ::: crates/storage/src/lib.rs:119:1
+    |
+119 | pub struct RunStore {
+    | ------------------- method `compact_fact_scoped` not found for this struct
+
+error[E0599]: no method named `compact_request_scoped` found for struct `RunStore` in the current scope
+   --> crates/storage/src/run_compacts.rs:162:18
+    |
+161 | /             store
+162 | |                 .compact_request_scoped(&scope, &key, &lifetime, &operation)
+    | |_________________-^^^^^^^^^^^^^^^^^^^^^^
+    |
+   ::: crates/storage/src/lib.rs:119:1
+    |
+119 |   pub struct RunStore {
+    |   ------------------- method `compact_request_scoped` not found for this struct
+    |
+help: there is a method `compact_request` with a similar name, but with different arguments
+   --> crates/storage/src/compact_runs.rs:18:5
+    |
+18  | /     fn compact_request(
+19  | |         &self,
+20  | |         key: &SessionKey,
+21  | |         lifetime: &SessionLifetimeId,
+22  | |         operation: &str,
+23  | |     ) -> Result<Option<CompactRunRequest>, RuntimeError>;
+    | |_________________________________________________________^
+
+error[E0599]: no method named `compact_operation_scoped` found for struct `RunStore` in the current scope
+   --> crates/storage/src/run_compacts.rs:181:18
+    |
+180 | /             store
+181 | |                 .compact_operation_scoped(&scope, &request)
+    | |_________________-^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+   ::: crates/storage/src/lib.rs:119:1
+    |
+119 |   pub struct RunStore {
+    |   ------------------- method `compact_operation_scoped` not found for this struct
+    |
+help: there is a method `compact_operation` with a similar name, but with different arguments
+   --> crates/storage/src/compact_runs.rs:24:5
+    |
+24  | /     fn compact_operation(
+25  | |         &self,
+26  | |         request: &CompactRunRequest,
+27  | |     ) -> Result<Option<RunRecord>, RuntimeError>;
+    | |_________________________________________________^
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `agent-storage` (lib) due to 7 previous errors
+warning: build failed, waiting for other jobs to finish...

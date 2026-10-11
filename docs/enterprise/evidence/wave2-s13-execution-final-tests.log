@@ -1,0 +1,24 @@
+   Compiling agent-storage-postgres v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-postgres)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-acp v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/acp)
+   Compiling agent-gateway v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/gateway)
+   Compiling agent-cli v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/cli)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling agent-artifact v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/artifact)
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+   Compiling agent-storage-ports v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-ports)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 26.89s
+     Running unittests src/lib.rs (target/debug/deps/agent_acp-bdf3d9a9692945ad)
+
+running 5 tests
+test editor::tests::prompt_accepts_text_and_resource_links ... ok
+test editor::tests::prompt_rejects_unsupported_content ... ok
+test acp_transport::tests::slow_consumer_budget_is_bounded_and_draining_only_changes_transport_accounting ... ok
+
+thread 'editor::tests::standard_acp_streams_updates_and_round_trips_permission' has overflowed its stack
+fatal runtime error: stack overflow, aborting
+error: test failed, to rerun pass `-p agent-acp --lib`
+
+Caused by:
+  process didn't exit successfully: `/Users/pilot/Documents/myproject/agent-rust/target/debug/deps/agent_acp-bdf3d9a9692945ad` (signal: 6, SIGABRT: process abort signal)

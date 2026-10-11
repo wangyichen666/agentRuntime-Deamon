@@ -58,6 +58,8 @@ pub struct DaemonClient {
     inner: Arc<DaemonClientInner>,
     views: Arc<Mutex<HashMap<String, agent_daemon_protocol::ViewState>>>,
     project_views: bool,
+    authorization: Option<agent_daemon_protocol::BearerCredential>,
+    gateway: Option<agent_daemon_protocol::GatewayCredential>,
 }
 
 struct DaemonClientInner {
@@ -78,6 +80,14 @@ enum ClientTransport {
 }
 
 impl DaemonClient {
+    /// 只读传输事实；不会重发先前请求或推测业务结果。
+    pub fn transport_alive(&self) -> bool {
+        match &self.inner.transport {
+            ClientTransport::Unix { alive, .. } => alive.load(Ordering::Acquire),
+            #[cfg(feature = "test-transport")]
+            ClientTransport::InMemory(sender) => !sender.is_closed(),
+        }
+    }
     #[cfg(feature = "test-transport")]
     pub fn in_memory(requests: mpsc::Sender<InMemoryEnvelope>) -> Self {
         Self {
@@ -89,6 +99,8 @@ impl DaemonClient {
             }),
             views: Arc::new(Mutex::new(HashMap::new())),
             project_views: true,
+            authorization: None,
+            gateway: None,
         }
     }
 
@@ -206,6 +218,8 @@ impl DaemonClient {
             }),
             views,
             project_views: true,
+            authorization: None,
+            gateway: None,
         })
     }
 
@@ -220,6 +234,8 @@ impl DaemonClient {
             Self::connect_with_counter(socket, self.inner.next_id.clone(), self.views.clone())
                 .await?;
         client.project_views = self.project_views;
+        client.authorization = self.authorization.clone();
+        client.gateway = self.gateway.clone();
         Ok(client)
     }
 
@@ -458,6 +474,8 @@ impl DaemonClient {
         let after_seq = EventSeq(params.get("after_seq").and_then(Value::as_u64).unwrap_or(0));
         let mut request = JsonRpcRequest::new(id.clone(), method, params);
         request.protocol_version = Some(1);
+        request.authorization = self.authorization.clone();
+        request.gateway = self.gateway.clone();
         let encoded = encode_frame(&request)?;
         let request = decode_request(&encoded)?;
         match &self.inner.transport {
@@ -519,6 +537,8 @@ impl DaemonClient {
             inner: self.inner.clone(),
             views: Arc::new(Mutex::new(HashMap::new())),
             project_views: self.project_views,
+            authorization: self.authorization.clone(),
+            gateway: self.gateway.clone(),
         }
     }
 
@@ -527,6 +547,24 @@ impl DaemonClient {
         let mut client = self.fork_view();
         client.project_views = false;
         client
+    }
+
+    pub fn with_gateway_token(
+        &self,
+        token: String,
+        channel: agent_daemon_protocol::HookChannel,
+    ) -> Result<Self> {
+        let mut client = self.fork_view();
+        client.gateway = Some(agent_daemon_protocol::GatewayCredential {
+            token: agent_daemon_protocol::BearerCredential::new(token)?,
+            channel,
+        });
+        Ok(client)
+    }
+    pub fn with_bearer_token(&self, token: String) -> Result<Self> {
+        let mut client = self.fork_view();
+        client.authorization = Some(agent_daemon_protocol::BearerCredential::new(token)?);
+        Ok(client)
     }
 
     /// 共享展示游标；不授予 owner、不更改持久状态，重连保留。
@@ -912,6 +950,19 @@ fn frame_view_input(
                 run: Box::new(run),
             },
         )));
+    }
+    if matches!(frame, ServerFrame::Response(response) if response.error.is_some()) {
+        // 错误 envelope 不是请求方法的成功 DTO；只有显式 canonical stamp 可参与归约。
+        if let Some(stamp) = value.get("_my_agent_view") {
+            let stamp: ViewStamp = serde_json::from_value(stamp.clone())?;
+            return Ok(Some((
+                stamp.session_key.0.clone(),
+                ViewInput::Event {
+                    stamp: Some(Box::new(stamp)),
+                },
+            )));
+        }
+        return Ok(None);
     }
     if ["session.load", "session.resume", "session.new"].contains(&method) {
         let snapshot = agent_daemon_protocol::decode_session_readback(value.clone())?;

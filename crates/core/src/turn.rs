@@ -4,6 +4,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunSnapshot {
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub workflow:Option<crate::WorkflowNativeDirective>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub installed_generation:Option<crate::InstalledGeneration>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub billing_policy: Option<crate::FrozenBillingPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_store_id: Option<String>,
     #[serde(default)]
     pub entry_channel: crate::HookChannel,
     pub route: Option<RouteSnapshot>,
@@ -53,6 +61,7 @@ pub struct RoundState {
 
 #[derive(Clone, Debug)]
 pub struct RunAdmission {
+    pub workflow_node: Option<crate::WorkflowNodeLease>,
     pub plan_execution: Option<crate::PlanExecution>,
     pub session_key: crate::SessionKey,
     pub expected_lifetime: Option<crate::SessionLifetimeId>,
@@ -66,4 +75,12 @@ pub struct RunAdmission {
 pub struct PlanSnapshot {
     pub revision: u64,
     pub value: serde_json::Value,
+}
+
+/// 同一事务读出的执行计划与旧计划存在性；不保存第二份计划。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunPlanReadback {
+    pub snapshot: PlanSnapshot,
+    pub has_legacy_plan: bool,
 }

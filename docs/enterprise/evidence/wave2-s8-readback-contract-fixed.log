@@ -1,0 +1,15 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.82s
+     Running tests/readback_contract.rs (target/debug/deps/readback_contract-1c309d596817c067)
+
+running 7 tests
+test local_readback_never_reads_a_foreign_or_absent_session ... ok
+test local_session_page_filters_scope_before_limit_and_cursor ... ok
+test retired_lifetime_cannot_disclose_ownerless_transcript_to_another_session ... ok
+test damaged_run_lifetime_cannot_project_another_sessions_terminal ... ok
+test async_scoped_readback_and_page_share_canonical_facts_after_restart ... ok
+test v24_upgrade_keeps_ambiguous_legacy_history_quarantined_with_verified_backup ... ok
+test conflicting_v24_lifetime_owners_and_migration_failure_leave_schema_and_facts_unchanged ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
+

@@ -1,0 +1,2446 @@
+warning[duplicate]: found 2 duplicate entries for crate 'base64'
+   ┌─ /Users/pilot/Documents/myproject/agent-rust/Cargo.lock:47:1
+   │  
+47 │ ╭ base64 0.22.1 registry+https://github.com/rust-lang/crates.io-index
+48 │ │ base64 0.23.1 registry+https://github.com/rust-lang/crates.io-index
+   │ ╰───────────────────────────────────────────────────────────────────┘ lock entries
+   │  
+   ├ base64 v0.22.1
+     ├── agent-daemon v0.1.0
+     │   ├── (dev) agent-acp v0.1.0
+     │   │   └── my-agent v0.1.0
+     │   ├── (dev) agent-cli v0.1.0
+     │   │   └── my-agent v0.1.0 (*)
+     │   ├── (dev) agent-gateway v0.1.0
+     │   │   └── my-agent v0.1.0 (*)
+     │   └── my-agent v0.1.0 (*)
+     ├── agent-runtime v0.1.0
+     │   ├── (dev) agent-acp v0.1.0 (*)
+     │   ├── (dev) agent-cli v0.1.0 (*)
+     │   ├── agent-daemon v0.1.0 (*)
+     │   ├── (dev) agent-gateway v0.1.0 (*)
+     │   └── my-agent v0.1.0 (*)
+     ├── axum v0.8.9
+     │   └── agent-gateway v0.1.0 (*)
+     ├── hyper-util v0.1.20
+     │   ├── axum v0.8.9 (*)
+     │   ├── hyper-rustls v0.27.9
+     │   │   ├── reqwest v0.12.28
+     │   │   │   ├── agent-entry-support v0.1.0
+     │   │   │   │   ├── agent-acp v0.1.0 (*)
+     │   │   │   │   ├── agent-cli v0.1.0 (*)
+     │   │   │   │   ├── agent-gateway v0.1.0 (*)
+     │   │   │   │   └── my-agent v0.1.0 (*)
+     │   │   │   ├── agent-runtime v0.1.0 (*)
+     │   │   │   └── (dev) my-agent v0.1.0 (*)
+     │   │   └── reqwest v0.13.5
+     │   │       ├── agent-artifact v0.1.0
+     │   │       │   ├── agent-daemon v0.1.0 (*)
+     │   │       │   ├── agent-runtime v0.1.0 (*)
+     │   │       │   └── (dev) my-agent v0.1.0 (*)
+     │   │       └── object_store v0.14.2
+     │   │           └── agent-artifact v0.1.0 (*)
+     │   ├── reqwest v0.12.28 (*)
+     │   └── reqwest v0.13.5 (*)
+     ├── jsonschema v0.33.0
+     │   └── agent-runtime v0.1.0 (*)
+     ├── pem v3.0.6
+     │   └── rcgen v0.13.2
+     │       ├── (dev) agent-runtime v0.1.0 (*)
+     │       └── (dev) my-agent v0.1.0 (*)
+     ├── postgres-protocol v0.6.12
+     │   ├── postgres-types v0.2.14
+     │   │   └── tokio-postgres v0.7.18
+     │   │       └── agent-storage-postgres v0.1.0
+     │   │           └── (dev) my-agent v0.1.0 (*)
+     │   └── tokio-postgres v0.7.18 (*)
+     └── reqwest v0.12.28 (*)
+   ├ base64 v0.23.1
+     ├── object_store v0.14.2
+     │   └── agent-artifact v0.1.0
+     │       ├── agent-daemon v0.1.0
+     │       │   ├── (dev) agent-acp v0.1.0
+     │       │   │   └── my-agent v0.1.0
+     │       │   ├── (dev) agent-cli v0.1.0
+     │       │   │   └── my-agent v0.1.0 (*)
+     │       │   ├── (dev) agent-gateway v0.1.0
+     │       │   │   └── my-agent v0.1.0 (*)
+     │       │   └── my-agent v0.1.0 (*)
+     │       ├── agent-runtime v0.1.0
+     │       │   ├── (dev) agent-acp v0.1.0 (*)
+     │       │   ├── (dev) agent-cli v0.1.0 (*)
+     │       │   ├── agent-daemon v0.1.0 (*)
+     │       │   ├── (dev) agent-gateway v0.1.0 (*)
+     │       │   └── my-agent v0.1.0 (*)
+     │       └── (dev) my-agent v0.1.0 (*)
+     └── reqwest v0.13.5
+         ├── agent-artifact v0.1.0 (*)
+         └── object_store v0.14.2 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'block-buffer'
+   ┌─ /Users/pilot/Documents/myproject/agent-rust/Cargo.lock:52:1
+   │  
+52 │ ╭ block-buffer 0.10.4 registry+https://github.com/rust-lang/crates.io-index
+53 │ │ block-buffer 0.12.1 registry+https://github.com/rust-lang/crates.io-index
+   │ ╰─────────────────────────────────────────────────────────────────────────┘ lock entries
+   │  
+   ├ block-buffer v0.10.4
+     └── digest v0.10.7
+         ├── crc-fast v1.9.0
+         │   └── object_store v0.14.2
+         │       └── agent-artifact v0.1.0
+         │           ├── agent-daemon v0.1.0
+         │           │   ├── (dev) agent-acp v0.1.0
+         │           │   │   └── my-agent v0.1.0
+         │           │   ├── (dev) agent-cli v0.1.0
+         │           │   │   └── my-agent v0.1.0 (*)
+         │           │   ├── (dev) agent-gateway v0.1.0
+         │           │   │   └── my-agent v0.1.0 (*)
+         │           │   └── my-agent v0.1.0 (*)
+         │           ├── agent-runtime v0.1.0
+         │           │   ├── (dev) agent-acp v0.1.0 (*)
+         │           │   ├── (dev) agent-cli v0.1.0 (*)
+         │           │   ├── agent-daemon v0.1.0 (*)
+         │           │   ├── (dev) agent-gateway v0.1.0 (*)
+         │           │   └── my-agent v0.1.0 (*)
+         │           └── (dev) my-agent v0.1.0 (*)
+         ├── sha1 v0.10.7
+         │   ├── axum v0.8.9
+         │   │   └── agent-gateway v0.1.0 (*)
+         │   └── tungstenite v0.29.0
+         │       └── tokio-tungstenite v0.29.0
+         │           ├── (dev) agent-gateway v0.1.0 (*)
+         │           ├── axum v0.8.9 (*)
+         │           └── (dev) my-agent v0.1.0 (*)
+         └── sha2 v0.10.9
+             ├── agent-acp v0.1.0 (*)
+             ├── agent-artifact v0.1.0 (*)
+             ├── agent-context v0.1.0
+             │   ├── agent-daemon v0.1.0 (*)
+             │   ├── agent-runtime v0.1.0 (*)
+             │   └── my-agent v0.1.0 (*)
+             ├── agent-daemon v0.1.0 (*)
+             ├── agent-runtime v0.1.0 (*)
+             ├── agent-storage v0.1.0
+             │   ├── agent-daemon v0.1.0 (*)
+             │   ├── agent-runtime v0.1.0 (*)
+             │   └── (dev) my-agent v0.1.0 (*)
+             ├── agent-storage-ports v0.1.0
+             │   ├── agent-artifact v0.1.0 (*)
+             │   ├── agent-daemon v0.1.0 (*)
+             │   ├── agent-runtime v0.1.0 (*)
+             │   ├── agent-storage v0.1.0 (*)
+             │   ├── agent-storage-postgres v0.1.0
+             │   │   └── (dev) my-agent v0.1.0 (*)
+             │   └── (dev) my-agent v0.1.0 (*)
+             └── (dev) my-agent v0.1.0 (*)
+   ├ block-buffer v0.12.1
+     └── digest v0.11.3
+         ├── hmac v0.13.0
+         │   └── postgres-protocol v0.6.12
+         │       ├── postgres-types v0.2.14
+         │       │   └── tokio-postgres v0.7.18
+         │       │       └── agent-storage-postgres v0.1.0
+         │       │           └── (dev) my-agent v0.1.0
+         │       └── tokio-postgres v0.7.18 (*)
+         ├── md-5 v0.11.0
+         │   ├── lopdf v0.45.0
+         │   │   └── agent-runtime v0.1.0
+         │   │       ├── (dev) agent-acp v0.1.0
+         │   │       │   └── my-agent v0.1.0 (*)
+         │   │       ├── (dev) agent-cli v0.1.0
+         │   │       │   └── my-agent v0.1.0 (*)
+         │   │       ├── agent-daemon v0.1.0
+         │   │       │   ├── (dev) agent-acp v0.1.0 (*)
+         │   │       │   ├── (dev) agent-cli v0.1.0 (*)
+         │   │       │   ├── (dev) agent-gateway v0.1.0
+         │   │       │   │   └── my-agent v0.1.0 (*)
+         │   │       │   └── my-agent v0.1.0 (*)
+         │   │       ├── (dev) agent-gateway v0.1.0 (*)
+         │   │       └── my-agent v0.1.0 (*)
+         │   ├── object_store v0.14.2
+         │   │   └── agent-artifact v0.1.0
+         │   │       ├── agent-daemon v0.1.0 (*)
+         │   │       ├── agent-runtime v0.1.0 (*)
+         │   │       └── (dev) my-agent v0.1.0 (*)
+         │   └── postgres-protocol v0.6.12 (*)
+         └── sha2 v0.11.0
+             ├── lopdf v0.45.0 (*)
+             └── postgres-protocol v0.6.12 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'core-foundation'
+   ┌─ /Users/pilot/Documents/myproject/agent-rust/Cargo.lock:80:1
+   │  
+80 │ ╭ core-foundation 0.9.4 registry+https://github.com/rust-lang/crates.io-index
+81 │ │ core-foundation 0.10.1 registry+https://github.com/rust-lang/crates.io-index
+   │ ╰────────────────────────────────────────────────────────────────────────────┘ lock entries
+   │  
+   ├ core-foundation v0.9.4
+     └── security-framework v2.11.1
+         └── keyring v3.6.3
+             └── agent-runtime v0.1.0
+                 ├── (dev) agent-acp v0.1.0
+                 │   └── my-agent v0.1.0
+                 ├── (dev) agent-cli v0.1.0
+                 │   └── my-agent v0.1.0 (*)
+                 ├── agent-daemon v0.1.0
+                 │   ├── (dev) agent-acp v0.1.0 (*)
+                 │   ├── (dev) agent-cli v0.1.0 (*)
+                 │   ├── (dev) agent-gateway v0.1.0
+                 │   │   └── my-agent v0.1.0 (*)
+                 │   └── my-agent v0.1.0 (*)
+                 ├── (dev) agent-gateway v0.1.0 (*)
+                 └── my-agent v0.1.0 (*)
+   ├ core-foundation v0.10.1
+     ├── rustls-platform-verifier v0.7.1
+     │   └── reqwest v0.13.5
+     │       ├── agent-artifact v0.1.0
+     │       │   ├── agent-daemon v0.1.0
+     │       │   │   ├── (dev) agent-acp v0.1.0
+     │       │   │   │   └── my-agent v0.1.0
+     │       │   │   ├── (dev) agent-cli v0.1.0
+     │       │   │   │   └── my-agent v0.1.0 (*)
+     │       │   │   ├── (dev) agent-gateway v0.1.0
+     │       │   │   │   └── my-agent v0.1.0 (*)
+     │       │   │   └── my-agent v0.1.0 (*)
+     │       │   ├── agent-runtime v0.1.0
+     │       │   │   ├── (dev) agent-acp v0.1.0 (*)
+     │       │   │   ├── (dev) agent-cli v0.1.0 (*)
+     │       │   │   ├── agent-daemon v0.1.0 (*)
+     │       │   │   ├── (dev) agent-gateway v0.1.0 (*)
+     │       │   │   └── my-agent v0.1.0 (*)
+     │       │   └── (dev) my-agent v0.1.0 (*)
+     │       └── object_store v0.14.2
+     │           └── agent-artifact v0.1.0 (*)
+     └── security-framework v3.7.0
+         ├── rustls-native-certs v0.8.4
+         │   └── rustls-platform-verifier v0.7.1 (*)
+         └── rustls-platform-verifier v0.7.1 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'cpufeatures'
+   ┌─ /Users/pilot/Documents/myproject/agent-rust/Cargo.lock:84:1
+   │  
+84 │ ╭ cpufeatures 0.2.17 registry+https://github.com/rust-lang/crates.io-index
+85 │ │ cpufeatures 0.3.1 registry+https://github.com/rust-lang/crates.io-index
+   │ ╰───────────────────────────────────────────────────────────────────────┘ lock entries
+   │  
+   ├ cpufeatures v0.2.17
+     ├── sha1 v0.10.7
+     │   ├── axum v0.8.9
+     │   │   └── agent-gateway v0.1.0
+     │   │       └── my-agent v0.1.0
+     │   └── tungstenite v0.29.0
+     │       └── tokio-tungstenite v0.29.0
+     │           ├── (dev) agent-gateway v0.1.0 (*)
+     │           ├── axum v0.8.9 (*)
+     │           └── (dev) my-agent v0.1.0 (*)
+     └── sha2 v0.10.9
+         ├── agent-acp v0.1.0
+         │   └── my-agent v0.1.0 (*)
+         ├── agent-artifact v0.1.0
+         │   ├── agent-daemon v0.1.0
+         │   │   ├── (dev) agent-acp v0.1.0 (*)
+         │   │   ├── (dev) agent-cli v0.1.0
+         │   │   │   └── my-agent v0.1.0 (*)
+         │   │   ├── (dev) agent-gateway v0.1.0 (*)
+         │   │   └── my-agent v0.1.0 (*)
+         │   ├── agent-runtime v0.1.0
+         │   │   ├── (dev) agent-acp v0.1.0 (*)
+         │   │   ├── (dev) agent-cli v0.1.0 (*)
+         │   │   ├── agent-daemon v0.1.0 (*)
+         │   │   ├── (dev) agent-gateway v0.1.0 (*)
+         │   │   └── my-agent v0.1.0 (*)
+         │   └── (dev) my-agent v0.1.0 (*)
+         ├── agent-context v0.1.0
+         │   ├── agent-daemon v0.1.0 (*)
+         │   ├── agent-runtime v0.1.0 (*)
+         │   └── my-agent v0.1.0 (*)
+         ├── agent-daemon v0.1.0 (*)
+         ├── agent-runtime v0.1.0 (*)
+         ├── agent-storage v0.1.0
+         │   ├── agent-daemon v0.1.0 (*)
+         │   ├── agent-runtime v0.1.0 (*)
+         │   └── (dev) my-agent v0.1.0 (*)
+         ├── agent-storage-ports v0.1.0
+         │   ├── agent-artifact v0.1.0 (*)
+         │   ├── agent-daemon v0.1.0 (*)
+         │   ├── agent-runtime v0.1.0 (*)
+         │   ├── agent-storage v0.1.0 (*)
+         │   ├── agent-storage-postgres v0.1.0
+         │   │   └── (dev) my-agent v0.1.0 (*)
+         │   └── (dev) my-agent v0.1.0 (*)
+         └── (dev) my-agent v0.1.0 (*)
+   ├ cpufeatures v0.3.1
+     ├── aes v0.9.2
+     │   └── lopdf v0.45.0
+     │       └── agent-runtime v0.1.0
+     │           ├── (dev) agent-acp v0.1.0
+     │           │   └── my-agent v0.1.0
+     │           ├── (dev) agent-cli v0.1.0
+     │           │   └── my-agent v0.1.0 (*)
+     │           ├── agent-daemon v0.1.0
+     │           │   ├── (dev) agent-acp v0.1.0 (*)
+     │           │   ├── (dev) agent-cli v0.1.0 (*)
+     │           │   ├── (dev) agent-gateway v0.1.0
+     │           │   │   └── my-agent v0.1.0 (*)
+     │           │   └── my-agent v0.1.0 (*)
+     │           ├── (dev) agent-gateway v0.1.0 (*)
+     │           └── my-agent v0.1.0 (*)
+     ├── chacha20 v0.10.2
+     │   └── rand v0.10.2
+     │       ├── lopdf v0.45.0 (*)
+     │       ├── object_store v0.14.2
+     │       │   └── agent-artifact v0.1.0
+     │       │       ├── agent-daemon v0.1.0 (*)
+     │       │       ├── agent-runtime v0.1.0 (*)
+     │       │       └── (dev) my-agent v0.1.0 (*)
+     │       ├── postgres-protocol v0.6.12
+     │       │   ├── postgres-types v0.2.14
+     │       │   │   └── tokio-postgres v0.7.18
+     │       │   │       └── agent-storage-postgres v0.1.0
+     │       │   │           └── (dev) my-agent v0.1.0 (*)
+     │       │   └── tokio-postgres v0.7.18 (*)
+     │       └── tokio-postgres v0.7.18 (*)
+     └── sha2 v0.11.0
+         ├── lopdf v0.45.0 (*)
+         └── postgres-protocol v0.6.12 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'crypto-common'
+   ┌─ /Users/pilot/Documents/myproject/agent-rust/Cargo.lock:95:1
+   │  
+95 │ ╭ crypto-common 0.1.7 registry+https://github.com/rust-lang/crates.io-index
+96 │ │ crypto-common 0.2.2 registry+https://github.com/rust-lang/crates.io-index
+   │ ╰─────────────────────────────────────────────────────────────────────────┘ lock entries
+   │  
+   ├ crypto-common v0.1.7
+     └── digest v0.10.7
+         ├── crc-fast v1.9.0
+         │   └── object_store v0.14.2
+         │       └── agent-artifact v0.1.0
+         │           ├── agent-daemon v0.1.0
+         │           │   ├── (dev) agent-acp v0.1.0
+         │           │   │   └── my-agent v0.1.0
+         │           │   ├── (dev) agent-cli v0.1.0
+         │           │   │   └── my-agent v0.1.0 (*)
+         │           │   ├── (dev) agent-gateway v0.1.0
+         │           │   │   └── my-agent v0.1.0 (*)
+         │           │   └── my-agent v0.1.0 (*)
+         │           ├── agent-runtime v0.1.0
+         │           │   ├── (dev) agent-acp v0.1.0 (*)
+         │           │   ├── (dev) agent-cli v0.1.0 (*)
+         │           │   ├── agent-daemon v0.1.0 (*)
+         │           │   ├── (dev) agent-gateway v0.1.0 (*)
+         │           │   └── my-agent v0.1.0 (*)
+         │           └── (dev) my-agent v0.1.0 (*)
+         ├── sha1 v0.10.7
+         │   ├── axum v0.8.9
+         │   │   └── agent-gateway v0.1.0 (*)
+         │   └── tungstenite v0.29.0
+         │       └── tokio-tungstenite v0.29.0
+         │           ├── (dev) agent-gateway v0.1.0 (*)
+         │           ├── axum v0.8.9 (*)
+         │           └── (dev) my-agent v0.1.0 (*)
+         └── sha2 v0.10.9
+             ├── agent-acp v0.1.0 (*)
+             ├── agent-artifact v0.1.0 (*)
+             ├── agent-context v0.1.0
+             │   ├── agent-daemon v0.1.0 (*)
+             │   ├── agent-runtime v0.1.0 (*)
+             │   └── my-agent v0.1.0 (*)
+             ├── agent-daemon v0.1.0 (*)
+             ├── agent-runtime v0.1.0 (*)
+             ├── agent-storage v0.1.0
+             │   ├── agent-daemon v0.1.0 (*)
+             │   ├── agent-runtime v0.1.0 (*)
+             │   └── (dev) my-agent v0.1.0 (*)
+             ├── agent-storage-ports v0.1.0
+             │   ├── agent-artifact v0.1.0 (*)
+             │   ├── agent-daemon v0.1.0 (*)
+             │   ├── agent-runtime v0.1.0 (*)
+             │   ├── agent-storage v0.1.0 (*)
+             │   ├── agent-storage-postgres v0.1.0
+             │   │   └── (dev) my-agent v0.1.0 (*)
+             │   └── (dev) my-agent v0.1.0 (*)
+             └── (dev) my-agent v0.1.0 (*)
+   ├ crypto-common v0.2.2
+     ├── cipher v0.5.2
+     │   ├── aes v0.9.2
+     │   │   └── lopdf v0.45.0
+     │   │       └── agent-runtime v0.1.0
+     │   │           ├── (dev) agent-acp v0.1.0
+     │   │           │   └── my-agent v0.1.0
+     │   │           ├── (dev) agent-cli v0.1.0
+     │   │           │   └── my-agent v0.1.0 (*)
+     │   │           ├── agent-daemon v0.1.0
+     │   │           │   ├── (dev) agent-acp v0.1.0 (*)
+     │   │           │   ├── (dev) agent-cli v0.1.0 (*)
+     │   │           │   ├── (dev) agent-gateway v0.1.0
+     │   │           │   │   └── my-agent v0.1.0 (*)
+     │   │           │   └── my-agent v0.1.0 (*)
+     │   │           ├── (dev) agent-gateway v0.1.0 (*)
+     │   │           └── my-agent v0.1.0 (*)
+     │   ├── cbc v0.2.1
+     │   │   └── lopdf v0.45.0 (*)
+     │   └── ecb v0.2.1
+     │       └── lopdf v0.45.0 (*)
+     └── digest v0.11.3
+         ├── hmac v0.13.0
+         │   └── postgres-protocol v0.6.12
+         │       ├── postgres-types v0.2.14
+         │       │   └── tokio-postgres v0.7.18
+         │       │       └── agent-storage-postgres v0.1.0
+         │       │           └── (dev) my-agent v0.1.0 (*)
+         │       └── tokio-postgres v0.7.18 (*)
+         ├── md-5 v0.11.0
+         │   ├── lopdf v0.45.0 (*)
+         │   ├── object_store v0.14.2
+         │   │   └── agent-artifact v0.1.0
+         │   │       ├── agent-daemon v0.1.0 (*)
+         │   │       ├── agent-runtime v0.1.0 (*)
+         │   │       └── (dev) my-agent v0.1.0 (*)
+         │   └── postgres-protocol v0.6.12 (*)
+         └── sha2 v0.11.0
+             ├── lopdf v0.45.0 (*)
+             └── postgres-protocol v0.6.12 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'digest'
+    ┌─ /Users/pilot/Documents/myproject/agent-rust/Cargo.lock:105:1
+    │  
+105 │ ╭ digest 0.10.7 registry+https://github.com/rust-lang/crates.io-index
+106 │ │ digest 0.11.3 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰───────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ digest v0.10.7
+      ├── crc-fast v1.9.0
+      │   └── object_store v0.14.2
+      │       └── agent-artifact v0.1.0
+      │           ├── agent-daemon v0.1.0
+      │           │   ├── (dev) agent-acp v0.1.0
+      │           │   │   └── my-agent v0.1.0
+      │           │   ├── (dev) agent-cli v0.1.0
+      │           │   │   └── my-agent v0.1.0 (*)
+      │           │   ├── (dev) agent-gateway v0.1.0
+      │           │   │   └── my-agent v0.1.0 (*)
+      │           │   └── my-agent v0.1.0 (*)
+      │           ├── agent-runtime v0.1.0
+      │           │   ├── (dev) agent-acp v0.1.0 (*)
+      │           │   ├── (dev) agent-cli v0.1.0 (*)
+      │           │   ├── agent-daemon v0.1.0 (*)
+      │           │   ├── (dev) agent-gateway v0.1.0 (*)
+      │           │   └── my-agent v0.1.0 (*)
+      │           └── (dev) my-agent v0.1.0 (*)
+      ├── sha1 v0.10.7
+      │   ├── axum v0.8.9
+      │   │   └── agent-gateway v0.1.0 (*)
+      │   └── tungstenite v0.29.0
+      │       └── tokio-tungstenite v0.29.0
+      │           ├── (dev) agent-gateway v0.1.0 (*)
+      │           ├── axum v0.8.9 (*)
+      │           └── (dev) my-agent v0.1.0 (*)
+      └── sha2 v0.10.9
+          ├── agent-acp v0.1.0 (*)
+          ├── agent-artifact v0.1.0 (*)
+          ├── agent-context v0.1.0
+          │   ├── agent-daemon v0.1.0 (*)
+          │   ├── agent-runtime v0.1.0 (*)
+          │   └── my-agent v0.1.0 (*)
+          ├── agent-daemon v0.1.0 (*)
+          ├── agent-runtime v0.1.0 (*)
+          ├── agent-storage v0.1.0
+          │   ├── agent-daemon v0.1.0 (*)
+          │   ├── agent-runtime v0.1.0 (*)
+          │   └── (dev) my-agent v0.1.0 (*)
+          ├── agent-storage-ports v0.1.0
+          │   ├── agent-artifact v0.1.0 (*)
+          │   ├── agent-daemon v0.1.0 (*)
+          │   ├── agent-runtime v0.1.0 (*)
+          │   ├── agent-storage v0.1.0 (*)
+          │   ├── agent-storage-postgres v0.1.0
+          │   │   └── (dev) my-agent v0.1.0 (*)
+          │   └── (dev) my-agent v0.1.0 (*)
+          └── (dev) my-agent v0.1.0 (*)
+    ├ digest v0.11.3
+      ├── hmac v0.13.0
+      │   └── postgres-protocol v0.6.12
+      │       ├── postgres-types v0.2.14
+      │       │   └── tokio-postgres v0.7.18
+      │       │       └── agent-storage-postgres v0.1.0
+      │       │           └── (dev) my-agent v0.1.0
+      │       └── tokio-postgres v0.7.18 (*)
+      ├── md-5 v0.11.0
+      │   ├── lopdf v0.45.0
+      │   │   └── agent-runtime v0.1.0
+      │   │       ├── (dev) agent-acp v0.1.0
+      │   │       │   └── my-agent v0.1.0 (*)
+      │   │       ├── (dev) agent-cli v0.1.0
+      │   │       │   └── my-agent v0.1.0 (*)
+      │   │       ├── agent-daemon v0.1.0
+      │   │       │   ├── (dev) agent-acp v0.1.0 (*)
+      │   │       │   ├── (dev) agent-cli v0.1.0 (*)
+      │   │       │   ├── (dev) agent-gateway v0.1.0
+      │   │       │   │   └── my-agent v0.1.0 (*)
+      │   │       │   └── my-agent v0.1.0 (*)
+      │   │       ├── (dev) agent-gateway v0.1.0 (*)
+      │   │       └── my-agent v0.1.0 (*)
+      │   ├── object_store v0.14.2
+      │   │   └── agent-artifact v0.1.0
+      │   │       ├── agent-daemon v0.1.0 (*)
+      │   │       ├── agent-runtime v0.1.0 (*)
+      │   │       └── (dev) my-agent v0.1.0 (*)
+      │   └── postgres-protocol v0.6.12 (*)
+      └── sha2 v0.11.0
+          ├── lopdf v0.45.0 (*)
+          └── postgres-protocol v0.6.12 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'fallible-iterator'
+    ┌─ /Users/pilot/Documents/myproject/agent-rust/Cargo.lock:118:1
+    │  
+118 │ ╭ fallible-iterator 0.2.0 registry+https://github.com/rust-lang/crates.io-index
+119 │ │ fallible-iterator 0.3.0 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰─────────────────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ fallible-iterator v0.2.0
+      ├── postgres-protocol v0.6.12
+      │   ├── postgres-types v0.2.14
+      │   │   └── tokio-postgres v0.7.18
+      │   │       └── agent-storage-postgres v0.1.0
+      │   │           └── (dev) my-agent v0.1.0
+      │   └── tokio-postgres v0.7.18 (*)
+      ├── postgres-types v0.2.14 (*)
+      └── tokio-postgres v0.7.18 (*)
+    ├ fallible-iterator v0.3.0
+      └── rusqlite v0.37.0
+          ├── agent-runtime v0.1.0
+          │   ├── (dev) agent-acp v0.1.0
+          │   │   └── my-agent v0.1.0
+          │   ├── (dev) agent-cli v0.1.0
+          │   │   └── my-agent v0.1.0 (*)
+          │   ├── agent-daemon v0.1.0
+          │   │   ├── (dev) agent-acp v0.1.0 (*)
+          │   │   ├── (dev) agent-cli v0.1.0 (*)
+          │   │   ├── (dev) agent-gateway v0.1.0
+          │   │   │   └── my-agent v0.1.0 (*)
+          │   │   └── my-agent v0.1.0 (*)
+          │   ├── (dev) agent-gateway v0.1.0 (*)
+          │   └── my-agent v0.1.0 (*)
+          ├── agent-storage v0.1.0
+          │   ├── agent-daemon v0.1.0 (*)
+          │   ├── agent-runtime v0.1.0 (*)
+          │   └── (dev) my-agent v0.1.0 (*)
+          └── (dev) my-agent v0.1.0 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'foldhash'
+    ┌─ /Users/pilot/Documents/myproject/agent-rust/Cargo.lock:128:1
+    │  
+128 │ ╭ foldhash 0.1.5 registry+https://github.com/rust-lang/crates.io-index
+129 │ │ foldhash 0.2.0 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰────────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ foldhash v0.1.5
+      └── hashbrown v0.15.5
+          └── hashlink v0.10.0
+              └── rusqlite v0.37.0
+                  ├── agent-runtime v0.1.0
+                  │   ├── (dev) agent-acp v0.1.0
+                  │   │   └── my-agent v0.1.0
+                  │   ├── (dev) agent-cli v0.1.0
+                  │   │   └── my-agent v0.1.0 (*)
+                  │   ├── agent-daemon v0.1.0
+                  │   │   ├── (dev) agent-acp v0.1.0 (*)
+                  │   │   ├── (dev) agent-cli v0.1.0 (*)
+                  │   │   ├── (dev) agent-gateway v0.1.0
+                  │   │   │   └── my-agent v0.1.0 (*)
+                  │   │   └── my-agent v0.1.0 (*)
+                  │   ├── (dev) agent-gateway v0.1.0 (*)
+                  │   └── my-agent v0.1.0 (*)
+                  ├── agent-storage v0.1.0
+                  │   ├── agent-daemon v0.1.0 (*)
+                  │   ├── agent-runtime v0.1.0 (*)
+                  │   └── (dev) my-agent v0.1.0 (*)
+                  └── (dev) my-agent v0.1.0 (*)
+    ├ foldhash v0.2.0
+      ├── hashbrown v0.16.1
+      │   └── kasuari v0.4.12
+      │       └── ratatui-core v0.1.2
+      │           ├── ratatui v0.30.2
+      │           │   └── agent-cli v0.1.0
+      │           │       └── my-agent v0.1.0
+      │           ├── ratatui-crossterm v0.1.2
+      │           │   └── ratatui v0.30.2 (*)
+      │           ├── ratatui-macros v0.7.2
+      │           │   └── ratatui v0.30.2 (*)
+      │           └── ratatui-widgets v0.3.2
+      │               ├── ratatui v0.30.2 (*)
+      │               └── ratatui-macros v0.7.2 (*)
+      └── hashbrown v0.17.1
+          ├── indexmap v2.14.2
+          │   ├── h2 v0.4.20
+          │   │   ├── hyper v1.11.1
+          │   │   │   ├── axum v0.8.9
+          │   │   │   │   └── agent-gateway v0.1.0
+          │   │   │   │       └── my-agent v0.1.0 (*)
+          │   │   │   ├── hyper-rustls v0.27.9
+          │   │   │   │   ├── reqwest v0.12.28
+          │   │   │   │   │   ├── agent-entry-support v0.1.0
+          │   │   │   │   │   │   ├── agent-acp v0.1.0
+          │   │   │   │   │   │   │   └── my-agent v0.1.0 (*)
+          │   │   │   │   │   │   ├── agent-cli v0.1.0 (*)
+          │   │   │   │   │   │   ├── agent-gateway v0.1.0 (*)
+          │   │   │   │   │   │   └── my-agent v0.1.0 (*)
+          │   │   │   │   │   ├── agent-runtime v0.1.0
+          │   │   │   │   │   │   ├── (dev) agent-acp v0.1.0 (*)
+          │   │   │   │   │   │   ├── (dev) agent-cli v0.1.0 (*)
+          │   │   │   │   │   │   ├── agent-daemon v0.1.0
+          │   │   │   │   │   │   │   ├── (dev) agent-acp v0.1.0 (*)
+          │   │   │   │   │   │   │   ├── (dev) agent-cli v0.1.0 (*)
+          │   │   │   │   │   │   │   ├── (dev) agent-gateway v0.1.0 (*)
+          │   │   │   │   │   │   │   └── my-agent v0.1.0 (*)
+          │   │   │   │   │   │   ├── (dev) agent-gateway v0.1.0 (*)
+          │   │   │   │   │   │   └── my-agent v0.1.0 (*)
+          │   │   │   │   │   └── (dev) my-agent v0.1.0 (*)
+          │   │   │   │   └── reqwest v0.13.5
+          │   │   │   │       ├── agent-artifact v0.1.0
+          │   │   │   │       │   ├── agent-daemon v0.1.0 (*)
+          │   │   │   │       │   ├── agent-runtime v0.1.0 (*)
+          │   │   │   │       │   └── (dev) my-agent v0.1.0 (*)
+          │   │   │   │       └── object_store v0.14.2
+          │   │   │   │           └── agent-artifact v0.1.0 (*)
+          │   │   │   ├── hyper-util v0.1.20
+          │   │   │   │   ├── axum v0.8.9 (*)
+          │   │   │   │   ├── hyper-rustls v0.27.9 (*)
+          │   │   │   │   ├── reqwest v0.12.28 (*)
+          │   │   │   │   └── reqwest v0.13.5 (*)
+          │   │   │   ├── object_store v0.14.2 (*)
+          │   │   │   ├── reqwest v0.12.28 (*)
+          │   │   │   └── reqwest v0.13.5 (*)
+          │   │   └── reqwest v0.13.5 (*)
+          │   ├── lopdf v0.45.0
+          │   │   └── agent-runtime v0.1.0 (*)
+          │   ├── serde_json v1.0.151
+          │   │   ├── agent-acp v0.1.0 (*)
+          │   │   ├── agent-artifact v0.1.0 (*)
+          │   │   ├── agent-cli v0.1.0 (*)
+          │   │   ├── agent-client-protocol v2.1.0
+          │   │   │   └── agent-acp v0.1.0 (*)
+          │   │   ├── agent-client-protocol-schema v1.7.0
+          │   │   │   └── agent-client-protocol v2.1.0 (*)
+          │   │   ├── agent-context v0.1.0
+          │   │   │   ├── agent-daemon v0.1.0 (*)
+          │   │   │   ├── agent-runtime v0.1.0 (*)
+          │   │   │   └── my-agent v0.1.0 (*)
+          │   │   ├── agent-core v0.1.0
+          │   │   │   ├── agent-acp v0.1.0 (*)
+          │   │   │   ├── agent-artifact v0.1.0 (*)
+          │   │   │   ├── agent-cli v0.1.0 (*)
+          │   │   │   ├── agent-context v0.1.0 (*)
+          │   │   │   ├── agent-daemon v0.1.0 (*)
+          │   │   │   ├── agent-daemon-protocol v0.1.0
+          │   │   │   │   ├── agent-acp v0.1.0 (*)
+          │   │   │   │   ├── agent-cli v0.1.0 (*)
+          │   │   │   │   ├── agent-daemon v0.1.0 (*)
+          │   │   │   │   ├── agent-daemon-client v0.1.0
+          │   │   │   │   │   ├── agent-acp v0.1.0 (*)
+          │   │   │   │   │   ├── agent-cli v0.1.0 (*)
+          │   │   │   │   │   ├── (dev) agent-daemon v0.1.0 (*)
+          │   │   │   │   │   ├── agent-entry-support v0.1.0 (*)
+          │   │   │   │   │   ├── agent-gateway v0.1.0 (*)
+          │   │   │   │   │   └── my-agent v0.1.0 (*)
+          │   │   │   │   ├── agent-entry-support v0.1.0 (*)
+          │   │   │   │   ├── agent-gateway v0.1.0 (*)
+          │   │   │   │   ├── agent-runtime v0.1.0 (*)
+          │   │   │   │   └── (dev) my-agent v0.1.0 (*)
+          │   │   │   ├── agent-gateway v0.1.0 (*)
+          │   │   │   ├── agent-identity v0.1.0
+          │   │   │   │   ├── agent-daemon v0.1.0 (*)
+          │   │   │   │   └── (dev) my-agent v0.1.0 (*)
+          │   │   │   ├── agent-memory v0.1.0
+          │   │   │   │   ├── agent-daemon v0.1.0 (*)
+          │   │   │   │   ├── agent-runtime v0.1.0 (*)
+          │   │   │   │   └── my-agent v0.1.0 (*)
+          │   │   │   ├── agent-policy v0.1.0
+          │   │   │   │   ├── agent-daemon v0.1.0 (*)
+          │   │   │   │   ├── (dev) agent-runtime v0.1.0 (*)
+          │   │   │   │   └── (dev) my-agent v0.1.0 (*)
+          │   │   │   ├── agent-runtime v0.1.0 (*)
+          │   │   │   ├── agent-sandbox v0.1.0
+          │   │   │   │   ├── agent-daemon v0.1.0 (*)
+          │   │   │   │   └── agent-runtime v0.1.0 (*)
+          │   │   │   ├── agent-storage v0.1.0
+          │   │   │   │   ├── agent-daemon v0.1.0 (*)
+          │   │   │   │   ├── agent-runtime v0.1.0 (*)
+          │   │   │   │   └── (dev) my-agent v0.1.0 (*)
+          │   │   │   ├── agent-storage-ports v0.1.0
+          │   │   │   │   ├── agent-artifact v0.1.0 (*)
+          │   │   │   │   ├── agent-daemon v0.1.0 (*)
+          │   │   │   │   ├── agent-runtime v0.1.0 (*)
+          │   │   │   │   ├── agent-storage v0.1.0 (*)
+          │   │   │   │   ├── agent-storage-postgres v0.1.0
+          │   │   │   │   │   └── (dev) my-agent v0.1.0 (*)
+          │   │   │   │   └── (dev) my-agent v0.1.0 (*)
+          │   │   │   ├── agent-storage-postgres v0.1.0 (*)
+          │   │   │   └── my-agent v0.1.0 (*)
+          │   │   ├── agent-daemon v0.1.0 (*)
+          │   │   ├── agent-daemon-client v0.1.0 (*)
+          │   │   ├── agent-daemon-protocol v0.1.0 (*)
+          │   │   ├── agent-entry-support v0.1.0 (*)
+          │   │   ├── agent-gateway v0.1.0 (*)
+          │   │   ├── agent-memory v0.1.0 (*)
+          │   │   ├── agent-runtime v0.1.0 (*)
+          │   │   ├── agent-storage v0.1.0 (*)
+          │   │   ├── agent-storage-ports v0.1.0 (*)
+          │   │   ├── agent-storage-postgres v0.1.0 (*)
+          │   │   ├── axum v0.8.9 (*)
+          │   │   ├── jsonschema v0.33.0
+          │   │   │   └── agent-runtime v0.1.0 (*)
+          │   │   ├── my-agent v0.1.0 (*)
+          │   │   ├── object_store v0.14.2 (*)
+          │   │   ├── referencing v0.33.0
+          │   │   │   └── jsonschema v0.33.0 (*)
+          │   │   ├── reqwest v0.12.28 (*)
+          │   │   ├── schemars v1.2.2
+          │   │   │   ├── agent-client-protocol v2.1.0 (*)
+          │   │   │   ├── agent-client-protocol-schema v1.7.0 (*)
+          │   │   │   └── serde_with v3.23.0
+          │   │   │       └── agent-client-protocol-schema v1.7.0 (*)
+          │   │   └── serde_with v3.23.0 (*)
+          │   ├── serde_yaml_ng v0.10.0
+          │   │   └── agent-runtime v0.1.0 (*)
+          │   └── toml_edit v0.22.27
+          │       └── toml v0.8.23
+          │           └── (dev) my-agent v0.1.0 (*)
+          ├── lru v0.18.4
+          │   └── ratatui-core v0.1.2 (*)
+          ├── ratatui-core v0.1.2 (*)
+          └── ratatui-widgets v0.3.2 (*)
+
+warning[duplicate]: found 3 duplicate entries for crate 'getrandom'
+    ┌─ /Users/pilot/Documents/myproject/agent-rust/Cargo.lock:144:1
+    │  
+144 │ ╭ getrandom 0.2.17 registry+https://github.com/rust-lang/crates.io-index
+145 │ │ getrandom 0.3.4 registry+https://github.com/rust-lang/crates.io-index
+146 │ │ getrandom 0.4.3 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰─────────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ getrandom v0.2.17
+      └── ring v0.17.14
+          ├── object_store v0.14.2
+          │   └── agent-artifact v0.1.0
+          │       ├── agent-daemon v0.1.0
+          │       │   ├── (dev) agent-acp v0.1.0
+          │       │   │   └── my-agent v0.1.0
+          │       │   ├── (dev) agent-cli v0.1.0
+          │       │   │   └── my-agent v0.1.0 (*)
+          │       │   ├── (dev) agent-gateway v0.1.0
+          │       │   │   └── my-agent v0.1.0 (*)
+          │       │   └── my-agent v0.1.0 (*)
+          │       ├── agent-runtime v0.1.0
+          │       │   ├── (dev) agent-acp v0.1.0 (*)
+          │       │   ├── (dev) agent-cli v0.1.0 (*)
+          │       │   ├── agent-daemon v0.1.0 (*)
+          │       │   ├── (dev) agent-gateway v0.1.0 (*)
+          │       │   └── my-agent v0.1.0 (*)
+          │       └── (dev) my-agent v0.1.0 (*)
+          ├── rcgen v0.13.2
+          │   ├── (dev) agent-runtime v0.1.0 (*)
+          │   └── (dev) my-agent v0.1.0 (*)
+          ├── rustls v0.23.45
+          │   ├── agent-artifact v0.1.0 (*)
+          │   ├── hyper-rustls v0.27.9
+          │   │   ├── reqwest v0.12.28
+          │   │   │   ├── agent-entry-support v0.1.0
+          │   │   │   │   ├── agent-acp v0.1.0 (*)
+          │   │   │   │   ├── agent-cli v0.1.0 (*)
+          │   │   │   │   ├── agent-gateway v0.1.0 (*)
+          │   │   │   │   └── my-agent v0.1.0 (*)
+          │   │   │   ├── agent-runtime v0.1.0 (*)
+          │   │   │   └── (dev) my-agent v0.1.0 (*)
+          │   │   └── reqwest v0.13.5
+          │   │       ├── agent-artifact v0.1.0 (*)
+          │   │       └── object_store v0.14.2 (*)
+          │   ├── reqwest v0.12.28 (*)
+          │   ├── reqwest v0.13.5 (*)
+          │   ├── rustls-platform-verifier v0.7.1
+          │   │   └── reqwest v0.13.5 (*)
+          │   └── tokio-rustls v0.26.4
+          │       ├── (dev) agent-runtime v0.1.0 (*)
+          │       ├── hyper-rustls v0.27.9 (*)
+          │       ├── (dev) my-agent v0.1.0 (*)
+          │       ├── reqwest v0.12.28 (*)
+          │       └── reqwest v0.13.5 (*)
+          └── rustls-webpki v0.103.15
+              ├── rustls v0.23.45 (*)
+              └── rustls-platform-verifier v0.7.1 (*)
+    ├ getrandom v0.3.4
+      ├── ahash v0.8.12
+      │   ├── jsonschema v0.33.0
+      │   │   └── agent-runtime v0.1.0
+      │   │       ├── (dev) agent-acp v0.1.0
+      │   │       │   └── my-agent v0.1.0
+      │   │       ├── (dev) agent-cli v0.1.0
+      │   │       │   └── my-agent v0.1.0 (*)
+      │   │       ├── agent-daemon v0.1.0
+      │   │       │   ├── (dev) agent-acp v0.1.0 (*)
+      │   │       │   ├── (dev) agent-cli v0.1.0 (*)
+      │   │       │   ├── (dev) agent-gateway v0.1.0
+      │   │       │   │   └── my-agent v0.1.0 (*)
+      │   │       │   └── my-agent v0.1.0 (*)
+      │   │       ├── (dev) agent-gateway v0.1.0 (*)
+      │   │       └── my-agent v0.1.0 (*)
+      │   └── referencing v0.33.0
+      │       └── jsonschema v0.33.0 (*)
+      └── rand_core v0.9.5
+          ├── rand v0.9.5
+          │   └── tungstenite v0.29.0
+          │       └── tokio-tungstenite v0.29.0
+          │           ├── (dev) agent-gateway v0.1.0 (*)
+          │           ├── axum v0.8.9
+          │           │   └── agent-gateway v0.1.0 (*)
+          │           └── (dev) my-agent v0.1.0 (*)
+          └── rand_chacha v0.9.0
+              └── rand v0.9.5 (*)
+    ├ getrandom v0.4.3
+      ├── lopdf v0.45.0
+      │   └── agent-runtime v0.1.0
+      │       ├── (dev) agent-acp v0.1.0
+      │       │   └── my-agent v0.1.0
+      │       ├── (dev) agent-cli v0.1.0
+      │       │   └── my-agent v0.1.0 (*)
+      │       ├── agent-daemon v0.1.0
+      │       │   ├── (dev) agent-acp v0.1.0 (*)
+      │       │   ├── (dev) agent-cli v0.1.0 (*)
+      │       │   ├── (dev) agent-gateway v0.1.0
+      │       │   │   └── my-agent v0.1.0 (*)
+      │       │   └── my-agent v0.1.0 (*)
+      │       ├── (dev) agent-gateway v0.1.0 (*)
+      │       └── my-agent v0.1.0 (*)
+      ├── rand v0.10.2
+      │   ├── lopdf v0.45.0 (*)
+      │   ├── object_store v0.14.2
+      │   │   └── agent-artifact v0.1.0
+      │   │       ├── agent-daemon v0.1.0 (*)
+      │   │       ├── agent-runtime v0.1.0 (*)
+      │   │       └── (dev) my-agent v0.1.0 (*)
+      │   ├── postgres-protocol v0.6.12
+      │   │   ├── postgres-types v0.2.14
+      │   │   │   └── tokio-postgres v0.7.18
+      │   │   │       └── agent-storage-postgres v0.1.0
+      │   │   │           └── (dev) my-agent v0.1.0 (*)
+      │   │   └── tokio-postgres v0.7.18 (*)
+      │   └── tokio-postgres v0.7.18 (*)
+      └── uuid v1.26.0
+          ├── agent-client-protocol v2.1.0
+          │   └── agent-acp v0.1.0 (*)
+          └── uuid-simd v0.8.0
+              └── jsonschema v0.33.0
+                  └── agent-runtime v0.1.0 (*)
+
+warning[duplicate]: found 3 duplicate entries for crate 'hashbrown'
+    ┌─ /Users/pilot/Documents/myproject/agent-rust/Cargo.lock:148:1
+    │  
+148 │ ╭ hashbrown 0.15.5 registry+https://github.com/rust-lang/crates.io-index
+149 │ │ hashbrown 0.16.1 registry+https://github.com/rust-lang/crates.io-index
+150 │ │ hashbrown 0.17.1 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰──────────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ hashbrown v0.15.5
+      └── hashlink v0.10.0
+          └── rusqlite v0.37.0
+              ├── agent-runtime v0.1.0
+              │   ├── (dev) agent-acp v0.1.0
+              │   │   └── my-agent v0.1.0
+              │   ├── (dev) agent-cli v0.1.0
+              │   │   └── my-agent v0.1.0 (*)
+              │   ├── agent-daemon v0.1.0
+              │   │   ├── (dev) agent-acp v0.1.0 (*)
+              │   │   ├── (dev) agent-cli v0.1.0 (*)
+              │   │   ├── (dev) agent-gateway v0.1.0
+              │   │   │   └── my-agent v0.1.0 (*)
+              │   │   └── my-agent v0.1.0 (*)
+              │   ├── (dev) agent-gateway v0.1.0 (*)
+              │   └── my-agent v0.1.0 (*)
+              ├── agent-storage v0.1.0
+              │   ├── agent-daemon v0.1.0 (*)
+              │   ├── agent-runtime v0.1.0 (*)
+              │   └── (dev) my-agent v0.1.0 (*)
+              └── (dev) my-agent v0.1.0 (*)
+    ├ hashbrown v0.16.1
+      └── kasuari v0.4.12
+          └── ratatui-core v0.1.2
+              ├── ratatui v0.30.2
+              │   └── agent-cli v0.1.0
+              │       └── my-agent v0.1.0
+              ├── ratatui-crossterm v0.1.2
+              │   └── ratatui v0.30.2 (*)
+              ├── ratatui-macros v0.7.2
+              │   └── ratatui v0.30.2 (*)
+              └── ratatui-widgets v0.3.2
+                  ├── ratatui v0.30.2 (*)
+                  └── ratatui-macros v0.7.2 (*)
+    ├ hashbrown v0.17.1
+      ├── indexmap v2.14.2
+      │   ├── h2 v0.4.20
+      │   │   ├── hyper v1.11.1
+      │   │   │   ├── axum v0.8.9
+      │   │   │   │   └── agent-gateway v0.1.0
+      │   │   │   │       └── my-agent v0.1.0
+      │   │   │   ├── hyper-rustls v0.27.9
+      │   │   │   │   ├── reqwest v0.12.28
+      │   │   │   │   │   ├── agent-entry-support v0.1.0
+      │   │   │   │   │   │   ├── agent-acp v0.1.0
+      │   │   │   │   │   │   │   └── my-agent v0.1.0 (*)
+      │   │   │   │   │   │   ├── agent-cli v0.1.0
+      │   │   │   │   │   │   │   └── my-agent v0.1.0 (*)
+      │   │   │   │   │   │   ├── agent-gateway v0.1.0 (*)
+      │   │   │   │   │   │   └── my-agent v0.1.0 (*)
+      │   │   │   │   │   ├── agent-runtime v0.1.0
+      │   │   │   │   │   │   ├── (dev) agent-acp v0.1.0 (*)
+      │   │   │   │   │   │   ├── (dev) agent-cli v0.1.0 (*)
+      │   │   │   │   │   │   ├── agent-daemon v0.1.0
+      │   │   │   │   │   │   │   ├── (dev) agent-acp v0.1.0 (*)
+      │   │   │   │   │   │   │   ├── (dev) agent-cli v0.1.0 (*)
+      │   │   │   │   │   │   │   ├── (dev) agent-gateway v0.1.0 (*)
+      │   │   │   │   │   │   │   └── my-agent v0.1.0 (*)
+      │   │   │   │   │   │   ├── (dev) agent-gateway v0.1.0 (*)
+      │   │   │   │   │   │   └── my-agent v0.1.0 (*)
+      │   │   │   │   │   └── (dev) my-agent v0.1.0 (*)
+      │   │   │   │   └── reqwest v0.13.5
+      │   │   │   │       ├── agent-artifact v0.1.0
+      │   │   │   │       │   ├── agent-daemon v0.1.0 (*)
+      │   │   │   │       │   ├── agent-runtime v0.1.0 (*)
+      │   │   │   │       │   └── (dev) my-agent v0.1.0 (*)
+      │   │   │   │       └── object_store v0.14.2
+      │   │   │   │           └── agent-artifact v0.1.0 (*)
+      │   │   │   ├── hyper-util v0.1.20
+      │   │   │   │   ├── axum v0.8.9 (*)
+      │   │   │   │   ├── hyper-rustls v0.27.9 (*)
+      │   │   │   │   ├── reqwest v0.12.28 (*)
+      │   │   │   │   └── reqwest v0.13.5 (*)
+      │   │   │   ├── object_store v0.14.2 (*)
+      │   │   │   ├── reqwest v0.12.28 (*)
+      │   │   │   └── reqwest v0.13.5 (*)
+      │   │   └── reqwest v0.13.5 (*)
+      │   ├── lopdf v0.45.0
+      │   │   └── agent-runtime v0.1.0 (*)
+      │   ├── serde_json v1.0.151
+      │   │   ├── agent-acp v0.1.0 (*)
+      │   │   ├── agent-artifact v0.1.0 (*)
+      │   │   ├── agent-cli v0.1.0 (*)
+      │   │   ├── agent-client-protocol v2.1.0
+      │   │   │   └── agent-acp v0.1.0 (*)
+      │   │   ├── agent-client-protocol-schema v1.7.0
+      │   │   │   └── agent-client-protocol v2.1.0 (*)
+      │   │   ├── agent-context v0.1.0
+      │   │   │   ├── agent-daemon v0.1.0 (*)
+      │   │   │   ├── agent-runtime v0.1.0 (*)
+      │   │   │   └── my-agent v0.1.0 (*)
+      │   │   ├── agent-core v0.1.0
+      │   │   │   ├── agent-acp v0.1.0 (*)
+      │   │   │   ├── agent-artifact v0.1.0 (*)
+      │   │   │   ├── agent-cli v0.1.0 (*)
+      │   │   │   ├── agent-context v0.1.0 (*)
+      │   │   │   ├── agent-daemon v0.1.0 (*)
+      │   │   │   ├── agent-daemon-protocol v0.1.0
+      │   │   │   │   ├── agent-acp v0.1.0 (*)
+      │   │   │   │   ├── agent-cli v0.1.0 (*)
+      │   │   │   │   ├── agent-daemon v0.1.0 (*)
+      │   │   │   │   ├── agent-daemon-client v0.1.0
+      │   │   │   │   │   ├── agent-acp v0.1.0 (*)
+      │   │   │   │   │   ├── agent-cli v0.1.0 (*)
+      │   │   │   │   │   ├── (dev) agent-daemon v0.1.0 (*)
+      │   │   │   │   │   ├── agent-entry-support v0.1.0 (*)
+      │   │   │   │   │   ├── agent-gateway v0.1.0 (*)
+      │   │   │   │   │   └── my-agent v0.1.0 (*)
+      │   │   │   │   ├── agent-entry-support v0.1.0 (*)
+      │   │   │   │   ├── agent-gateway v0.1.0 (*)
+      │   │   │   │   ├── agent-runtime v0.1.0 (*)
+      │   │   │   │   └── (dev) my-agent v0.1.0 (*)
+      │   │   │   ├── agent-gateway v0.1.0 (*)
+      │   │   │   ├── agent-identity v0.1.0
+      │   │   │   │   ├── agent-daemon v0.1.0 (*)
+      │   │   │   │   └── (dev) my-agent v0.1.0 (*)
+      │   │   │   ├── agent-memory v0.1.0
+      │   │   │   │   ├── agent-daemon v0.1.0 (*)
+      │   │   │   │   ├── agent-runtime v0.1.0 (*)
+      │   │   │   │   └── my-agent v0.1.0 (*)
+      │   │   │   ├── agent-policy v0.1.0
+      │   │   │   │   ├── agent-daemon v0.1.0 (*)
+      │   │   │   │   ├── (dev) agent-runtime v0.1.0 (*)
+      │   │   │   │   └── (dev) my-agent v0.1.0 (*)
+      │   │   │   ├── agent-runtime v0.1.0 (*)
+      │   │   │   ├── agent-sandbox v0.1.0
+      │   │   │   │   ├── agent-daemon v0.1.0 (*)
+      │   │   │   │   └── agent-runtime v0.1.0 (*)
+      │   │   │   ├── agent-storage v0.1.0
+      │   │   │   │   ├── agent-daemon v0.1.0 (*)
+      │   │   │   │   ├── agent-runtime v0.1.0 (*)
+      │   │   │   │   └── (dev) my-agent v0.1.0 (*)
+      │   │   │   ├── agent-storage-ports v0.1.0
+      │   │   │   │   ├── agent-artifact v0.1.0 (*)
+      │   │   │   │   ├── agent-daemon v0.1.0 (*)
+      │   │   │   │   ├── agent-runtime v0.1.0 (*)
+      │   │   │   │   ├── agent-storage v0.1.0 (*)
+      │   │   │   │   ├── agent-storage-postgres v0.1.0
+      │   │   │   │   │   └── (dev) my-agent v0.1.0 (*)
+      │   │   │   │   └── (dev) my-agent v0.1.0 (*)
+      │   │   │   ├── agent-storage-postgres v0.1.0 (*)
+      │   │   │   └── my-agent v0.1.0 (*)
+      │   │   ├── agent-daemon v0.1.0 (*)
+      │   │   ├── agent-daemon-client v0.1.0 (*)
+      │   │   ├── agent-daemon-protocol v0.1.0 (*)
+      │   │   ├── agent-entry-support v0.1.0 (*)
+      │   │   ├── agent-gateway v0.1.0 (*)
+      │   │   ├── agent-memory v0.1.0 (*)
+      │   │   ├── agent-runtime v0.1.0 (*)
+      │   │   ├── agent-storage v0.1.0 (*)
+      │   │   ├── agent-storage-ports v0.1.0 (*)
+      │   │   ├── agent-storage-postgres v0.1.0 (*)
+      │   │   ├── axum v0.8.9 (*)
+      │   │   ├── jsonschema v0.33.0
+      │   │   │   └── agent-runtime v0.1.0 (*)
+      │   │   ├── my-agent v0.1.0 (*)
+      │   │   ├── object_store v0.14.2 (*)
+      │   │   ├── referencing v0.33.0
+      │   │   │   └── jsonschema v0.33.0 (*)
+      │   │   ├── reqwest v0.12.28 (*)
+      │   │   ├── schemars v1.2.2
+      │   │   │   ├── agent-client-protocol v2.1.0 (*)
+      │   │   │   ├── agent-client-protocol-schema v1.7.0 (*)
+      │   │   │   └── serde_with v3.23.0
+      │   │   │       └── agent-client-protocol-schema v1.7.0 (*)
+      │   │   └── serde_with v3.23.0 (*)
+      │   ├── serde_yaml_ng v0.10.0
+      │   │   └── agent-runtime v0.1.0 (*)
+      │   └── toml_edit v0.22.27
+      │       └── toml v0.8.23
+      │           └── (dev) my-agent v0.1.0 (*)
+      ├── lru v0.18.4
+      │   └── ratatui-core v0.1.2
+      │       ├── ratatui v0.30.2
+      │       │   └── agent-cli v0.1.0 (*)
+      │       ├── ratatui-crossterm v0.1.2
+      │       │   └── ratatui v0.30.2 (*)
+      │       ├── ratatui-macros v0.7.2
+      │       │   └── ratatui v0.30.2 (*)
+      │       └── ratatui-widgets v0.3.2
+      │           ├── ratatui v0.30.2 (*)
+      │           └── ratatui-macros v0.7.2 (*)
+      ├── ratatui-core v0.1.2 (*)
+      └── ratatui-widgets v0.3.2 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'itertools'
+    ┌─ /Users/pilot/Documents/myproject/agent-rust/Cargo.lock:183:1
+    │  
+183 │ ╭ itertools 0.14.0 registry+https://github.com/rust-lang/crates.io-index
+184 │ │ itertools 0.15.0 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰──────────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ itertools v0.14.0
+      ├── ratatui-core v0.1.2
+      │   ├── ratatui v0.30.2
+      │   │   └── agent-cli v0.1.0
+      │   │       └── my-agent v0.1.0
+      │   ├── ratatui-crossterm v0.1.2
+      │   │   └── ratatui v0.30.2 (*)
+      │   ├── ratatui-macros v0.7.2
+      │   │   └── ratatui v0.30.2 (*)
+      │   └── ratatui-widgets v0.3.2
+      │       ├── ratatui v0.30.2 (*)
+      │       └── ratatui-macros v0.7.2 (*)
+      ├── ratatui-widgets v0.3.2 (*)
+      └── unicode-truncate v2.0.1
+          └── ratatui-core v0.1.2 (*)
+    ├ itertools v0.15.0
+      └── object_store v0.14.2
+          └── agent-artifact v0.1.0
+              ├── agent-daemon v0.1.0
+              │   ├── (dev) agent-acp v0.1.0
+              │   │   └── my-agent v0.1.0
+              │   ├── (dev) agent-cli v0.1.0
+              │   │   └── my-agent v0.1.0 (*)
+              │   ├── (dev) agent-gateway v0.1.0
+              │   │   └── my-agent v0.1.0 (*)
+              │   └── my-agent v0.1.0 (*)
+              ├── agent-runtime v0.1.0
+              │   ├── (dev) agent-acp v0.1.0 (*)
+              │   ├── (dev) agent-cli v0.1.0 (*)
+              │   ├── agent-daemon v0.1.0 (*)
+              │   ├── (dev) agent-gateway v0.1.0 (*)
+              │   └── my-agent v0.1.0 (*)
+              └── (dev) my-agent v0.1.0 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'phf'
+    ┌─ /Users/pilot/Documents/myproject/agent-rust/Cargo.lock:238:1
+    │  
+238 │ ╭ phf 0.11.3 registry+https://github.com/rust-lang/crates.io-index
+239 │ │ phf 0.13.1 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ phf v0.11.3
+      └── cron v0.17.0
+          └── agent-runtime v0.1.0
+              ├── (dev) agent-acp v0.1.0
+              │   └── my-agent v0.1.0
+              ├── (dev) agent-cli v0.1.0
+              │   └── my-agent v0.1.0 (*)
+              ├── agent-daemon v0.1.0
+              │   ├── (dev) agent-acp v0.1.0 (*)
+              │   ├── (dev) agent-cli v0.1.0 (*)
+              │   ├── (dev) agent-gateway v0.1.0
+              │   │   └── my-agent v0.1.0 (*)
+              │   └── my-agent v0.1.0 (*)
+              ├── (dev) agent-gateway v0.1.0 (*)
+              └── my-agent v0.1.0 (*)
+    ├ phf v0.13.1
+      └── tokio-postgres v0.7.18
+          └── agent-storage-postgres v0.1.0
+              └── (dev) my-agent v0.1.0
+
+warning[duplicate]: found 2 duplicate entries for crate 'phf_shared'
+    ┌─ /Users/pilot/Documents/myproject/agent-rust/Cargo.lock:242:1
+    │  
+242 │ ╭ phf_shared 0.11.3 registry+https://github.com/rust-lang/crates.io-index
+243 │ │ phf_shared 0.13.1 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰───────────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ phf_shared v0.11.3
+      ├── phf v0.11.3
+      │   └── cron v0.17.0
+      │       └── agent-runtime v0.1.0
+      │           ├── (dev) agent-acp v0.1.0
+      │           │   └── my-agent v0.1.0
+      │           ├── (dev) agent-cli v0.1.0
+      │           │   └── my-agent v0.1.0 (*)
+      │           ├── agent-daemon v0.1.0
+      │           │   ├── (dev) agent-acp v0.1.0 (*)
+      │           │   ├── (dev) agent-cli v0.1.0 (*)
+      │           │   ├── (dev) agent-gateway v0.1.0
+      │           │   │   └── my-agent v0.1.0 (*)
+      │           │   └── my-agent v0.1.0 (*)
+      │           ├── (dev) agent-gateway v0.1.0 (*)
+      │           └── my-agent v0.1.0 (*)
+      ├── phf_generator v0.11.3
+      │   └── phf_macros v0.11.3
+      │       └── phf v0.11.3 (*)
+      └── phf_macros v0.11.3 (*)
+    ├ phf_shared v0.13.1
+      └── phf v0.13.1
+          └── tokio-postgres v0.7.18
+              └── agent-storage-postgres v0.1.0
+                  └── (dev) my-agent v0.1.0
+
+warning[duplicate]: found 2 duplicate entries for crate 'r-efi'
+    ┌─ /Users/pilot/Documents/myproject/agent-rust/Cargo.lock:258:1
+    │  
+258 │ ╭ r-efi 5.3.0 registry+https://github.com/rust-lang/crates.io-index
+259 │ │ r-efi 6.0.0 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰─────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ r-efi v5.3.0
+      └── getrandom v0.3.4
+          ├── ahash v0.8.12
+          │   ├── jsonschema v0.33.0
+          │   │   └── agent-runtime v0.1.0
+          │   │       ├── (dev) agent-acp v0.1.0
+          │   │       │   └── my-agent v0.1.0
+          │   │       ├── (dev) agent-cli v0.1.0
+          │   │       │   └── my-agent v0.1.0 (*)
+          │   │       ├── agent-daemon v0.1.0
+          │   │       │   ├── (dev) agent-acp v0.1.0 (*)
+          │   │       │   ├── (dev) agent-cli v0.1.0 (*)
+          │   │       │   ├── (dev) agent-gateway v0.1.0
+          │   │       │   │   └── my-agent v0.1.0 (*)
+          │   │       │   └── my-agent v0.1.0 (*)
+          │   │       ├── (dev) agent-gateway v0.1.0 (*)
+          │   │       └── my-agent v0.1.0 (*)
+          │   └── referencing v0.33.0
+          │       └── jsonschema v0.33.0 (*)
+          └── rand_core v0.9.5
+              ├── rand v0.9.5
+              │   └── tungstenite v0.29.0
+              │       └── tokio-tungstenite v0.29.0
+              │           ├── (dev) agent-gateway v0.1.0 (*)
+              │           ├── axum v0.8.9
+              │           │   └── agent-gateway v0.1.0 (*)
+              │           └── (dev) my-agent v0.1.0 (*)
+              └── rand_chacha v0.9.0
+                  └── rand v0.9.5 (*)
+    ├ r-efi v6.0.0
+      └── getrandom v0.4.3
+          ├── lopdf v0.45.0
+          │   └── agent-runtime v0.1.0
+          │       ├── (dev) agent-acp v0.1.0
+          │       │   └── my-agent v0.1.0
+          │       ├── (dev) agent-cli v0.1.0
+          │       │   └── my-agent v0.1.0 (*)
+          │       ├── agent-daemon v0.1.0
+          │       │   ├── (dev) agent-acp v0.1.0 (*)
+          │       │   ├── (dev) agent-cli v0.1.0 (*)
+          │       │   ├── (dev) agent-gateway v0.1.0
+          │       │   │   └── my-agent v0.1.0 (*)
+          │       │   └── my-agent v0.1.0 (*)
+          │       ├── (dev) agent-gateway v0.1.0 (*)
+          │       └── my-agent v0.1.0 (*)
+          ├── rand v0.10.2
+          │   ├── lopdf v0.45.0 (*)
+          │   ├── object_store v0.14.2
+          │   │   └── agent-artifact v0.1.0
+          │   │       ├── agent-daemon v0.1.0 (*)
+          │   │       ├── agent-runtime v0.1.0 (*)
+          │   │       └── (dev) my-agent v0.1.0 (*)
+          │   ├── postgres-protocol v0.6.12
+          │   │   ├── postgres-types v0.2.14
+          │   │   │   └── tokio-postgres v0.7.18
+          │   │   │       └── agent-storage-postgres v0.1.0
+          │   │   │           └── (dev) my-agent v0.1.0 (*)
+          │   │   └── tokio-postgres v0.7.18 (*)
+          │   └── tokio-postgres v0.7.18 (*)
+          └── uuid v1.26.0
+              ├── agent-client-protocol v2.1.0
+              │   └── agent-acp v0.1.0 (*)
+              └── uuid-simd v0.8.0
+                  └── jsonschema v0.33.0
+                      └── agent-runtime v0.1.0 (*)
+
+warning[duplicate]: found 3 duplicate entries for crate 'rand'
+    ┌─ /Users/pilot/Documents/myproject/agent-rust/Cargo.lock:260:1
+    │  
+260 │ ╭ rand 0.8.8 registry+https://github.com/rust-lang/crates.io-index
+261 │ │ rand 0.9.5 registry+https://github.com/rust-lang/crates.io-index
+262 │ │ rand 0.10.2 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰─────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ rand v0.8.8
+      └── phf_generator v0.11.3
+          └── phf_macros v0.11.3
+              └── phf v0.11.3
+                  └── cron v0.17.0
+                      └── agent-runtime v0.1.0
+                          ├── (dev) agent-acp v0.1.0
+                          │   └── my-agent v0.1.0
+                          ├── (dev) agent-cli v0.1.0
+                          │   └── my-agent v0.1.0 (*)
+                          ├── agent-daemon v0.1.0
+                          │   ├── (dev) agent-acp v0.1.0 (*)
+                          │   ├── (dev) agent-cli v0.1.0 (*)
+                          │   ├── (dev) agent-gateway v0.1.0
+                          │   │   └── my-agent v0.1.0 (*)
+                          │   └── my-agent v0.1.0 (*)
+                          ├── (dev) agent-gateway v0.1.0 (*)
+                          └── my-agent v0.1.0 (*)
+    ├ rand v0.9.5
+      └── tungstenite v0.29.0
+          └── tokio-tungstenite v0.29.0
+              ├── (dev) agent-gateway v0.1.0
+              │   └── my-agent v0.1.0
+              ├── axum v0.8.9
+              │   └── agent-gateway v0.1.0 (*)
+              └── (dev) my-agent v0.1.0 (*)
+    ├ rand v0.10.2
+      ├── lopdf v0.45.0
+      │   └── agent-runtime v0.1.0
+      │       ├── (dev) agent-acp v0.1.0
+      │       │   └── my-agent v0.1.0
+      │       ├── (dev) agent-cli v0.1.0
+      │       │   └── my-agent v0.1.0 (*)
+      │       ├── agent-daemon v0.1.0
+      │       │   ├── (dev) agent-acp v0.1.0 (*)
+      │       │   ├── (dev) agent-cli v0.1.0 (*)
+      │       │   ├── (dev) agent-gateway v0.1.0
+      │       │   │   └── my-agent v0.1.0 (*)
+      │       │   └── my-agent v0.1.0 (*)
+      │       ├── (dev) agent-gateway v0.1.0 (*)
+      │       └── my-agent v0.1.0 (*)
+      ├── object_store v0.14.2
+      │   └── agent-artifact v0.1.0
+      │       ├── agent-daemon v0.1.0 (*)
+      │       ├── agent-runtime v0.1.0 (*)
+      │       └── (dev) my-agent v0.1.0 (*)
+      ├── postgres-protocol v0.6.12
+      │   ├── postgres-types v0.2.14
+      │   │   └── tokio-postgres v0.7.18
+      │   │       └── agent-storage-postgres v0.1.0
+      │   │           └── (dev) my-agent v0.1.0 (*)
+      │   └── tokio-postgres v0.7.18 (*)
+      └── tokio-postgres v0.7.18 (*)
+
+warning[duplicate]: found 3 duplicate entries for crate 'rand_core'
+    ┌─ /Users/pilot/Documents/myproject/agent-rust/Cargo.lock:264:1
+    │  
+264 │ ╭ rand_core 0.6.4 registry+https://github.com/rust-lang/crates.io-index
+265 │ │ rand_core 0.9.5 registry+https://github.com/rust-lang/crates.io-index
+266 │ │ rand_core 0.10.1 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰──────────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ rand_core v0.6.4
+      └── rand v0.8.8
+          └── phf_generator v0.11.3
+              └── phf_macros v0.11.3
+                  └── phf v0.11.3
+                      └── cron v0.17.0
+                          └── agent-runtime v0.1.0
+                              ├── (dev) agent-acp v0.1.0
+                              │   └── my-agent v0.1.0
+                              ├── (dev) agent-cli v0.1.0
+                              │   └── my-agent v0.1.0 (*)
+                              ├── agent-daemon v0.1.0
+                              │   ├── (dev) agent-acp v0.1.0 (*)
+                              │   ├── (dev) agent-cli v0.1.0 (*)
+                              │   ├── (dev) agent-gateway v0.1.0
+                              │   │   └── my-agent v0.1.0 (*)
+                              │   └── my-agent v0.1.0 (*)
+                              ├── (dev) agent-gateway v0.1.0 (*)
+                              └── my-agent v0.1.0 (*)
+    ├ rand_core v0.9.5
+      ├── rand v0.9.5
+      │   └── tungstenite v0.29.0
+      │       └── tokio-tungstenite v0.29.0
+      │           ├── (dev) agent-gateway v0.1.0
+      │           │   └── my-agent v0.1.0
+      │           ├── axum v0.8.9
+      │           │   └── agent-gateway v0.1.0 (*)
+      │           └── (dev) my-agent v0.1.0 (*)
+      └── rand_chacha v0.9.0
+          └── rand v0.9.5 (*)
+    ├ rand_core v0.10.1
+      ├── chacha20 v0.10.2
+      │   └── rand v0.10.2
+      │       ├── lopdf v0.45.0
+      │       │   └── agent-runtime v0.1.0
+      │       │       ├── (dev) agent-acp v0.1.0
+      │       │       │   └── my-agent v0.1.0
+      │       │       ├── (dev) agent-cli v0.1.0
+      │       │       │   └── my-agent v0.1.0 (*)
+      │       │       ├── agent-daemon v0.1.0
+      │       │       │   ├── (dev) agent-acp v0.1.0 (*)
+      │       │       │   ├── (dev) agent-cli v0.1.0 (*)
+      │       │       │   ├── (dev) agent-gateway v0.1.0
+      │       │       │   │   └── my-agent v0.1.0 (*)
+      │       │       │   └── my-agent v0.1.0 (*)
+      │       │       ├── (dev) agent-gateway v0.1.0 (*)
+      │       │       └── my-agent v0.1.0 (*)
+      │       ├── object_store v0.14.2
+      │       │   └── agent-artifact v0.1.0
+      │       │       ├── agent-daemon v0.1.0 (*)
+      │       │       ├── agent-runtime v0.1.0 (*)
+      │       │       └── (dev) my-agent v0.1.0 (*)
+      │       ├── postgres-protocol v0.6.12
+      │       │   ├── postgres-types v0.2.14
+      │       │   │   └── tokio-postgres v0.7.18
+      │       │   │       └── agent-storage-postgres v0.1.0
+      │       │   │           └── (dev) my-agent v0.1.0 (*)
+      │       │   └── tokio-postgres v0.7.18 (*)
+      │       └── tokio-postgres v0.7.18 (*)
+      ├── getrandom v0.4.3
+      │   ├── lopdf v0.45.0 (*)
+      │   ├── rand v0.10.2 (*)
+      │   └── uuid v1.26.0
+      │       ├── agent-client-protocol v2.1.0
+      │       │   └── agent-acp v0.1.0 (*)
+      │       └── uuid-simd v0.8.0
+      │           └── jsonschema v0.33.0
+      │               └── agent-runtime v0.1.0 (*)
+      └── rand v0.10.2 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'reqwest'
+    ┌─ /Users/pilot/Documents/myproject/agent-rust/Cargo.lock:281:1
+    │  
+281 │ ╭ reqwest 0.12.28 registry+https://github.com/rust-lang/crates.io-index
+282 │ │ reqwest 0.13.5 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰────────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ reqwest v0.12.28
+      ├── agent-entry-support v0.1.0
+      │   ├── agent-acp v0.1.0
+      │   │   └── my-agent v0.1.0
+      │   ├── agent-cli v0.1.0
+      │   │   └── my-agent v0.1.0 (*)
+      │   ├── agent-gateway v0.1.0
+      │   │   └── my-agent v0.1.0 (*)
+      │   └── my-agent v0.1.0 (*)
+      ├── agent-runtime v0.1.0
+      │   ├── (dev) agent-acp v0.1.0 (*)
+      │   ├── (dev) agent-cli v0.1.0 (*)
+      │   ├── agent-daemon v0.1.0
+      │   │   ├── (dev) agent-acp v0.1.0 (*)
+      │   │   ├── (dev) agent-cli v0.1.0 (*)
+      │   │   ├── (dev) agent-gateway v0.1.0 (*)
+      │   │   └── my-agent v0.1.0 (*)
+      │   ├── (dev) agent-gateway v0.1.0 (*)
+      │   └── my-agent v0.1.0 (*)
+      └── (dev) my-agent v0.1.0 (*)
+    ├ reqwest v0.13.5
+      ├── agent-artifact v0.1.0
+      │   ├── agent-daemon v0.1.0
+      │   │   ├── (dev) agent-acp v0.1.0
+      │   │   │   └── my-agent v0.1.0
+      │   │   ├── (dev) agent-cli v0.1.0
+      │   │   │   └── my-agent v0.1.0 (*)
+      │   │   ├── (dev) agent-gateway v0.1.0
+      │   │   │   └── my-agent v0.1.0 (*)
+      │   │   └── my-agent v0.1.0 (*)
+      │   ├── agent-runtime v0.1.0
+      │   │   ├── (dev) agent-acp v0.1.0 (*)
+      │   │   ├── (dev) agent-cli v0.1.0 (*)
+      │   │   ├── agent-daemon v0.1.0 (*)
+      │   │   ├── (dev) agent-gateway v0.1.0 (*)
+      │   │   └── my-agent v0.1.0 (*)
+      │   └── (dev) my-agent v0.1.0 (*)
+      └── object_store v0.14.2
+          └── agent-artifact v0.1.0 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'security-framework'
+    ┌─ /Users/pilot/Documents/myproject/agent-rust/Cargo.lock:301:1
+    │  
+301 │ ╭ security-framework 2.11.1 registry+https://github.com/rust-lang/crates.io-index
+302 │ │ security-framework 3.7.0 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰──────────────────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ security-framework v2.11.1
+      └── keyring v3.6.3
+          └── agent-runtime v0.1.0
+              ├── (dev) agent-acp v0.1.0
+              │   └── my-agent v0.1.0
+              ├── (dev) agent-cli v0.1.0
+              │   └── my-agent v0.1.0 (*)
+              ├── agent-daemon v0.1.0
+              │   ├── (dev) agent-acp v0.1.0 (*)
+              │   ├── (dev) agent-cli v0.1.0 (*)
+              │   ├── (dev) agent-gateway v0.1.0
+              │   │   └── my-agent v0.1.0 (*)
+              │   └── my-agent v0.1.0 (*)
+              ├── (dev) agent-gateway v0.1.0 (*)
+              └── my-agent v0.1.0 (*)
+    ├ security-framework v3.7.0
+      ├── rustls-native-certs v0.8.4
+      │   └── rustls-platform-verifier v0.7.1
+      │       └── reqwest v0.13.5
+      │           ├── agent-artifact v0.1.0
+      │           │   ├── agent-daemon v0.1.0
+      │           │   │   ├── (dev) agent-acp v0.1.0
+      │           │   │   │   └── my-agent v0.1.0
+      │           │   │   ├── (dev) agent-cli v0.1.0
+      │           │   │   │   └── my-agent v0.1.0 (*)
+      │           │   │   ├── (dev) agent-gateway v0.1.0
+      │           │   │   │   └── my-agent v0.1.0 (*)
+      │           │   │   └── my-agent v0.1.0 (*)
+      │           │   ├── agent-runtime v0.1.0
+      │           │   │   ├── (dev) agent-acp v0.1.0 (*)
+      │           │   │   ├── (dev) agent-cli v0.1.0 (*)
+      │           │   │   ├── agent-daemon v0.1.0 (*)
+      │           │   │   ├── (dev) agent-gateway v0.1.0 (*)
+      │           │   │   └── my-agent v0.1.0 (*)
+      │           │   └── (dev) my-agent v0.1.0 (*)
+      │           └── object_store v0.14.2
+      │               └── agent-artifact v0.1.0 (*)
+      └── rustls-platform-verifier v0.7.1 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'sha2'
+    ┌─ /Users/pilot/Documents/myproject/agent-rust/Cargo.lock:317:1
+    │  
+317 │ ╭ sha2 0.10.9 registry+https://github.com/rust-lang/crates.io-index
+318 │ │ sha2 0.11.0 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰─────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ sha2 v0.10.9
+      ├── agent-acp v0.1.0
+      │   └── my-agent v0.1.0
+      ├── agent-artifact v0.1.0
+      │   ├── agent-daemon v0.1.0
+      │   │   ├── (dev) agent-acp v0.1.0 (*)
+      │   │   ├── (dev) agent-cli v0.1.0
+      │   │   │   └── my-agent v0.1.0 (*)
+      │   │   ├── (dev) agent-gateway v0.1.0
+      │   │   │   └── my-agent v0.1.0 (*)
+      │   │   └── my-agent v0.1.0 (*)
+      │   ├── agent-runtime v0.1.0
+      │   │   ├── (dev) agent-acp v0.1.0 (*)
+      │   │   ├── (dev) agent-cli v0.1.0 (*)
+      │   │   ├── agent-daemon v0.1.0 (*)
+      │   │   ├── (dev) agent-gateway v0.1.0 (*)
+      │   │   └── my-agent v0.1.0 (*)
+      │   └── (dev) my-agent v0.1.0 (*)
+      ├── agent-context v0.1.0
+      │   ├── agent-daemon v0.1.0 (*)
+      │   ├── agent-runtime v0.1.0 (*)
+      │   └── my-agent v0.1.0 (*)
+      ├── agent-daemon v0.1.0 (*)
+      ├── agent-runtime v0.1.0 (*)
+      ├── agent-storage v0.1.0
+      │   ├── agent-daemon v0.1.0 (*)
+      │   ├── agent-runtime v0.1.0 (*)
+      │   └── (dev) my-agent v0.1.0 (*)
+      ├── agent-storage-ports v0.1.0
+      │   ├── agent-artifact v0.1.0 (*)
+      │   ├── agent-daemon v0.1.0 (*)
+      │   ├── agent-runtime v0.1.0 (*)
+      │   ├── agent-storage v0.1.0 (*)
+      │   ├── agent-storage-postgres v0.1.0
+      │   │   └── (dev) my-agent v0.1.0 (*)
+      │   └── (dev) my-agent v0.1.0 (*)
+      └── (dev) my-agent v0.1.0 (*)
+    ├ sha2 v0.11.0
+      ├── lopdf v0.45.0
+      │   └── agent-runtime v0.1.0
+      │       ├── (dev) agent-acp v0.1.0
+      │       │   └── my-agent v0.1.0
+      │       ├── (dev) agent-cli v0.1.0
+      │       │   └── my-agent v0.1.0 (*)
+      │       ├── agent-daemon v0.1.0
+      │       │   ├── (dev) agent-acp v0.1.0 (*)
+      │       │   ├── (dev) agent-cli v0.1.0 (*)
+      │       │   ├── (dev) agent-gateway v0.1.0
+      │       │   │   └── my-agent v0.1.0 (*)
+      │       │   └── my-agent v0.1.0 (*)
+      │       ├── (dev) agent-gateway v0.1.0 (*)
+      │       └── my-agent v0.1.0 (*)
+      └── postgres-protocol v0.6.12
+          ├── postgres-types v0.2.14
+          │   └── tokio-postgres v0.7.18
+          │       └── agent-storage-postgres v0.1.0
+          │           └── (dev) my-agent v0.1.0 (*)
+          └── tokio-postgres v0.7.18 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'syn'
+    ┌─ /Users/pilot/Documents/myproject/agent-rust/Cargo.lock:340:1
+    │  
+340 │ ╭ syn 2.0.119 registry+https://github.com/rust-lang/crates.io-index
+341 │ │ syn 3.0.5 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰───────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ syn v2.0.119
+      ├── derive_more-impl v2.1.1
+      │   └── derive_more v2.1.1
+      │       ├── agent-client-protocol-schema v1.7.0
+      │       │   └── agent-client-protocol v2.1.0
+      │       │       └── agent-acp v0.1.0
+      │       │           └── my-agent v0.1.0
+      │       └── crossterm v0.29.0
+      │           ├── agent-cli v0.1.0
+      │           │   └── my-agent v0.1.0 (*)
+      │           └── ratatui-crossterm v0.1.2
+      │               └── ratatui v0.30.2
+      │                   └── agent-cli v0.1.0 (*)
+      ├── jni-macros v0.22.4
+      │   └── jni v0.22.4
+      │       └── rustls-platform-verifier v0.7.1
+      │           └── reqwest v0.13.5
+      │               ├── agent-artifact v0.1.0
+      │               │   ├── agent-daemon v0.1.0
+      │               │   │   ├── (dev) agent-acp v0.1.0 (*)
+      │               │   │   ├── (dev) agent-cli v0.1.0 (*)
+      │               │   │   ├── (dev) agent-gateway v0.1.0
+      │               │   │   │   └── my-agent v0.1.0 (*)
+      │               │   │   └── my-agent v0.1.0 (*)
+      │               │   ├── agent-runtime v0.1.0
+      │               │   │   ├── (dev) agent-acp v0.1.0 (*)
+      │               │   │   ├── (dev) agent-cli v0.1.0 (*)
+      │               │   │   ├── agent-daemon v0.1.0 (*)
+      │               │   │   ├── (dev) agent-gateway v0.1.0 (*)
+      │               │   │   └── my-agent v0.1.0 (*)
+      │               │   └── (dev) my-agent v0.1.0 (*)
+      │               └── object_store v0.14.2
+      │                   └── agent-artifact v0.1.0 (*)
+      ├── jni-sys-macros v0.4.1
+      │   └── jni-sys v0.4.1
+      │       └── jni v0.22.4 (*)
+      ├── (dev) my-agent v0.1.0 (*)
+      ├── phf_macros v0.11.3
+      │   └── phf v0.11.3
+      │       └── cron v0.17.0
+      │           └── agent-runtime v0.1.0 (*)
+      ├── pin-project-internal v1.1.13
+      │   └── pin-project v1.1.13
+      │       └── futures-concurrency v7.7.1
+      │           └── agent-client-protocol v2.1.0 (*)
+      ├── strum_macros v0.28.0
+      │   └── strum v0.28.0
+      │       ├── agent-client-protocol-schema v1.7.0 (*)
+      │       ├── ratatui-core v0.1.2
+      │       │   ├── ratatui v0.30.2 (*)
+      │       │   ├── ratatui-crossterm v0.1.2 (*)
+      │       │   ├── ratatui-macros v0.7.2
+      │       │   │   └── ratatui v0.30.2 (*)
+      │       │   └── ratatui-widgets v0.3.2
+      │       │       ├── ratatui v0.30.2 (*)
+      │       │       └── ratatui-macros v0.7.2 (*)
+      │       └── ratatui-widgets v0.3.2 (*)
+      ├── synstructure v0.13.2
+      │   ├── yoke-derive v0.8.2
+      │   │   └── yoke v0.8.3
+      │   │       ├── icu_collections v2.3.0
+      │   │       │   ├── icu_normalizer v2.3.0
+      │   │       │   │   └── idna_adapter v1.2.2
+      │   │       │   │       └── idna v1.1.0
+      │   │       │   │           ├── jsonschema v0.33.0
+      │   │       │   │           │   └── agent-runtime v0.1.0 (*)
+      │   │       │   │           └── url v2.5.8
+      │   │       │   │               ├── agent-artifact v0.1.0 (*)
+      │   │       │   │               ├── object_store v0.14.2 (*)
+      │   │       │   │               ├── reqwest v0.12.28
+      │   │       │   │               │   ├── agent-entry-support v0.1.0
+      │   │       │   │               │   │   ├── agent-acp v0.1.0 (*)
+      │   │       │   │               │   │   ├── agent-cli v0.1.0 (*)
+      │   │       │   │               │   │   ├── agent-gateway v0.1.0 (*)
+      │   │       │   │               │   │   └── my-agent v0.1.0 (*)
+      │   │       │   │               │   ├── agent-runtime v0.1.0 (*)
+      │   │       │   │               │   └── (dev) my-agent v0.1.0 (*)
+      │   │       │   │               ├── reqwest v0.13.5 (*)
+      │   │       │   │               └── tower-http v0.6.11
+      │   │       │   │                   ├── reqwest v0.12.28 (*)
+      │   │       │   │                   └── reqwest v0.13.5 (*)
+      │   │       │   └── icu_properties v2.3.0
+      │   │       │       └── idna_adapter v1.2.2 (*)
+      │   │       ├── icu_provider v2.3.1
+      │   │       │   ├── icu_normalizer v2.3.0 (*)
+      │   │       │   └── icu_properties v2.3.0 (*)
+      │   │       ├── zerotrie v0.2.5
+      │   │       │   ├── icu_properties v2.3.0 (*)
+      │   │       │   └── icu_provider v2.3.1 (*)
+      │   │       └── zerovec v0.11.8
+      │   │           ├── icu_collections v2.3.0 (*)
+      │   │           ├── icu_locale_core v2.3.0
+      │   │           │   ├── icu_properties v2.3.0 (*)
+      │   │           │   └── icu_provider v2.3.1 (*)
+      │   │           ├── icu_normalizer v2.3.0 (*)
+      │   │           ├── icu_properties v2.3.0 (*)
+      │   │           ├── icu_provider v2.3.1 (*)
+      │   │           ├── potential_utf v0.1.6
+      │   │           │   └── icu_collections v2.3.0 (*)
+      │   │           └── tinystr v0.8.4
+      │   │               └── icu_locale_core v2.3.0 (*)
+      │   └── zerofrom-derive v0.1.7
+      │       └── zerofrom v0.1.8
+      │           ├── icu_collections v2.3.0 (*)
+      │           ├── icu_provider v2.3.1 (*)
+      │           ├── yoke v0.8.3 (*)
+      │           ├── zerotrie v0.2.5 (*)
+      │           └── zerovec v0.11.8 (*)
+      ├── tracing-attributes v0.1.31
+      │   └── tracing v0.1.44
+      │       ├── agent-acp v0.1.0 (*)
+      │       ├── agent-cli v0.1.0 (*)
+      │       ├── agent-client-protocol v2.1.0 (*)
+      │       ├── agent-client-protocol-schema v1.7.0 (*)
+      │       ├── agent-daemon v0.1.0 (*)
+      │       ├── agent-gateway v0.1.0 (*)
+      │       ├── agent-runtime v0.1.0 (*)
+      │       ├── agent-sandbox v0.1.0
+      │       │   ├── agent-daemon v0.1.0 (*)
+      │       │   └── agent-runtime v0.1.0 (*)
+      │       ├── agent-storage v0.1.0
+      │       │   ├── agent-daemon v0.1.0 (*)
+      │       │   ├── agent-runtime v0.1.0 (*)
+      │       │   └── (dev) my-agent v0.1.0 (*)
+      │       ├── agent-storage-postgres v0.1.0
+      │       │   └── (dev) my-agent v0.1.0 (*)
+      │       ├── axum v0.8.9
+      │       │   └── agent-gateway v0.1.0 (*)
+      │       ├── axum-core v0.5.6
+      │       │   └── axum v0.8.9 (*)
+      │       ├── h2 v0.4.20
+      │       │   ├── hyper v1.11.1
+      │       │   │   ├── axum v0.8.9 (*)
+      │       │   │   ├── hyper-rustls v0.27.9
+      │       │   │   │   ├── reqwest v0.12.28 (*)
+      │       │   │   │   └── reqwest v0.13.5 (*)
+      │       │   │   ├── hyper-util v0.1.20
+      │       │   │   │   ├── axum v0.8.9 (*)
+      │       │   │   │   ├── hyper-rustls v0.27.9 (*)
+      │       │   │   │   ├── reqwest v0.12.28 (*)
+      │       │   │   │   └── reqwest v0.13.5 (*)
+      │       │   │   ├── object_store v0.14.2 (*)
+      │       │   │   ├── reqwest v0.12.28 (*)
+      │       │   │   └── reqwest v0.13.5 (*)
+      │       │   └── reqwest v0.13.5 (*)
+      │       ├── hyper-util v0.1.20 (*)
+      │       ├── object_store v0.14.2 (*)
+      │       ├── tower v0.5.3
+      │       │   ├── axum v0.8.9 (*)
+      │       │   ├── reqwest v0.12.28 (*)
+      │       │   ├── reqwest v0.13.5 (*)
+      │       │   └── tower-http v0.6.11 (*)
+      │       └── tracing-subscriber v0.3.23
+      │           ├── agent-storage-postgres v0.1.0 (*)
+      │           └── my-agent v0.1.0 (*)
+      ├── windows-implement v0.60.2
+      │   └── windows-core v0.62.2
+      │       └── iana-time-zone v0.1.65
+      │           └── chrono v0.4.45
+      │               ├── agent-cli v0.1.0 (*)
+      │               ├── agent-runtime v0.1.0 (*)
+      │               ├── cron v0.17.0 (*)
+      │               └── object_store v0.14.2 (*)
+      ├── windows-interface v0.59.3
+      │   └── windows-core v0.62.2 (*)
+      ├── yoke-derive v0.8.2 (*)
+      └── zerofrom-derive v0.1.7 (*)
+    ├ syn v3.0.5
+      ├── agent-client-protocol-derive v2.1.0
+      │   └── agent-client-protocol v2.1.0
+      │       └── agent-acp v0.1.0
+      │           └── my-agent v0.1.0
+      ├── async-trait v0.1.92
+      │   ├── (dev) agent-acp v0.1.0 (*)
+      │   ├── agent-artifact v0.1.0
+      │   │   ├── agent-daemon v0.1.0
+      │   │   │   ├── (dev) agent-acp v0.1.0 (*)
+      │   │   │   ├── (dev) agent-cli v0.1.0
+      │   │   │   │   └── my-agent v0.1.0 (*)
+      │   │   │   ├── (dev) agent-gateway v0.1.0
+      │   │   │   │   └── my-agent v0.1.0 (*)
+      │   │   │   └── my-agent v0.1.0 (*)
+      │   │   ├── agent-runtime v0.1.0
+      │   │   │   ├── (dev) agent-acp v0.1.0 (*)
+      │   │   │   ├── (dev) agent-cli v0.1.0 (*)
+      │   │   │   ├── agent-daemon v0.1.0 (*)
+      │   │   │   ├── (dev) agent-gateway v0.1.0 (*)
+      │   │   │   └── my-agent v0.1.0 (*)
+      │   │   └── (dev) my-agent v0.1.0 (*)
+      │   ├── (dev) agent-cli v0.1.0 (*)
+      │   ├── agent-daemon v0.1.0 (*)
+      │   ├── agent-gateway v0.1.0 (*)
+      │   ├── agent-runtime v0.1.0 (*)
+      │   ├── agent-sandbox v0.1.0
+      │   │   ├── agent-daemon v0.1.0 (*)
+      │   │   └── agent-runtime v0.1.0 (*)
+      │   ├── agent-storage v0.1.0
+      │   │   ├── agent-daemon v0.1.0 (*)
+      │   │   ├── agent-runtime v0.1.0 (*)
+      │   │   └── (dev) my-agent v0.1.0 (*)
+      │   ├── agent-storage-ports v0.1.0
+      │   │   ├── agent-artifact v0.1.0 (*)
+      │   │   ├── agent-daemon v0.1.0 (*)
+      │   │   ├── agent-runtime v0.1.0 (*)
+      │   │   ├── agent-storage v0.1.0 (*)
+      │   │   ├── agent-storage-postgres v0.1.0
+      │   │   │   └── (dev) my-agent v0.1.0 (*)
+      │   │   └── (dev) my-agent v0.1.0 (*)
+      │   ├── agent-storage-postgres v0.1.0 (*)
+      │   ├── my-agent v0.1.0 (*)
+      │   ├── object_store v0.14.2
+      │   │   └── agent-artifact v0.1.0 (*)
+      │   └── tokio-postgres v0.7.18
+      │       └── agent-storage-postgres v0.1.0 (*)
+      ├── clap_derive v4.6.4
+      │   └── clap v4.6.6
+      │       └── agent-cli v0.1.0 (*)
+      ├── darling_core v0.24.1
+      │   ├── darling v0.24.1
+      │   │   ├── instability v0.3.13
+      │   │   │   ├── ratatui v0.30.2
+      │   │   │   │   └── agent-cli v0.1.0 (*)
+      │   │   │   ├── ratatui-crossterm v0.1.2
+      │   │   │   │   └── ratatui v0.30.2 (*)
+      │   │   │   └── ratatui-widgets v0.3.2
+      │   │   │       ├── ratatui v0.30.2 (*)
+      │   │   │       └── ratatui-macros v0.7.2
+      │   │   │           └── ratatui v0.30.2 (*)
+      │   │   └── serde_with_macros v3.23.0
+      │   │       └── serde_with v3.23.0
+      │   │           └── agent-client-protocol-schema v1.7.0
+      │   │               └── agent-client-protocol v2.1.0 (*)
+      │   └── darling_macro v0.24.1
+      │       └── darling v0.24.1 (*)
+      ├── darling_macro v0.24.1 (*)
+      ├── displaydoc v0.2.7
+      │   ├── icu_collections v2.3.0
+      │   │   ├── icu_normalizer v2.3.0
+      │   │   │   └── idna_adapter v1.2.2
+      │   │   │       └── idna v1.1.0
+      │   │   │           ├── jsonschema v0.33.0
+      │   │   │           │   └── agent-runtime v0.1.0 (*)
+      │   │   │           └── url v2.5.8
+      │   │   │               ├── agent-artifact v0.1.0 (*)
+      │   │   │               ├── object_store v0.14.2 (*)
+      │   │   │               ├── reqwest v0.12.28
+      │   │   │               │   ├── agent-entry-support v0.1.0
+      │   │   │               │   │   ├── agent-acp v0.1.0 (*)
+      │   │   │               │   │   ├── agent-cli v0.1.0 (*)
+      │   │   │               │   │   ├── agent-gateway v0.1.0 (*)
+      │   │   │               │   │   └── my-agent v0.1.0 (*)
+      │   │   │               │   ├── agent-runtime v0.1.0 (*)
+      │   │   │               │   └── (dev) my-agent v0.1.0 (*)
+      │   │   │               ├── reqwest v0.13.5
+      │   │   │               │   ├── agent-artifact v0.1.0 (*)
+      │   │   │               │   └── object_store v0.14.2 (*)
+      │   │   │               └── tower-http v0.6.11
+      │   │   │                   ├── reqwest v0.12.28 (*)
+      │   │   │                   └── reqwest v0.13.5 (*)
+      │   │   └── icu_properties v2.3.0
+      │   │       └── idna_adapter v1.2.2 (*)
+      │   ├── icu_locale_core v2.3.0
+      │   │   ├── icu_properties v2.3.0 (*)
+      │   │   └── icu_provider v2.3.1
+      │   │       ├── icu_normalizer v2.3.0 (*)
+      │   │       └── icu_properties v2.3.0 (*)
+      │   ├── icu_properties v2.3.0 (*)
+      │   ├── icu_provider v2.3.1 (*)
+      │   ├── tinystr v0.8.4
+      │   │   └── icu_locale_core v2.3.0 (*)
+      │   └── zerotrie v0.2.5
+      │       ├── icu_properties v2.3.0 (*)
+      │       └── icu_provider v2.3.1 (*)
+      ├── futures-macro v0.3.34
+      │   └── futures-util v0.3.34
+      │       ├── agent-acp v0.1.0 (*)
+      │       ├── agent-artifact v0.1.0 (*)
+      │       ├── agent-cli v0.1.0 (*)
+      │       ├── agent-gateway v0.1.0 (*)
+      │       ├── agent-runtime v0.1.0 (*)
+      │       ├── axum v0.8.9
+      │       │   └── agent-gateway v0.1.0 (*)
+      │       ├── futures v0.3.34
+      │       │   └── agent-client-protocol v2.1.0 (*)
+      │       ├── futures-executor v0.3.34
+      │       │   └── futures v0.3.34 (*)
+      │       ├── hyper-util v0.1.20
+      │       │   ├── axum v0.8.9 (*)
+      │       │   ├── hyper-rustls v0.27.9
+      │       │   │   ├── reqwest v0.12.28 (*)
+      │       │   │   └── reqwest v0.13.5 (*)
+      │       │   ├── reqwest v0.12.28 (*)
+      │       │   └── reqwest v0.13.5 (*)
+      │       ├── js-sys v0.3.105
+      │       │   ├── iana-time-zone v0.1.65
+      │       │   │   └── chrono v0.4.45
+      │       │   │       ├── agent-cli v0.1.0 (*)
+      │       │   │       ├── agent-runtime v0.1.0 (*)
+      │       │   │       ├── cron v0.17.0
+      │       │   │       │   └── agent-runtime v0.1.0 (*)
+      │       │   │       └── object_store v0.14.2 (*)
+      │       │   ├── reqwest v0.12.28 (*)
+      │       │   ├── reqwest v0.13.5 (*)
+      │       │   ├── wasm-bindgen-futures v0.4.78
+      │       │   │   ├── object_store v0.14.2 (*)
+      │       │   │   ├── reqwest v0.12.28 (*)
+      │       │   │   ├── reqwest v0.13.5 (*)
+      │       │   │   ├── wasm-streams v0.4.2
+      │       │   │   │   └── reqwest v0.12.28 (*)
+      │       │   │   └── wasm-streams v0.5.0
+      │       │   │       └── reqwest v0.13.5 (*)
+      │       │   ├── wasm-streams v0.4.2 (*)
+      │       │   ├── wasm-streams v0.5.0 (*)
+      │       │   ├── web-sys v0.3.105
+      │       │   │   ├── reqwest v0.12.28 (*)
+      │       │   │   ├── reqwest v0.13.5 (*)
+      │       │   │   ├── wasm-streams v0.4.2 (*)
+      │       │   │   ├── wasm-streams v0.5.0 (*)
+      │       │   │   └── whoami v2.1.3
+      │       │   │       └── tokio-postgres v0.7.18 (*)
+      │       │   └── web-time v1.1.0
+      │       │       └── object_store v0.14.2 (*)
+      │       ├── (dev) my-agent v0.1.0 (*)
+      │       ├── object_store v0.14.2 (*)
+      │       ├── reqwest v0.12.28 (*)
+      │       ├── reqwest v0.13.5 (*)
+      │       ├── tokio-postgres v0.7.18 (*)
+      │       ├── tokio-tungstenite v0.29.0
+      │       │   ├── (dev) agent-gateway v0.1.0 (*)
+      │       │   ├── axum v0.8.9 (*)
+      │       │   └── (dev) my-agent v0.1.0 (*)
+      │       ├── tower v0.5.3
+      │       │   ├── axum v0.8.9 (*)
+      │       │   ├── reqwest v0.12.28 (*)
+      │       │   ├── reqwest v0.13.5 (*)
+      │       │   └── tower-http v0.6.11 (*)
+      │       ├── tower-http v0.6.11 (*)
+      │       ├── wasm-streams v0.4.2 (*)
+      │       └── wasm-streams v0.5.0 (*)
+      ├── instability v0.3.13 (*)
+      ├── ref-cast-impl v1.0.27
+      │   └── ref-cast v1.0.27
+      │       ├── fluent-uri v0.3.2
+      │       │   └── referencing v0.33.0
+      │       │       └── jsonschema v0.33.0 (*)
+      │       └── schemars v1.2.2
+      │           ├── agent-client-protocol v2.1.0 (*)
+      │           ├── agent-client-protocol-schema v1.7.0 (*)
+      │           └── serde_with v3.23.0 (*)
+      ├── schemars_derive v1.2.2
+      │   └── schemars v1.2.2 (*)
+      ├── serde_derive v1.0.229
+      │   └── serde v1.0.229
+      │       ├── agent-acp v0.1.0 (*)
+      │       ├── agent-cli v0.1.0 (*)
+      │       ├── agent-client-protocol v2.1.0 (*)
+      │       ├── agent-client-protocol-schema v1.7.0 (*)
+      │       ├── agent-core v0.1.0
+      │       │   ├── agent-acp v0.1.0 (*)
+      │       │   ├── agent-artifact v0.1.0 (*)
+      │       │   ├── agent-cli v0.1.0 (*)
+      │       │   ├── agent-context v0.1.0
+      │       │   │   ├── agent-daemon v0.1.0 (*)
+      │       │   │   ├── agent-runtime v0.1.0 (*)
+      │       │   │   └── my-agent v0.1.0 (*)
+      │       │   ├── agent-daemon v0.1.0 (*)
+      │       │   ├── agent-daemon-protocol v0.1.0
+      │       │   │   ├── agent-acp v0.1.0 (*)
+      │       │   │   ├── agent-cli v0.1.0 (*)
+      │       │   │   ├── agent-daemon v0.1.0 (*)
+      │       │   │   ├── agent-daemon-client v0.1.0
+      │       │   │   │   ├── agent-acp v0.1.0 (*)
+      │       │   │   │   ├── agent-cli v0.1.0 (*)
+      │       │   │   │   ├── (dev) agent-daemon v0.1.0 (*)
+      │       │   │   │   ├── agent-entry-support v0.1.0 (*)
+      │       │   │   │   ├── agent-gateway v0.1.0 (*)
+      │       │   │   │   └── my-agent v0.1.0 (*)
+      │       │   │   ├── agent-entry-support v0.1.0 (*)
+      │       │   │   ├── agent-gateway v0.1.0 (*)
+      │       │   │   ├── agent-runtime v0.1.0 (*)
+      │       │   │   └── (dev) my-agent v0.1.0 (*)
+      │       │   ├── agent-gateway v0.1.0 (*)
+      │       │   ├── agent-identity v0.1.0
+      │       │   │   ├── agent-daemon v0.1.0 (*)
+      │       │   │   └── (dev) my-agent v0.1.0 (*)
+      │       │   ├── agent-memory v0.1.0
+      │       │   │   ├── agent-daemon v0.1.0 (*)
+      │       │   │   ├── agent-runtime v0.1.0 (*)
+      │       │   │   └── my-agent v0.1.0 (*)
+      │       │   ├── agent-policy v0.1.0
+      │       │   │   ├── agent-daemon v0.1.0 (*)
+      │       │   │   ├── (dev) agent-runtime v0.1.0 (*)
+      │       │   │   └── (dev) my-agent v0.1.0 (*)
+      │       │   ├── agent-runtime v0.1.0 (*)
+      │       │   ├── agent-sandbox v0.1.0 (*)
+      │       │   ├── agent-storage v0.1.0 (*)
+      │       │   ├── agent-storage-ports v0.1.0 (*)
+      │       │   ├── agent-storage-postgres v0.1.0 (*)
+      │       │   └── my-agent v0.1.0 (*)
+      │       ├── agent-daemon v0.1.0 (*)
+      │       ├── agent-daemon-protocol v0.1.0 (*)
+      │       ├── agent-entry-support v0.1.0 (*)
+      │       ├── agent-gateway v0.1.0 (*)
+      │       ├── agent-memory v0.1.0 (*)
+      │       ├── agent-runtime v0.1.0 (*)
+      │       ├── agent-sandbox v0.1.0 (*)
+      │       ├── agent-storage v0.1.0 (*)
+      │       ├── ahash v0.8.12
+      │       │   ├── jsonschema v0.33.0 (*)
+      │       │   └── referencing v0.33.0 (*)
+      │       ├── chrono v0.4.45 (*)
+      │       ├── email_address v0.2.9
+      │       │   └── jsonschema v0.33.0 (*)
+      │       ├── fluent-uri v0.3.2 (*)
+      │       ├── jsonschema v0.33.0 (*)
+      │       ├── object_store v0.14.2 (*)
+      │       ├── quick-xml v0.41.0
+      │       │   └── object_store v0.14.2 (*)
+      │       ├── reqwest v0.12.28 (*)
+      │       ├── schemars v1.2.2 (*)
+      │       ├── serde_spanned v0.6.9
+      │       │   ├── toml v0.8.23
+      │       │   │   └── (dev) my-agent v0.1.0 (*)
+      │       │   └── toml_edit v0.22.27
+      │       │       └── toml v0.8.23 (*)
+      │       ├── serde_urlencoded v0.7.1
+      │       │   ├── axum v0.8.9 (*)
+      │       │   ├── object_store v0.14.2 (*)
+      │       │   └── reqwest v0.12.28 (*)
+      │       ├── serde_yaml_ng v0.10.0
+      │       │   └── agent-runtime v0.1.0 (*)
+      │       ├── toml v0.8.23 (*)
+      │       ├── toml_datetime v0.6.11
+      │       │   ├── toml v0.8.23 (*)
+      │       │   └── toml_edit v0.22.27 (*)
+      │       └── toml_edit v0.22.27 (*)
+      ├── serde_derive_internals v0.30.0
+      │   └── schemars_derive v1.2.2 (*)
+      ├── serde_with_macros v3.23.0 (*)
+      ├── thiserror-impl v2.0.20
+      │   └── thiserror v2.0.20
+      │       ├── agent-context v0.1.0 (*)
+      │       ├── agent-core v0.1.0 (*)
+      │       ├── agent-daemon v0.1.0 (*)
+      │       ├── agent-daemon-client v0.1.0 (*)
+      │       ├── agent-daemon-protocol v0.1.0 (*)
+      │       ├── agent-memory v0.1.0 (*)
+      │       ├── agent-runtime v0.1.0 (*)
+      │       ├── agent-storage v0.1.0 (*)
+      │       ├── jni v0.22.4
+      │       │   └── rustls-platform-verifier v0.7.1
+      │       │       └── reqwest v0.13.5 (*)
+      │       ├── kasuari v0.4.12
+      │       │   └── ratatui-core v0.1.2
+      │       │       ├── ratatui v0.30.2 (*)
+      │       │       ├── ratatui-crossterm v0.1.2 (*)
+      │       │       ├── ratatui-macros v0.7.2 (*)
+      │       │       └── ratatui-widgets v0.3.2 (*)
+      │       ├── lopdf v0.45.0
+      │       │   └── agent-runtime v0.1.0 (*)
+      │       ├── object_store v0.14.2 (*)
+      │       ├── ratatui-core v0.1.2 (*)
+      │       └── tungstenite v0.29.0
+      │           └── tokio-tungstenite v0.29.0 (*)
+      ├── tokio-macros v2.7.2
+      │   └── tokio v1.53.1
+      │       ├── agent-acp v0.1.0 (*)
+      │       ├── agent-artifact v0.1.0 (*)
+      │       ├── agent-cli v0.1.0 (*)
+      │       ├── agent-daemon v0.1.0 (*)
+      │       ├── agent-daemon-client v0.1.0 (*)
+      │       ├── agent-entry-support v0.1.0 (*)
+      │       ├── agent-gateway v0.1.0 (*)
+      │       ├── agent-runtime v0.1.0 (*)
+      │       ├── agent-sandbox v0.1.0 (*)
+      │       ├── agent-storage v0.1.0 (*)
+      │       ├── agent-storage-postgres v0.1.0 (*)
+      │       ├── axum v0.8.9 (*)
+      │       ├── h2 v0.4.20
+      │       │   ├── hyper v1.11.1
+      │       │   │   ├── axum v0.8.9 (*)
+      │       │   │   ├── hyper-rustls v0.27.9 (*)
+      │       │   │   ├── hyper-util v0.1.20 (*)
+      │       │   │   ├── object_store v0.14.2 (*)
+      │       │   │   ├── reqwest v0.12.28 (*)
+      │       │   │   └── reqwest v0.13.5 (*)
+      │       │   └── reqwest v0.13.5 (*)
+      │       ├── hyper v1.11.1 (*)
+      │       ├── hyper-rustls v0.27.9 (*)
+      │       ├── hyper-util v0.1.20 (*)
+      │       ├── my-agent v0.1.0 (*)
+      │       ├── object_store v0.14.2 (*)
+      │       ├── reqwest v0.12.28 (*)
+      │       ├── reqwest v0.13.5 (*)
+      │       ├── tokio-postgres v0.7.18 (*)
+      │       ├── tokio-rustls v0.26.4
+      │       │   ├── (dev) agent-runtime v0.1.0 (*)
+      │       │   ├── hyper-rustls v0.27.9 (*)
+      │       │   ├── (dev) my-agent v0.1.0 (*)
+      │       │   ├── reqwest v0.12.28 (*)
+      │       │   └── reqwest v0.13.5 (*)
+      │       ├── tokio-tungstenite v0.29.0 (*)
+      │       ├── tokio-util v0.7.19
+      │       │   ├── h2 v0.4.20 (*)
+      │       │   ├── reqwest v0.12.28 (*)
+      │       │   ├── reqwest v0.13.5 (*)
+      │       │   └── tokio-postgres v0.7.18 (*)
+      │       └── tower v0.5.3 (*)
+      ├── wasm-bindgen-macro-support v0.2.128
+      │   └── wasm-bindgen-macro v0.2.128
+      │       └── wasm-bindgen v0.2.128
+      │           ├── iana-time-zone v0.1.65 (*)
+      │           ├── js-sys v0.3.105 (*)
+      │           ├── reqwest v0.12.28 (*)
+      │           ├── reqwest v0.13.5 (*)
+      │           ├── wasm-bindgen-futures v0.4.78 (*)
+      │           ├── wasm-streams v0.4.2 (*)
+      │           ├── wasm-streams v0.5.0 (*)
+      │           ├── web-sys v0.3.105 (*)
+      │           └── web-time v1.1.0 (*)
+      └── zerovec-derive v0.11.6
+          └── zerovec v0.11.8
+              ├── icu_collections v2.3.0 (*)
+              ├── icu_locale_core v2.3.0 (*)
+              ├── icu_normalizer v2.3.0 (*)
+              ├── icu_properties v2.3.0 (*)
+              ├── icu_provider v2.3.1 (*)
+              ├── potential_utf v0.1.6
+              │   └── icu_collections v2.3.0 (*)
+              └── tinystr v0.8.4 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'wasi'
+    ┌─ /Users/pilot/Documents/myproject/agent-rust/Cargo.lock:394:1
+    │  
+394 │ ╭ wasi 0.11.1+wasi-snapshot-preview1 registry+https://github.com/rust-lang/crates.io-index
+395 │ │ wasi 0.14.7+wasi-0.2.4 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰────────────────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ wasi v0.11.1+wasi-snapshot-preview1
+      ├── getrandom v0.2.17
+      │   └── ring v0.17.14
+      │       ├── object_store v0.14.2
+      │       │   └── agent-artifact v0.1.0
+      │       │       ├── agent-daemon v0.1.0
+      │       │       │   ├── (dev) agent-acp v0.1.0
+      │       │       │   │   └── my-agent v0.1.0
+      │       │       │   ├── (dev) agent-cli v0.1.0
+      │       │       │   │   └── my-agent v0.1.0 (*)
+      │       │       │   ├── (dev) agent-gateway v0.1.0
+      │       │       │   │   └── my-agent v0.1.0 (*)
+      │       │       │   └── my-agent v0.1.0 (*)
+      │       │       ├── agent-runtime v0.1.0
+      │       │       │   ├── (dev) agent-acp v0.1.0 (*)
+      │       │       │   ├── (dev) agent-cli v0.1.0 (*)
+      │       │       │   ├── agent-daemon v0.1.0 (*)
+      │       │       │   ├── (dev) agent-gateway v0.1.0 (*)
+      │       │       │   └── my-agent v0.1.0 (*)
+      │       │       └── (dev) my-agent v0.1.0 (*)
+      │       ├── rcgen v0.13.2
+      │       │   ├── (dev) agent-runtime v0.1.0 (*)
+      │       │   └── (dev) my-agent v0.1.0 (*)
+      │       ├── rustls v0.23.45
+      │       │   ├── agent-artifact v0.1.0 (*)
+      │       │   ├── hyper-rustls v0.27.9
+      │       │   │   ├── reqwest v0.12.28
+      │       │   │   │   ├── agent-entry-support v0.1.0
+      │       │   │   │   │   ├── agent-acp v0.1.0 (*)
+      │       │   │   │   │   ├── agent-cli v0.1.0 (*)
+      │       │   │   │   │   ├── agent-gateway v0.1.0 (*)
+      │       │   │   │   │   └── my-agent v0.1.0 (*)
+      │       │   │   │   ├── agent-runtime v0.1.0 (*)
+      │       │   │   │   └── (dev) my-agent v0.1.0 (*)
+      │       │   │   └── reqwest v0.13.5
+      │       │   │       ├── agent-artifact v0.1.0 (*)
+      │       │   │       └── object_store v0.14.2 (*)
+      │       │   ├── reqwest v0.12.28 (*)
+      │       │   ├── reqwest v0.13.5 (*)
+      │       │   ├── rustls-platform-verifier v0.7.1
+      │       │   │   └── reqwest v0.13.5 (*)
+      │       │   └── tokio-rustls v0.26.4
+      │       │       ├── (dev) agent-runtime v0.1.0 (*)
+      │       │       ├── hyper-rustls v0.27.9 (*)
+      │       │       ├── (dev) my-agent v0.1.0 (*)
+      │       │       ├── reqwest v0.12.28 (*)
+      │       │       └── reqwest v0.13.5 (*)
+      │       └── rustls-webpki v0.103.15
+      │           ├── rustls v0.23.45 (*)
+      │           └── rustls-platform-verifier v0.7.1 (*)
+      └── mio v1.2.3
+          ├── crossterm v0.29.0
+          │   ├── agent-cli v0.1.0 (*)
+          │   └── ratatui-crossterm v0.1.2
+          │       └── ratatui v0.30.2
+          │           └── agent-cli v0.1.0 (*)
+          ├── signal-hook-mio v0.2.5
+          │   └── crossterm v0.29.0 (*)
+          └── tokio v1.53.1
+              ├── agent-acp v0.1.0 (*)
+              ├── agent-artifact v0.1.0 (*)
+              ├── agent-cli v0.1.0 (*)
+              ├── agent-daemon v0.1.0 (*)
+              ├── agent-daemon-client v0.1.0
+              │   ├── agent-acp v0.1.0 (*)
+              │   ├── agent-cli v0.1.0 (*)
+              │   ├── (dev) agent-daemon v0.1.0 (*)
+              │   ├── agent-entry-support v0.1.0 (*)
+              │   ├── agent-gateway v0.1.0 (*)
+              │   └── my-agent v0.1.0 (*)
+              ├── agent-entry-support v0.1.0 (*)
+              ├── agent-gateway v0.1.0 (*)
+              ├── agent-runtime v0.1.0 (*)
+              ├── agent-sandbox v0.1.0
+              │   ├── agent-daemon v0.1.0 (*)
+              │   └── agent-runtime v0.1.0 (*)
+              ├── agent-storage v0.1.0
+              │   ├── agent-daemon v0.1.0 (*)
+              │   ├── agent-runtime v0.1.0 (*)
+              │   └── (dev) my-agent v0.1.0 (*)
+              ├── agent-storage-postgres v0.1.0
+              │   └── (dev) my-agent v0.1.0 (*)
+              ├── axum v0.8.9
+              │   └── agent-gateway v0.1.0 (*)
+              ├── h2 v0.4.20
+              │   ├── hyper v1.11.1
+              │   │   ├── axum v0.8.9 (*)
+              │   │   ├── hyper-rustls v0.27.9 (*)
+              │   │   ├── hyper-util v0.1.20
+              │   │   │   ├── axum v0.8.9 (*)
+              │   │   │   ├── hyper-rustls v0.27.9 (*)
+              │   │   │   ├── reqwest v0.12.28 (*)
+              │   │   │   └── reqwest v0.13.5 (*)
+              │   │   ├── object_store v0.14.2 (*)
+              │   │   ├── reqwest v0.12.28 (*)
+              │   │   └── reqwest v0.13.5 (*)
+              │   └── reqwest v0.13.5 (*)
+              ├── hyper v1.11.1 (*)
+              ├── hyper-rustls v0.27.9 (*)
+              ├── hyper-util v0.1.20 (*)
+              ├── my-agent v0.1.0 (*)
+              ├── object_store v0.14.2 (*)
+              ├── reqwest v0.12.28 (*)
+              ├── reqwest v0.13.5 (*)
+              ├── tokio-postgres v0.7.18
+              │   └── agent-storage-postgres v0.1.0 (*)
+              ├── tokio-rustls v0.26.4 (*)
+              ├── tokio-tungstenite v0.29.0
+              │   ├── (dev) agent-gateway v0.1.0 (*)
+              │   ├── axum v0.8.9 (*)
+              │   └── (dev) my-agent v0.1.0 (*)
+              ├── tokio-util v0.7.19
+              │   ├── h2 v0.4.20 (*)
+              │   ├── reqwest v0.12.28 (*)
+              │   ├── reqwest v0.13.5 (*)
+              │   └── tokio-postgres v0.7.18 (*)
+              └── tower v0.5.3
+                  ├── axum v0.8.9 (*)
+                  ├── reqwest v0.12.28 (*)
+                  ├── reqwest v0.13.5 (*)
+                  └── tower-http v0.6.11
+                      ├── reqwest v0.12.28 (*)
+                      └── reqwest v0.13.5 (*)
+    ├ wasi v0.14.7+wasi-0.2.4
+      └── wasite v1.0.2
+          └── whoami v2.1.3
+              └── tokio-postgres v0.7.18
+                  └── agent-storage-postgres v0.1.0
+                      └── (dev) my-agent v0.1.0
+
+warning[duplicate]: found 2 duplicate entries for crate 'wasm-streams'
+    ┌─ /Users/pilot/Documents/myproject/agent-rust/Cargo.lock:403:1
+    │  
+403 │ ╭ wasm-streams 0.4.2 registry+https://github.com/rust-lang/crates.io-index
+404 │ │ wasm-streams 0.5.0 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰────────────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ wasm-streams v0.4.2
+      └── reqwest v0.12.28
+          ├── agent-entry-support v0.1.0
+          │   ├── agent-acp v0.1.0
+          │   │   └── my-agent v0.1.0
+          │   ├── agent-cli v0.1.0
+          │   │   └── my-agent v0.1.0 (*)
+          │   ├── agent-gateway v0.1.0
+          │   │   └── my-agent v0.1.0 (*)
+          │   └── my-agent v0.1.0 (*)
+          ├── agent-runtime v0.1.0
+          │   ├── (dev) agent-acp v0.1.0 (*)
+          │   ├── (dev) agent-cli v0.1.0 (*)
+          │   ├── agent-daemon v0.1.0
+          │   │   ├── (dev) agent-acp v0.1.0 (*)
+          │   │   ├── (dev) agent-cli v0.1.0 (*)
+          │   │   ├── (dev) agent-gateway v0.1.0 (*)
+          │   │   └── my-agent v0.1.0 (*)
+          │   ├── (dev) agent-gateway v0.1.0 (*)
+          │   └── my-agent v0.1.0 (*)
+          └── (dev) my-agent v0.1.0 (*)
+    ├ wasm-streams v0.5.0
+      └── reqwest v0.13.5
+          ├── agent-artifact v0.1.0
+          │   ├── agent-daemon v0.1.0
+          │   │   ├── (dev) agent-acp v0.1.0
+          │   │   │   └── my-agent v0.1.0
+          │   │   ├── (dev) agent-cli v0.1.0
+          │   │   │   └── my-agent v0.1.0 (*)
+          │   │   ├── (dev) agent-gateway v0.1.0
+          │   │   │   └── my-agent v0.1.0 (*)
+          │   │   └── my-agent v0.1.0 (*)
+          │   ├── agent-runtime v0.1.0
+          │   │   ├── (dev) agent-acp v0.1.0 (*)
+          │   │   ├── (dev) agent-cli v0.1.0 (*)
+          │   │   ├── agent-daemon v0.1.0 (*)
+          │   │   ├── (dev) agent-gateway v0.1.0 (*)
+          │   │   └── my-agent v0.1.0 (*)
+          │   └── (dev) my-agent v0.1.0 (*)
+          └── object_store v0.14.2
+              └── agent-artifact v0.1.0 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'windows-sys'
+    ┌─ /Users/pilot/Documents/myproject/agent-rust/Cargo.lock:421:1
+    │  
+421 │ ╭ windows-sys 0.52.0 registry+https://github.com/rust-lang/crates.io-index
+422 │ │ windows-sys 0.61.2 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰────────────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ windows-sys v0.52.0
+      └── ring v0.17.14
+          ├── object_store v0.14.2
+          │   └── agent-artifact v0.1.0
+          │       ├── agent-daemon v0.1.0
+          │       │   ├── (dev) agent-acp v0.1.0
+          │       │   │   └── my-agent v0.1.0
+          │       │   ├── (dev) agent-cli v0.1.0
+          │       │   │   └── my-agent v0.1.0 (*)
+          │       │   ├── (dev) agent-gateway v0.1.0
+          │       │   │   └── my-agent v0.1.0 (*)
+          │       │   └── my-agent v0.1.0 (*)
+          │       ├── agent-runtime v0.1.0
+          │       │   ├── (dev) agent-acp v0.1.0 (*)
+          │       │   ├── (dev) agent-cli v0.1.0 (*)
+          │       │   ├── agent-daemon v0.1.0 (*)
+          │       │   ├── (dev) agent-gateway v0.1.0 (*)
+          │       │   └── my-agent v0.1.0 (*)
+          │       └── (dev) my-agent v0.1.0 (*)
+          ├── rcgen v0.13.2
+          │   ├── (dev) agent-runtime v0.1.0 (*)
+          │   └── (dev) my-agent v0.1.0 (*)
+          ├── rustls v0.23.45
+          │   ├── agent-artifact v0.1.0 (*)
+          │   ├── hyper-rustls v0.27.9
+          │   │   ├── reqwest v0.12.28
+          │   │   │   ├── agent-entry-support v0.1.0
+          │   │   │   │   ├── agent-acp v0.1.0 (*)
+          │   │   │   │   ├── agent-cli v0.1.0 (*)
+          │   │   │   │   ├── agent-gateway v0.1.0 (*)
+          │   │   │   │   └── my-agent v0.1.0 (*)
+          │   │   │   ├── agent-runtime v0.1.0 (*)
+          │   │   │   └── (dev) my-agent v0.1.0 (*)
+          │   │   └── reqwest v0.13.5
+          │   │       ├── agent-artifact v0.1.0 (*)
+          │   │       └── object_store v0.14.2 (*)
+          │   ├── reqwest v0.12.28 (*)
+          │   ├── reqwest v0.13.5 (*)
+          │   ├── rustls-platform-verifier v0.7.1
+          │   │   └── reqwest v0.13.5 (*)
+          │   └── tokio-rustls v0.26.4
+          │       ├── (dev) agent-runtime v0.1.0 (*)
+          │       ├── hyper-rustls v0.27.9 (*)
+          │       ├── (dev) my-agent v0.1.0 (*)
+          │       ├── reqwest v0.12.28 (*)
+          │       └── reqwest v0.13.5 (*)
+          └── rustls-webpki v0.103.15
+              ├── rustls v0.23.45 (*)
+              └── rustls-platform-verifier v0.7.1 (*)
+    ├ windows-sys v0.61.2
+      ├── agent-client-protocol v2.1.0
+      │   └── agent-acp v0.1.0
+      │       └── my-agent v0.1.0
+      ├── anstyle-query v1.1.5
+      │   └── anstream v1.0.0
+      │       └── clap_builder v4.6.6
+      │           └── clap v4.6.6
+      │               └── agent-cli v0.1.0
+      │                   └── my-agent v0.1.0 (*)
+      ├── anstyle-wincon v3.0.11
+      │   └── anstream v1.0.0 (*)
+      ├── async-io v2.6.0
+      │   ├── agent-client-protocol v2.1.0 (*)
+      │   ├── async-process v2.5.0
+      │   │   └── agent-client-protocol v2.1.0 (*)
+      │   └── async-signal v0.2.14
+      │       └── async-process v2.5.0 (*)
+      ├── async-signal v0.2.14 (*)
+      ├── errno v0.3.14
+      │   ├── rustix v1.1.4
+      │   │   ├── agent-client-protocol v2.1.0 (*)
+      │   │   ├── agent-runtime v0.1.0
+      │   │   │   ├── (dev) agent-acp v0.1.0 (*)
+      │   │   │   ├── (dev) agent-cli v0.1.0 (*)
+      │   │   │   ├── agent-daemon v0.1.0
+      │   │   │   │   ├── (dev) agent-acp v0.1.0 (*)
+      │   │   │   │   ├── (dev) agent-cli v0.1.0 (*)
+      │   │   │   │   ├── (dev) agent-gateway v0.1.0
+      │   │   │   │   │   └── my-agent v0.1.0 (*)
+      │   │   │   │   └── my-agent v0.1.0 (*)
+      │   │   │   ├── (dev) agent-gateway v0.1.0 (*)
+      │   │   │   └── my-agent v0.1.0 (*)
+      │   │   ├── agent-sandbox v0.1.0
+      │   │   │   ├── agent-daemon v0.1.0 (*)
+      │   │   │   └── agent-runtime v0.1.0 (*)
+      │   │   ├── agent-storage v0.1.0
+      │   │   │   ├── agent-daemon v0.1.0 (*)
+      │   │   │   ├── agent-runtime v0.1.0 (*)
+      │   │   │   └── (dev) my-agent v0.1.0 (*)
+      │   │   ├── async-io v2.6.0 (*)
+      │   │   ├── async-process v2.5.0 (*)
+      │   │   ├── async-signal v0.2.14 (*)
+      │   │   ├── crossterm v0.29.0
+      │   │   │   ├── agent-cli v0.1.0 (*)
+      │   │   │   └── ratatui-crossterm v0.1.2
+      │   │   │       └── ratatui v0.30.2
+      │   │   │           └── agent-cli v0.1.0 (*)
+      │   │   └── polling v3.11.0
+      │   │       └── async-io v2.6.0 (*)
+      │   └── signal-hook-registry v1.4.8
+      │       ├── async-signal v0.2.14 (*)
+      │       ├── signal-hook v0.3.18
+      │       │   ├── crossterm v0.29.0 (*)
+      │       │   └── signal-hook-mio v0.2.5
+      │       │       └── crossterm v0.29.0 (*)
+      │       └── tokio v1.53.1
+      │           ├── agent-acp v0.1.0 (*)
+      │           ├── agent-artifact v0.1.0
+      │           │   ├── agent-daemon v0.1.0 (*)
+      │           │   ├── agent-runtime v0.1.0 (*)
+      │           │   └── (dev) my-agent v0.1.0 (*)
+      │           ├── agent-cli v0.1.0 (*)
+      │           ├── agent-daemon v0.1.0 (*)
+      │           ├── agent-daemon-client v0.1.0
+      │           │   ├── agent-acp v0.1.0 (*)
+      │           │   ├── agent-cli v0.1.0 (*)
+      │           │   ├── (dev) agent-daemon v0.1.0 (*)
+      │           │   ├── agent-entry-support v0.1.0
+      │           │   │   ├── agent-acp v0.1.0 (*)
+      │           │   │   ├── agent-cli v0.1.0 (*)
+      │           │   │   ├── agent-gateway v0.1.0 (*)
+      │           │   │   └── my-agent v0.1.0 (*)
+      │           │   ├── agent-gateway v0.1.0 (*)
+      │           │   └── my-agent v0.1.0 (*)
+      │           ├── agent-entry-support v0.1.0 (*)
+      │           ├── agent-gateway v0.1.0 (*)
+      │           ├── agent-runtime v0.1.0 (*)
+      │           ├── agent-sandbox v0.1.0 (*)
+      │           ├── agent-storage v0.1.0 (*)
+      │           ├── agent-storage-postgres v0.1.0
+      │           │   └── (dev) my-agent v0.1.0 (*)
+      │           ├── axum v0.8.9
+      │           │   └── agent-gateway v0.1.0 (*)
+      │           ├── h2 v0.4.20
+      │           │   ├── hyper v1.11.1
+      │           │   │   ├── axum v0.8.9 (*)
+      │           │   │   ├── hyper-rustls v0.27.9
+      │           │   │   │   ├── reqwest v0.12.28
+      │           │   │   │   │   ├── agent-entry-support v0.1.0 (*)
+      │           │   │   │   │   ├── agent-runtime v0.1.0 (*)
+      │           │   │   │   │   └── (dev) my-agent v0.1.0 (*)
+      │           │   │   │   └── reqwest v0.13.5
+      │           │   │   │       ├── agent-artifact v0.1.0 (*)
+      │           │   │   │       └── object_store v0.14.2
+      │           │   │   │           └── agent-artifact v0.1.0 (*)
+      │           │   │   ├── hyper-util v0.1.20
+      │           │   │   │   ├── axum v0.8.9 (*)
+      │           │   │   │   ├── hyper-rustls v0.27.9 (*)
+      │           │   │   │   ├── reqwest v0.12.28 (*)
+      │           │   │   │   └── reqwest v0.13.5 (*)
+      │           │   │   ├── object_store v0.14.2 (*)
+      │           │   │   ├── reqwest v0.12.28 (*)
+      │           │   │   └── reqwest v0.13.5 (*)
+      │           │   └── reqwest v0.13.5 (*)
+      │           ├── hyper v1.11.1 (*)
+      │           ├── hyper-rustls v0.27.9 (*)
+      │           ├── hyper-util v0.1.20 (*)
+      │           ├── my-agent v0.1.0 (*)
+      │           ├── object_store v0.14.2 (*)
+      │           ├── reqwest v0.12.28 (*)
+      │           ├── reqwest v0.13.5 (*)
+      │           ├── tokio-postgres v0.7.18
+      │           │   └── agent-storage-postgres v0.1.0 (*)
+      │           ├── tokio-rustls v0.26.4
+      │           │   ├── (dev) agent-runtime v0.1.0 (*)
+      │           │   ├── hyper-rustls v0.27.9 (*)
+      │           │   ├── (dev) my-agent v0.1.0 (*)
+      │           │   ├── reqwest v0.12.28 (*)
+      │           │   └── reqwest v0.13.5 (*)
+      │           ├── tokio-tungstenite v0.29.0
+      │           │   ├── (dev) agent-gateway v0.1.0 (*)
+      │           │   ├── axum v0.8.9 (*)
+      │           │   └── (dev) my-agent v0.1.0 (*)
+      │           ├── tokio-util v0.7.19
+      │           │   ├── h2 v0.4.20 (*)
+      │           │   ├── reqwest v0.12.28 (*)
+      │           │   ├── reqwest v0.13.5 (*)
+      │           │   └── tokio-postgres v0.7.18 (*)
+      │           └── tower v0.5.3
+      │               ├── axum v0.8.9 (*)
+      │               ├── reqwest v0.12.28 (*)
+      │               ├── reqwest v0.13.5 (*)
+      │               └── tower-http v0.6.11
+      │                   ├── reqwest v0.12.28 (*)
+      │                   └── reqwest v0.13.5 (*)
+      ├── mio v1.2.3
+      │   ├── crossterm v0.29.0 (*)
+      │   ├── signal-hook-mio v0.2.5 (*)
+      │   └── tokio v1.53.1 (*)
+      ├── nu-ansi-term v0.50.3
+      │   └── tracing-subscriber v0.3.23
+      │       ├── agent-storage-postgres v0.1.0 (*)
+      │       └── my-agent v0.1.0 (*)
+      ├── polling v3.11.0 (*)
+      ├── rustix v1.1.4 (*)
+      ├── rustls-platform-verifier v0.7.1
+      │   └── reqwest v0.13.5 (*)
+      ├── schannel v0.1.29
+      │   └── rustls-native-certs v0.8.4
+      │       └── rustls-platform-verifier v0.7.1 (*)
+      ├── socket2 v0.6.5
+      │   ├── hyper-util v0.1.20 (*)
+      │   ├── tokio v1.53.1 (*)
+      │   └── tokio-postgres v0.7.18 (*)
+      ├── tokio v1.53.1 (*)
+      └── winapi-util v0.1.11
+          ├── same-file v1.0.6
+          │   └── walkdir v2.5.0
+          │       └── (build) jni v0.22.4
+          │           └── rustls-platform-verifier v0.7.1 (*)
+          └── walkdir v2.5.0 (*)
+
+advisories ok, bans ok, licenses ok, sources ok

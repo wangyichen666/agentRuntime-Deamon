@@ -1,0 +1,21 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.14s
+     Running tests/run_request_contract.rs (target/debug/deps/run_request_contract-44b803d0c443a02a)
+
+running 1 test
+
+thread 'native_capture_must_match_frozen_route_before_persisting_material' panicked at tests/run_request_contract.rs:823:5:
+assertion `left == right` failed
+  left: Ok(())
+ right: Err(Coordination(Conflict))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test native_capture_must_match_frozen_route_before_persisting_material ... FAILED
+
+failures:
+
+failures:
+    native_capture_must_match_frozen_route_before_persisting_material
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.05s
+
+error: test failed, to rerun pass `--test run_request_contract`

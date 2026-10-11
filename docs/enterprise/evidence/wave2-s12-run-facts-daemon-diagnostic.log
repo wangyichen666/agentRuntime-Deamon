@@ -1,0 +1,23 @@
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 17.83s
+     Running tests/runtime_contract.rs (target/debug/deps/runtime_contract-ef559da8ec38e611)
+
+running 1 test
+test scoped_run_facts_tools_and_provider_share_six_entries_and_restart_without_replay ... FAILED
+
+failures:
+
+---- scoped_run_facts_tools_and_provider_share_six_entries_and_restart_without_replay stdout ----
+
+thread 'scoped_run_facts_tools_and_provider_share_six_entries_and_restart_without_replay' panicked at tests/runtime_contract.rs:3793:79:
+ACP2 error：{"code":-32602,"message":"Invalid params","data":"未知 ACP 字段：run_id"}
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    scoped_run_facts_tools_and_provider_share_six_entries_and_restart_without_replay
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 45 filtered out; finished in 3.15s
+
+error: test failed, to rerun pass `--test runtime_contract`

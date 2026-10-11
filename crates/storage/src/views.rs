@@ -106,16 +106,32 @@ pub(crate) fn stamp_in(
     run: &RunId,
     seq: EventSeq,
 ) -> Result<Option<ViewStamp>, RuntimeError> {
-    let row: Option<(String, String,u64)> = db
+    let provenance: Option<String> = db
         .query_row(
-            "SELECT stamp_json,stamp_digest,published FROM event_view_stamps WHERE run_id=?1 AND seq=?2",
+            "SELECT view_provenance FROM events WHERE run_id=?1 AND seq=?2",
             params![run.0, seq.0],
-            |row| Ok((row.get(0)?, row.get(1)?,row.get(2)?)),
+            |r| r.get(0),
         )
         .optional()?;
-    let Some((raw, digest, published)) = row else {
+    let Some(provenance) = provenance else {
         return Ok(None);
     };
+    let header:Option<(u64,u64)>=db.query_row("SELECT length(CAST(stamp_json AS BLOB)),published FROM event_view_stamps WHERE run_id=?1 AND seq=?2",params![run.0,seq.0],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+    let Some((bytes, published)) = header else {
+        return if provenance == "legacy" {
+            Ok(None)
+        } else {
+            Err(CoordinationError::Corrupt.into())
+        };
+    };
+    if provenance != "native" || bytes > 16384 || published != 1 {
+        return Err(CoordinationError::Corrupt.into());
+    }
+    let (raw, digest): (String, String) = db.query_row(
+        "SELECT stamp_json,stamp_digest FROM event_view_stamps WHERE run_id=?1 AND seq=?2",
+        params![run.0, seq.0],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
     if published != 1 || format!("{:x}", Sha256::digest(raw.as_bytes())) != digest {
         return Err(RuntimeError::Protocol("event 版本摘要损坏".into()));
     }
@@ -166,34 +182,13 @@ impl ViewRepository for RunStore {
         event: &str,
         child: Option<&RunId>,
     ) -> Result<Option<StoredEvent>, RuntimeError> {
-        let db = self.lock_connection()?;
-        let row:Option<(u64,String)>=db.query_row("SELECT seq,data_json FROM events WHERE run_id=?1 AND event=?2 AND (?3 IS NULL OR json_extract(data_json,'$.child_run_id')=?3) ORDER BY seq DESC LIMIT 1",params![run.0,event,child.map(|run|&run.0)],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
-        row.map(|(seq, raw)| {
-            let mut data: serde_json::Value = serde_json::from_str(&raw)
-                .map_err(|error| RuntimeError::Protocol(error.to_string()))?;
-            strip_transport_metadata(&mut data);
-            if let Some(stamp) = stamp_in(&db, run, EventSeq(seq))? {
-                data.as_object_mut()
-                    .ok_or_else(|| RuntimeError::Protocol("事件data非object".into()))?
-                    .insert(
-                        "_my_agent_view".into(),
-                        serde_json::to_value(stamp)
-                            .map_err(|error| RuntimeError::Protocol(error.to_string()))?,
-                    );
-            }
-            Ok(StoredEvent {
-                run_id: run.clone(),
-                seq: EventSeq(seq),
-                event: event.into(),
-                data,
-            })
-        })
-        .transpose()
+        self.view_event_scoped(&TenantContext::local(), run, event, child)
     }
 }
 
 /// 唯一提交封存点；只写本事务的新事件，读事务与已发布历史保持零写入。
 pub(crate) fn commit(tx: rusqlite::Transaction<'_>) -> Result<(), RuntimeError> {
+    crate::writer::before_commit(&tx)?;
     let pending = {
         let mut query=tx.prepare("SELECT run_id,seq,stamp_json,stamp_digest FROM event_view_stamps WHERE published=0 ORDER BY run_id,seq")?;
         query
@@ -244,7 +239,9 @@ pub(crate) fn commit(tx: rusqlite::Transaction<'_>) -> Result<(), RuntimeError> 
             .map_err(|error| RuntimeError::Protocol(error.to_string()))?;
         let digest = format!("{:x}", Sha256::digest(raw.as_bytes()));
         tx.execute("UPDATE event_view_stamps SET stamp_json=?3,stamp_digest=?4,published=1 WHERE run_id=?1 AND seq=?2 AND published=0",params![run,seq,raw,digest])?;
+        crate::publication::seal_in(&tx, &RunId(run), EventSeq(seq), &stamp)?;
     }
+    crate::writer::before_commit(&tx)?;
     tx.commit()?;
     Ok(())
 }
@@ -268,6 +265,7 @@ mod tests {
         let metadata = store.create_session(&SessionKey("view".into())).unwrap();
         let snapshot:RunSnapshot=serde_json::from_value(json!({"tools":[],"route":null,"cwd":".","permission_mode":"risk_approval","sandbox_requested":"native","sandbox_effective":"native","context_read_only":false,"max_tool_calls":8,"config_generation":0,"tool_catalog_digest":format!("{:x}",Sha256::digest(b"[]"))})).unwrap();
         let admission = RunAdmission {
+            workflow_node: None,
             session_key: metadata.key,
             expected_lifetime: Some(metadata.lifetime),
             request_id: RequestId::Number(1),
@@ -448,6 +446,7 @@ mod tests {
     fn schema18_stamp_upgrade_keeps_unversioned_history_and_rolls_back_on_fault() {
         let file = path();
         let (store, owner) = fixture(&file);
+        crate::enterprise::remove_v21_for_fixture(&store.lock_connection().unwrap());
         store.lock_connection().unwrap().execute_batch("DROP TABLE provider_requests; DROP TABLE event_view_stamps; DELETE FROM schema_migrations WHERE version>=19; CREATE TRIGGER stamp_migration_fault BEFORE INSERT ON schema_migrations WHEN NEW.version=19 BEGIN SELECT RAISE(ABORT,'stamp migration fault'); END").unwrap();
         drop(store);
         assert!(RunStore::open(&file).is_err());
@@ -502,7 +501,7 @@ mod tests {
         store
             .lock_connection()
             .unwrap()
-            .execute("INSERT INTO schema_migrations VALUES(21,0)", [])
+            .execute("INSERT INTO schema_migrations VALUES(28,0)", [])
             .unwrap();
         drop(store);
         assert!(RunStore::open(&file).is_err());

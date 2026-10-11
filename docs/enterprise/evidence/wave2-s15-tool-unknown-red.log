@@ -1,0 +1,22 @@
+   Compiling agent-core v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/core)
+   Compiling agent-storage-ports v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-ports)
+   Compiling agent-context v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/context)
+   Compiling agent-memory v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/memory)
+   Compiling agent-daemon-protocol v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-protocol)
+   Compiling agent-sandbox v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/sandbox)
+   Compiling agent-artifact v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/artifact)
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+error[E0050]: method `descriptor` has 1 parameter but the declaration in trait `tools::Tool::descriptor` has 2
+    --> crates/runtime/src/loop_engine.rs:3092:23
+     |
+3092 |         fn descriptor(&self) -> agent_core::ToolDescriptor {
+     |                       ^^^^^ expected 2 parameters, found 1
+     |
+    ::: crates/runtime/src/tools/mod.rs:51:19
+     |
+51   |     fn descriptor(&self, _args: &Value) -> Result<agent_core::ToolDescriptor> {
+     |                   -------------------- trait requires 2 parameters
+
+For more information about this error, try `rustc --explain E0050`.
+error: could not compile `agent-runtime` (lib test) due to 1 previous error

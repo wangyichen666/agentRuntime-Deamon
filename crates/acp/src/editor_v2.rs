@@ -112,7 +112,18 @@ fn build_acp_v2_agent(
                 {
                     return connection.failure(responder, invalid(error));
                 }
-                let control = if request.method == "session/list" {
+                let control = if matches!(
+                    request.method.as_str(),
+                    "session/list"
+                        | "_my_agent/runtime/doctor"
+                        | "_my_agent/identity/read"
+                        | "_my_agent/outbox/read"
+                        | "_my_agent/artifacts/read"
+                        | "_my_agent/run/events"
+                        | "_my_agent/run/read"
+                        | "_my_agent/run/tools"
+                        | "_my_agent/run/provider"
+                ) {
                     None
                 } else {
                     match AcpControl::parse(&request.method, &request.params) {
@@ -183,7 +194,18 @@ fn capability(method: &str) -> Option<&'static str> {
         Some("compact")
     } else if method.starts_with("_my_agent/interaction/") {
         Some("interaction")
-    } else if method == "_my_agent/session/read" {
+    } else if matches!(
+        method,
+        "_my_agent/session/read"
+            | "_my_agent/runtime/doctor"
+            | "_my_agent/identity/read"
+            | "_my_agent/outbox/read"
+            | "_my_agent/artifacts/read"
+            | "_my_agent/run/events"
+            | "_my_agent/run/read"
+            | "_my_agent/run/tools"
+            | "_my_agent/run/provider"
+    ) {
         Some("readback")
     } else if method == "session/delete" {
         Some("management")
@@ -260,6 +282,44 @@ async fn handle_inner(
             );
         }
         return Ok(Some(json!(response)));
+    }
+    if request.method == "_my_agent/runtime/doctor" {
+        if request.params != json!({}) {
+            return Err(invalid("运行诊断不接受写入参数"));
+        }
+        return Ok(Some(rpc(client, "runtime.doctor", json!({})).await?));
+    }
+    if matches!(
+        request.method.as_str(),
+        "_my_agent/run/read" | "_my_agent/run/tools" | "_my_agent/run/provider"
+    ) {
+        let params: agent_daemon_protocol::params::RunReadParams = parse(request.params.clone())?;
+        let method = match request.method.as_str() {
+            "_my_agent/run/tools" => "run.tools",
+            "_my_agent/run/provider" => "run.provider_attempts",
+            _ => "run.read",
+        };
+        return Ok(Some(rpc(client, method, json!(params)).await?));
+    }
+    if request.method == "_my_agent/run/events" {
+        let params: agent_daemon_protocol::params::RunEventsParams = parse(request.params.clone())?;
+        return Ok(Some(rpc(client, "run.events", json!(params)).await?));
+    }
+    if request.method == "_my_agent/artifacts/read" {
+        let params: agent_daemon_protocol::params::ArtifactReadParams =
+            parse(request.params.clone())?;
+        return Ok(Some(rpc(client, "artifacts.read", json!(params)).await?));
+    }
+    if request.method == "_my_agent/outbox/read" {
+        let params: agent_daemon_protocol::params::OutboxReadParams =
+            parse(request.params.clone())?;
+        return Ok(Some(rpc(client, "outbox.readback", json!(params)).await?));
+    }
+    if request.method == "_my_agent/identity/read" {
+        if request.params != json!({}) {
+            return Err(invalid("身份读回不接受主体或作用域参数"));
+        }
+        return Ok(Some(rpc(client, "identity.readback", json!({})).await?));
     }
     let control = control.ok_or_else(|| invalid("缺少 ACP control"))?;
     if request.method == "session/new" {
@@ -462,7 +522,7 @@ async fn read_snapshot(
     let snapshot = client
         .read_session(&SessionKey(id.into()), HistoryReadMode::Canonical)
         .await
-        .map_err(internal)?;
+        .map_err(client_error)?;
     if control.expected_lifetime.as_ref() != Some(&snapshot.session_lifetime_id) {
         return Err(invalid("ACP session lifetime 已过期"));
     }
@@ -826,9 +886,23 @@ fn prompt_text(blocks: &[v2::ContentBlock]) -> Result<String, Error> {
     }
 }
 async fn rpc(client: &DaemonClient, method: &str, params: Value) -> Result<Value, Error> {
-    agent_entry_support::rpc::request_result(client, method, params)
+    client
+        .request_result(method, params)
         .await
-        .map_err(internal)
+        .map_err(client_error)
+}
+fn client_error(error: agent_daemon_client::ClientError) -> Error {
+    match error {
+        agent_daemon_client::ClientError::Rpc(error) => {
+            let mut projected =
+                Error::new(i32::try_from(error.code).unwrap_or(-32603), error.message);
+            if let Some(data) = error.data {
+                projected = projected.data(data);
+            }
+            projected
+        }
+        error => internal(error),
+    }
 }
 fn invalid(error: impl std::fmt::Display) -> Error {
     Error::invalid_params().data(error.to_string())

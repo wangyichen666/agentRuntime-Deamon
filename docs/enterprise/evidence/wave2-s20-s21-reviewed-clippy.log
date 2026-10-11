@@ -1,0 +1,51 @@
+    Checking agent-core v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/core)
+    Checking agent-daemon-protocol v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-protocol)
+    Checking agent-storage-ports v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-ports)
+    Checking agent-context v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/context)
+    Checking agent-sandbox v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/sandbox)
+    Checking agent-memory v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/memory)
+    Checking agent-policy v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/policy)
+    Checking agent-identity v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/identity)
+    Checking agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+    Checking agent-artifact v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/artifact)
+    Checking agent-storage-postgres v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage-postgres)
+    Checking agent-daemon-client v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon-client)
+    Checking agent-entry-support v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/entry-support)
+error: variables can be used directly in the `format!` string
+   --> crates/storage/src/compact_runs.rs:322:51
+    |
+322 |         || record.request_id != RequestId::String(format!("compact:{}", operation))
+    |                                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+    = note: `-D clippy::uninlined-format-args` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::uninlined_format_args)]`
+help: change this to
+    |
+322 -         || record.request_id != RequestId::String(format!("compact:{}", operation))
+322 +         || record.request_id != RequestId::String(format!("compact:{operation}"))
+    |
+
+error: items after a test module
+   --> crates/storage/src/requests.rs:393:1
+    |
+393 |   mod tests {
+    |   ^^^^^^^^^
+...
+641 | / pub(crate) fn execution_source_in(
+642 | |     db: &rusqlite::Connection,
+643 | |     owner: &ExactOwner,
+644 | | ) -> Result<RunContextReadback, RuntimeError> {
+    | |_____________________________________________^
+...
+654 |   impl RunStore {
+    |   ^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#items_after_test_module
+    = note: `-D clippy::items-after-test-module` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::items_after_test_module)]`
+    = help: move the items to before the test module was defined
+
+error: could not compile `agent-storage` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `agent-storage` (lib test) due to 2 previous errors

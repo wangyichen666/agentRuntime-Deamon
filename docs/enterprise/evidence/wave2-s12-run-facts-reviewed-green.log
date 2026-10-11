@@ -1,0 +1,18 @@
+   Compiling agent-storage v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/storage)
+   Compiling agent-runtime v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/runtime)
+   Compiling agent-daemon v0.1.0 (/Users/pilot/Documents/myproject/agent-rust/crates/daemon)
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 25.37s
+     Running tests/run_fact_contract.rs (target/debug/deps/run_fact_contract-4c047fc82807f7a0)
+
+running 7 tests
+test provider_history_does_not_trust_inner_json_owner_fields ... ok
+test run_fact_readback_never_reveals_foreign_content ... ok
+test all_run_fact_ports_filter_every_scope_dimension_and_absent_before_reading ... ok
+test run_fact_continuation_link_cannot_reveal_another_scope_or_missing_run ... ok
+test damaged_stamp_and_database_fault_are_typed_and_never_leak_sql ... ok
+test run_fact_projection_reuses_original_facts_after_restart_and_retired_lifetime ... ok
+test run_readback_rejects_byte_and_row_overflow_and_corrupted_provider_identity ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+

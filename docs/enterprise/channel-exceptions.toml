@@ -1,0 +1,41 @@
+# Wave 0 只冻结既有站点；禁止增加任何例外或每函数调用数。
+# 测试证明既有控制合同及检测有效，不能证明这些队列已具备内存上限。
+[[exception]]
+file = "crates/gateway/src/serve.rs"
+function = "handle_websocket"
+count = 1
+reason = "遗留 WS 输出队列；逐帧限制不限制累计队列。下一纵向切片改有界 detach。"
+document = "docs/enterprise/channel-budget.md"
+test = "websocket_requires_token_and_supports_interactive_approval"
+
+[[exception]]
+file = "crates/daemon/src/handlers.rs"
+function = "handle_chat_send_inner"
+count = 1
+reason = "遗留执行事件桥；终态已由 SQLite 结算，事件队列尚无累计预算。"
+document = "docs/enterprise/channel-budget.md"
+test = "committed_terminal_survives_real_daemon_restart_and_uncertain_run_is_not_replayed"
+
+[[exception]]
+file = "crates/runtime/src/loop_engine.rs"
+function = "request_model_once"
+count = 1
+reason = "遗留 Provider 事件桥；整批工具失败关闭合同须保留，不能静默丢事件。"
+document = "docs/enterprise/channel-budget.md"
+test = "deferred_tools_reject_direct_unfound_fuzzy_and_invalid_nested_schema_without_execution"
+
+[[exception]]
+file = "crates/runtime/src/tool_calls.rs"
+function = "collect_response"
+count = 1
+reason = "遗留摘要 assembler 桥；有界化必须同步改 Provider wire producer 与完整响应结算。"
+document = "docs/enterprise/channel-budget.md"
+test = "rejects_duplicate_completion_and_incomplete_eof"
+
+[[exception]]
+file = "crates/daemon-client/src/lib.rs"
+function = "request_raw_with_id"
+count = 1
+reason = "仅非默认 test-transport 的内存 fixture 分支；正常 UDS 路径不构造此通道。"
+document = "docs/enterprise/channel-budget.md"
+test = "reconnect_uses_cursor_readback_without_replaying_mutation"

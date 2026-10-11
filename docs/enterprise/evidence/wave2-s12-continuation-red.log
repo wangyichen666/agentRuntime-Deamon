@@ -1,0 +1,22 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.62s
+     Running tests/run_fact_contract.rs (target/debug/deps/run_fact_contract-4c047fc82807f7a0)
+
+running 1 test
+test run_fact_continuation_link_cannot_reveal_another_scope_or_missing_run ... FAILED
+
+failures:
+
+---- run_fact_continuation_link_cannot_reveal_another_scope_or_missing_run stdout ----
+
+thread 'run_fact_continuation_link_cannot_reveal_another_scope_or_missing_run' panicked at tests/run_fact_contract.rs:452:9:
+损坏 continuation 不能跨域/丢失/自环：Ok(RunFactReadback { run: RunRecord { kind: Chat, run_id: RunId("run-1"), turn_id: TurnId("turn-1"), session_id: SessionKey("run-facts"), request_id: Number(1), status: Completed, last_seq: EventSeq(7), content: Some("私密输出"), error_code: None, error_message: None }, snapshot: None, view_stamp: Some(ViewStamp { schema_version: 1, session_key: SessionKey("run-facts"), session_lifetime_id: SessionLifetimeId("dc654b1261a22ce4b6d9c7633e49d8da"), snapshot_revision: SnapshotRevision(27), metadata_revision: SnapshotRevision(20), transcript_revision: TranscriptSeq(4), projection_generation: ProjectionGeneration(0), owner: Some(ExactOwner { session_key: SessionKey("run-facts"), session_lifetime_id: SessionLifetimeId("dc654b1261a22ce4b6d9c7633e49d8da"), run_id: RunId("run-1"), run_generation: RunGeneration(1), turn_id: TurnId("turn-1") }), event_seq: Some(EventSeq(7)), previous_visible_seq: Some(EventSeq(6)), terminal: true, interaction: None }), compact: None, continuation_parent_run_id: None, continuation_run_id: Some(RunId("run-2")) })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    run_fact_continuation_link_cannot_reveal_another_scope_or_missing_run
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.05s
+
+error: test failed, to rerun pass `--test run_fact_contract`

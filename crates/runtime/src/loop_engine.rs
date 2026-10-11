@@ -30,39 +30,369 @@ tokio::task_local! { static TOOL_CALL_ID: (String, usize); }
 
 #[derive(Clone)]
 struct ToolAuditContext {
-    store: Arc<dyn ControlRepository>,
+    store: Option<Arc<dyn ControlRepository>>,
     run_id: RunId,
     owner: Option<agent_core::ExactOwner>,
     next_message: Arc<AtomicU64>,
+    attempts: Option<(
+        agent_core::EnterpriseOwnerEnvelope,
+        Arc<dyn agent_storage_ports::RunAttemptRepository>,
+    )>,
+    tools: Option<Arc<dyn agent_storage_ports::RunToolRepository>>,
+    turns: Option<Arc<dyn agent_storage_ports::RunTurnRepository>>,
+    requests: Option<Arc<dyn agent_storage_ports::RunContextRepository>>,
+    discoveries: Option<Arc<dyn agent_storage_ports::RunDiscoveryRepository>>,
+    memories: Option<Arc<dyn agent_storage_ports::ScopedMemoryRepository>>,
 }
 
-pub async fn with_tool_audit<F: std::future::Future>(
+/// 原canonical Store的实际执行端口；只持有能力引用，不保存业务事实。
+#[derive(Clone)]
+pub struct NativeExecutionPorts {
+    pub attempts: Arc<dyn agent_storage_ports::RunAttemptRepository>,
+    pub tools: Arc<dyn agent_storage_ports::RunToolRepository>,
+    pub turns: Arc<dyn agent_storage_ports::RunTurnRepository>,
+    pub requests: Arc<dyn agent_storage_ports::RunContextRepository>,
+    pub discoveries: Arc<dyn agent_storage_ports::RunDiscoveryRepository>,
+    pub memories: Arc<dyn agent_storage_ports::ScopedMemoryRepository>,
+}
+struct NativeAudit {
+    envelope: agent_core::EnterpriseOwnerEnvelope,
+    attempts: Arc<dyn agent_storage_ports::RunAttemptRepository>,
+    tools: Arc<dyn agent_storage_ports::RunToolRepository>,
+    turns: Arc<dyn agent_storage_ports::RunTurnRepository>,
+    requests: Arc<dyn agent_storage_ports::RunContextRepository>,
+    discoveries: Arc<dyn agent_storage_ports::RunDiscoveryRepository>,
+    memories: Arc<dyn agent_storage_ports::ScopedMemoryRepository>,
+}
+pub fn with_tool_audit<F: std::future::Future>(
     store: Arc<dyn ControlRepository>,
     run_id: RunId,
     future: F,
-) -> F::Output {
+) -> impl std::future::Future<Output = F::Output> {
     let owner = store.run_owner(&run_id).ok();
-    TOOL_AUDIT
-        .scope(
-            ToolAuditContext {
-                store,
-                run_id,
-                owner,
-                next_message: Arc::new(AtomicU64::new(0)),
-            },
-            future,
-        )
-        .await
+    tool_audit_scope(Some(store), run_id, owner, None, Box::pin(future))
+}
+pub fn with_tool_audit_owned<F: std::future::Future>(
+    store: Arc<dyn ControlRepository>,
+    owner: agent_core::ExactOwner,
+    future: F,
+) -> impl std::future::Future<Output = F::Output> {
+    tool_audit_scope(
+        Some(store),
+        owner.run_id.clone(),
+        Some(owner),
+        None,
+        Box::pin(future),
+    )
+}
+/// 兼容调用名仍映射到同一native上下文；实际执行不携带同步Store。
+pub fn with_tool_audit_execution<F: std::future::Future>(
+    _legacy: Arc<dyn ControlRepository>,
+    envelope: agent_core::EnterpriseOwnerEnvelope,
+    ports: NativeExecutionPorts,
+    future: F,
+) -> impl std::future::Future<Output = F::Output> {
+    with_native_execution(envelope, ports, future)
+}
+
+pub fn with_native_execution<F: std::future::Future>(
+    envelope: agent_core::EnterpriseOwnerEnvelope,
+    ports: NativeExecutionPorts,
+    future: F,
+) -> impl std::future::Future<Output = F::Output> {
+    tool_audit_scope(
+        None,
+        envelope.owner.run_id.clone(),
+        Some(envelope.owner.clone()),
+        Some(NativeAudit {
+            envelope,
+            attempts: ports.attempts,
+            tools: ports.tools,
+            turns: ports.turns,
+            requests: ports.requests,
+            discoveries: ports.discoveries,
+            memories: ports.memories,
+        }),
+        Box::pin(future),
+    )
+}
+async fn tool_audit_scope<F: std::future::Future>(
+    store: Option<Arc<dyn ControlRepository>>,
+    run_id: RunId,
+    owner: Option<agent_core::ExactOwner>,
+    native: Option<NativeAudit>,
+    future: F,
+) -> F::Output {
+    let context = ToolAuditContext {
+        store,
+        run_id,
+        owner,
+        next_message: Arc::new(AtomicU64::new(0)),
+        attempts: native
+            .as_ref()
+            .map(|ports| (ports.envelope.clone(), ports.attempts.clone())),
+        tools: native.as_ref().map(|ports| ports.tools.clone()),
+        turns: native.as_ref().map(|ports| ports.turns.clone()),
+        discoveries: native.as_ref().map(|ports| ports.discoveries.clone()),
+        memories: native.as_ref().map(|ports| ports.memories.clone()),
+        requests: native.map(|ports| ports.requests),
+    };
+    TOOL_AUDIT.scope(context, future).await
+}
+
+impl ToolAuditContext {
+    fn legacy_store(&self) -> Result<&dyn ControlRepository> {
+        self.store
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("native执行缺领域端口，禁止退回同步存储"))
+    }
+
+    fn native_turns(
+        &self,
+    ) -> Option<(
+        &agent_core::EnterpriseOwnerEnvelope,
+        &Arc<dyn agent_storage_ports::RunTurnRepository>,
+    )> {
+        self.attempts
+            .as_ref()
+            .zip(self.turns.as_ref())
+            .map(|((envelope, _), turns)| (envelope, turns))
+    }
+    async fn reject_batch(
+        &self,
+        round: usize,
+        calls: &[ToolCall],
+        reason: &str,
+    ) -> Result<Vec<Message>> {
+        if let Some((envelope, turns)) = self.native_turns() {
+            Ok(turns
+                .reject_run_tool_batch(envelope, round, calls, reason)
+                .await
+                .map_err(RuntimeError::from)?)
+        } else {
+            Ok(self
+                .legacy_store()?
+                .reject_tool_batch(self.tool_owner()?, round, calls, reason)?)
+        }
+    }
+    async fn stage_assistant(&self, message: &Message) -> Result<()> {
+        if let Some((envelope, turns)) = self.native_turns() {
+            turns
+                .stage_run_assistant(envelope, message)
+                .await
+                .map_err(RuntimeError::from)?;
+        } else {
+            self.legacy_store()?
+                .stage_assistant(self.tool_owner()?, message)?;
+        }
+        Ok(())
+    }
+    async fn append_transcript(
+        &self,
+        operation: &str,
+        messages: &[Message],
+    ) -> Result<agent_core::TranscriptSeq> {
+        if let Some((envelope, turns)) = self.native_turns() {
+            Ok(turns
+                .append_run_transcript(envelope, operation, messages)
+                .await
+                .map_err(RuntimeError::from)?)
+        } else {
+            Ok(self
+                .legacy_store()?
+                .append_transcript(self.tool_owner()?, operation, messages)?)
+        }
+    }
+    fn native_tools(
+        &self,
+    ) -> Option<(
+        &agent_core::EnterpriseOwnerEnvelope,
+        &Arc<dyn agent_storage_ports::RunToolRepository>,
+    )> {
+        self.attempts
+            .as_ref()
+            .zip(self.tools.as_ref())
+            .map(|((envelope, _), tools)| (envelope, tools))
+    }
+    fn tool_owner(&self) -> Result<&agent_core::ExactOwner> {
+        self.owner
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("缺少工具 owner"))
+    }
+    async fn prepare_batch(
+        &self,
+        round: usize,
+        calls: &[(ToolCall, String, String, bool)],
+        descriptors: &[agent_core::ToolDescriptor],
+    ) -> Result<()> {
+        if let Some((envelope, tools)) = self.native_tools() {
+            tools
+                .prepare_run_tool_batch(envelope, round, calls, descriptors)
+                .await
+                .map_err(RuntimeError::from)?;
+        } else {
+            self.legacy_store()?.prepare_owned_tool_batch(
+                self.tool_owner()?,
+                round,
+                calls,
+                descriptors,
+            )?;
+        }
+        Ok(())
+    }
+    async fn start_tool(&self, round: usize, id: &str) -> Result<()> {
+        if let Some((envelope, tools)) = self.native_tools() {
+            tools
+                .start_run_tool(envelope, round, id)
+                .await
+                .map_err(RuntimeError::from)?;
+        } else {
+            self.legacy_store()?.start_tool(&self.run_id, round, id)?;
+        }
+        Ok(())
+    }
+    async fn close_exchange(&self, round: usize, messages: &[Message]) -> Result<()> {
+        if let Some((envelope, tools)) = self.native_tools() {
+            tools
+                .close_run_tool_exchange(envelope, round, messages)
+                .await
+                .map_err(RuntimeError::from)?;
+        } else {
+            self.legacy_store()?
+                .close_tool_exchange(self.tool_owner()?, round, messages)?;
+        }
+        Ok(())
+    }
+    async fn finish_batch(&self, round: usize) -> Result<()> {
+        if let Some((envelope, tools)) = self.native_tools() {
+            tools
+                .finish_run_tool_batch(envelope, round)
+                .await
+                .map_err(RuntimeError::from)?;
+        } else {
+            self.legacy_store()?
+                .finish_tool_batch(&self.run_id, round)?;
+        }
+        Ok(())
+    }
+    async fn artifact_binding(&self) -> Result<Option<String>> {
+        if let Some((envelope, tools)) = self.native_tools() {
+            Ok(tools
+                .read_tool_artifact_binding(envelope)
+                .await
+                .map_err(RuntimeError::from)?)
+        } else {
+            Ok(self
+                .legacy_store()?
+                .run_snapshot(&self.run_id)?
+                .and_then(|s| s.artifact_store_id))
+        }
+    }
+    async fn complete_file(
+        &self,
+        completion: &agent_core::ToolArtifactCompletion,
+        content: String,
+    ) -> Result<String> {
+        if let Some((envelope, tools)) = self.native_tools() {
+            Ok(tools
+                .finish_file_tool_output(envelope, completion, content)
+                .await
+                .map_err(RuntimeError::from)?)
+        } else {
+            Ok(self.legacy_store()?.finish_owned_tool_output(
+                self.tool_owner()?,
+                completion,
+                &content,
+            )?)
+        }
+    }
+
+    async fn start_attempt(&self, attempt: &ProviderAttempt) -> Result<()> {
+        if let Some((envelope, repository)) = &self.attempts {
+            repository
+                .start_run_attempt(envelope, attempt)
+                .await
+                .map_err(RuntimeError::from)?;
+        } else {
+            self.legacy_store()?.start_provider_attempt(attempt)?;
+        }
+        Ok(())
+    }
+    async fn finish_attempt(&self, attempt: &ProviderAttempt) -> Result<()> {
+        if let Some((envelope, repository)) = &self.attempts {
+            repository
+                .finish_run_attempt(envelope, attempt)
+                .await
+                .map_err(RuntimeError::from)?;
+        } else {
+            self.legacy_store()?.finish_provider_attempt(attempt)?;
+        }
+        Ok(())
+    }
+    async fn provider_event(&self, event: &str, data: &serde_json::Value) -> Result<()> {
+        if let Some((envelope, repository)) = &self.attempts {
+            repository
+                .append_provider_event(envelope, event, data)
+                .await
+                .map_err(RuntimeError::from)?;
+        } else {
+            self.legacy_store()?
+                .append_event(&self.run_id, event, data)?;
+        }
+        Ok(())
+    }
+    async fn usage(&self) -> Result<agent_core::ProviderUsage> {
+        if let Some((envelope, repository)) = &self.attempts {
+            Ok(repository
+                .read_attempt_usage(envelope)
+                .await
+                .map_err(RuntimeError::from)?)
+        } else {
+            Ok(self.legacy_store()?.provider_usage(&self.run_id)?)
+        }
+    }
 }
 
 pub fn current_session_repository() -> Option<(Arc<dyn ControlRepository>, agent_core::ExactOwner)>
 {
     TOOL_AUDIT
+        .try_with(|audit| audit.store.clone().zip(audit.owner.clone()))
+        .ok()
+        .flatten()
+}
+/// 原准入owner的只读引用副本；native不必持有旧同步聚合接口。
+pub fn current_execution_owner() -> Option<agent_core::ExactOwner> {
+    TOOL_AUDIT
+        .try_with(|audit| audit.owner.clone())
+        .ok()
+        .flatten()
+}
+/// 一次读取原冻结设置，工具不从当前session head重建执行政策。
+pub async fn current_run_settings() -> Result<Option<agent_core::RunSnapshot>> {
+    if let Some((envelope, ports)) = current_native_context() {
+        return Ok(Some(
+            ports
+                .read_execution_settings(&envelope)
+                .await
+                .map_err(RuntimeError::from)?,
+        ));
+    }
+    if let Some((repository, owner)) = current_session_repository() {
+        return Ok(repository.run_snapshot(&owner.run_id)?);
+    }
+    Ok(None)
+}
+
+/// 原 task-local 的固定准入上下文；不重读后来 owner、不创建第二份状态。
+pub fn current_turn_repository() -> Option<(
+    agent_core::EnterpriseOwnerEnvelope,
+    Arc<dyn agent_storage_ports::RunTurnRepository>,
+)> {
+    TOOL_AUDIT
         .try_with(|audit| {
             audit
-                .owner
-                .clone()
-                .map(|owner| (audit.store.clone(), owner))
+                .native_turns()
+                .map(|(envelope, turns)| (envelope.clone(), turns.clone()))
         })
         .ok()
         .flatten()
@@ -172,9 +502,23 @@ pub struct LoopEngine {
     strict_token_budget: bool,
     stream_token_budget: Option<u64>,
     route: Option<FrozenRoute>,
+    artifact_service: Option<Arc<agent_artifact::ArtifactService>>,
 }
 
 impl LoopEngine {
+    pub fn with_artifact_service(
+        mut self,
+        service: Option<Arc<agent_artifact::ArtifactService>>,
+    ) -> Self {
+        self.artifact_service = service;
+        self
+    }
+    pub fn artifact_store_id(&self) -> Option<String> {
+        self.artifact_service
+            .as_ref()
+            .map(|service| service.store_id())
+    }
+
     pub fn stop_resources(&self) {
         self.tools.stop_resources();
     }
@@ -197,6 +541,7 @@ impl LoopEngine {
             strict_token_budget: false,
             stream_token_budget: None,
             route: None,
+            artifact_service: None,
         }
     }
 
@@ -217,6 +562,7 @@ impl LoopEngine {
             strict_token_budget: false,
             stream_token_budget: None,
             route: None,
+            artifact_service: None,
         }
     }
 
@@ -224,6 +570,24 @@ impl LoopEngine {
         let mut engine = self.clone();
         engine.tools = self.tools.frozen()?;
         Ok(engine)
+    }
+    pub fn with_installed_generation(&self,g:&agent_core::InstalledGeneration)->Result<Self> {
+        let c=&g.effective.config;
+        let mut copy=self.clone();copy.tools=self.tools.registry_subset(g)?;
+        let mut prompt=c.system_prompt.clone();for (coordinate,text) in &g.skill_materials {prompt.push_str(&format!("\n<skill coordinate={coordinate:?}>\n{text}\n</skill>"));}
+        anyhow::ensure!(prompt.len()<=98304,"注册表prompt超过预算");copy.context=copy.context.with_registry_prompt(prompt).with_token_budget(self.context.token_budget().min(c.resources.context_tokens as usize));
+        copy.round_limit=Some(self.round_limit.map_or(c.resources.max_rounds as usize,|n|n.min(c.resources.max_rounds as usize)));
+        Ok(copy)
+    }
+    /// 工作流ToolCall直接复用原工具准入、审批、收据与交换提交，不发模型请求。
+    pub async fn run_direct_tool(&self,history:&mut Vec<Message>,input:String,call:crate::provider::ToolCall,events:Option<mpsc::UnboundedSender<AgentEvent>>,cancellation:CancellationToken,trace_request_id:Option<String>)->Result<String>{
+        let round=1;let calls=vec![call];self.record(history,Message::text(Role::User,input)).await?;
+        self.tools.admit_all(&calls).await?;for call in &calls{crate::hooks::current(agent_core::HookEvent::PreTool,&format!("{round}:{}",call.id),serde_json::json!({"tool":call.name,"arguments_sha256":format!("{:x}",Sha256::digest(call.arguments.to_string().as_bytes()))}),&cancellation).await?;}
+        let audit=TOOL_AUDIT.try_with(Clone::clone).map_err(|_|anyhow::anyhow!("工作流工具缺原native收据上下文"))?;
+        if let Err(error)=self.tools.preflight_all(&calls,round).await{history.extend(audit.reject_batch(round,&calls,&error.to_string()).await?);return Err(error.into())}
+        if cancellation.is_cancelled(){return Err(RuntimeError::Cancelled.into())}let mut descriptors=Vec::new();for call in &calls{descriptors.push(self.tools.descriptor(call).await?)}
+        let prepared=calls.iter().zip(&descriptors).map(|(call,d)|(call.clone(),match d.effect{agent_core::ToolEffect::Read=>"read",agent_core::ToolEffect::Write=>"write",agent_core::ToolEffect::External=>"external_side_effect"}.into(),format!("{:x}",Sha256::digest(call.arguments.to_string().as_bytes())),matches!(d.replay,agent_core::ReplayPolicy::Safe))).collect::<Vec<_>>();audit.prepare_batch(round,&prepared,&descriptors).await?;
+        let results=self.execute_in_waves(&calls,&descriptors,events,&cancellation,round,trace_request_id.as_deref()).await?;let mut exchange=vec![Message::assistant_tool_calls(calls)];let mut failed=false;let mut content=String::new();for result in results{failed|=result.failed;content=result.message.content.clone().unwrap_or_default();exchange.push(result.message)}audit.close_exchange(round,&exchange).await?;history.extend(exchange);audit.finish_batch(round).await?;anyhow::ensure!(!failed,"原native工具执行失败，保留已确认或未知收据");Ok(content)
     }
     pub fn tool_specs(&self) -> Vec<crate::provider::ToolSpec> {
         self.tools.specs()
@@ -240,6 +604,7 @@ impl LoopEngine {
             strict_token_budget: self.strict_token_budget,
             stream_token_budget: self.stream_token_budget,
             route: self.route.clone(),
+            artifact_service: self.artifact_service.clone(),
         }
     }
 
@@ -387,6 +752,12 @@ impl LoopEngine {
         } else {
             Vec::new()
         };
+        let billing_limits=current_run_settings().await?.and_then(|s|s.billing_policy).map(|f|f.policy.limits);
+        let effective_round_limit=match (self.round_limit,billing_limits.as_ref()) {
+            (Some(limit),Some(b))=>Some(limit.min(b.max_rounds as usize)),
+            (None,Some(b))=>Some(b.max_rounds as usize),
+            (limit,None)=>limit,
+        };
         let mut transient_messages = Vec::new();
         let mut repeat_detector = RepeatDetector::default();
         let mut repetition_reminder = false;
@@ -394,7 +765,7 @@ impl LoopEngine {
         loop {
             turn_state.round = turn_state.round.saturating_add(1);
             let round = turn_state.round;
-            if let Some(round_limit) = self.round_limit
+            if let Some(round_limit) = effective_round_limit
                 && round > round_limit
             {
                 bail!("ReAct 循环达到最大轮次 {round_limit}，已停止");
@@ -412,8 +783,9 @@ impl LoopEngine {
             let mut request_messages = self
                 .prepare_context(history, &specs, &cancellation, None, round)
                 .await?;
-            self.insert_delegation_context(&mut request_messages)?;
-            if let Some(memory) = self.recall_memory_segment(history)? {
+            self.insert_delegation_context(&mut request_messages)
+                .await?;
+            if let Some(memory) = self.recall_memory_segment(history).await? {
                 insert_retrieved(&mut request_messages, memory);
             }
             request_messages.extend(transient_messages.clone());
@@ -472,10 +844,11 @@ impl LoopEngine {
                 turn_state.estimated_total_tokens = turn_state
                     .estimated_total_tokens
                     .saturating_add(estimate_input.saturating_add(estimate_output));
-                let usage = TOOL_AUDIT
-                    .try_with(|audit| audit.store.provider_usage(&audit.run_id))
-                    .ok()
-                    .transpose()?;
+                let audit = TOOL_AUDIT.try_with(Clone::clone).ok();
+                let usage = match audit {
+                    Some(audit) => Some(audit.usage().await?),
+                    None => None,
+                };
                 let measured = usage.map_or(0, |usage| {
                     usage
                         .input_tokens
@@ -532,7 +905,7 @@ impl LoopEngine {
                         }
                         continue;
                     }
-                    if let Err(error) = self.tools.admit_all(&calls) {
+                    if let Err(error) = self.tools.admit_all(&calls).await {
                         turn_state.consecutive_tool_failures =
                             turn_state.consecutive_tool_failures.saturating_add(1);
                         self.record(
@@ -570,15 +943,7 @@ impl LoopEngine {
                             turn_state.consecutive_tool_failures.saturating_add(1);
                         let reason = format!("整批预检拒绝，未启动任何副作用：{error}");
                         if let Ok(audit) = TOOL_AUDIT.try_with(Clone::clone) {
-                            let owner = audit
-                                .owner
-                                .as_ref()
-                                .ok_or_else(|| anyhow::anyhow!("缺少拒绝批次 owner"))?;
-                            history.extend(
-                                audit
-                                    .store
-                                    .reject_tool_batch(owner, round, &calls, &reason)?,
-                            );
+                            history.extend(audit.reject_batch(round, &calls, &reason).await?);
                         } else {
                             self.record(history, Message::assistant_tool_calls(calls.clone()))
                                 .await?;
@@ -594,12 +959,16 @@ impl LoopEngine {
                     if cancellation.is_cancelled() {
                         return Err(RuntimeError::Cancelled.into());
                     }
+                    let mut descriptors = Vec::with_capacity(calls.len());
+                    for call in &calls {
+                        descriptors.push(self.tools.descriptor(call).await?);
+                    }
                     let audit = TOOL_AUDIT.try_with(Clone::clone).ok();
                     if let Some(audit) = &audit {
                         let prepared = calls
                             .iter()
-                            .map(|call| {
-                                let descriptor = self.tools.descriptor(call)?;
+                            .zip(&descriptors)
+                            .map(|(call, descriptor)| {
                                 let effect = match descriptor.effect {
                                     agent_core::ToolEffect::Read => "read",
                                     agent_core::ToolEffect::Write => "write",
@@ -617,18 +986,7 @@ impl LoopEngine {
                                 ))
                             })
                             .collect::<Result<Vec<_>>>()?;
-                        audit.store.prepare_owned_tool_batch(
-                            audit
-                                .owner
-                                .as_ref()
-                                .ok_or_else(|| anyhow::anyhow!("缺少 batch owner"))?,
-                            round,
-                            &prepared,
-                            &calls
-                                .iter()
-                                .map(|call| self.tools.descriptor(call))
-                                .collect::<Result<Vec<_>>>()?,
-                        )?;
+                        audit.prepare_batch(round, &prepared, &descriptors).await?;
                     }
                     let mut round_state = agent_core::RoundState {
                         tool_calls: calls.clone(),
@@ -640,6 +998,7 @@ impl LoopEngine {
                     let results = self
                         .execute_in_waves(
                             &round_state.tool_calls,
+                            &descriptors,
                             events.clone(),
                             &cancellation,
                             round,
@@ -659,15 +1018,9 @@ impl LoopEngine {
                         fingerprints.push(result.fingerprint);
                     }
                     if let Some(audit) = &audit {
-                        let owner = audit
-                            .owner
-                            .as_ref()
-                            .ok_or_else(|| anyhow::anyhow!("缺少 tool batch owner"))?;
-                        audit.store.close_tool_exchange(
-                            owner,
-                            round,
-                            &round_state.closed_exchange,
-                        )?;
+                        audit
+                            .close_exchange(round, &round_state.closed_exchange)
+                            .await?;
                         history.extend(round_state.closed_exchange);
                     } else {
                         for message in round_state.closed_exchange {
@@ -675,7 +1028,7 @@ impl LoopEngine {
                         }
                     }
                     if let Some(audit) = &audit {
-                        audit.store.finish_tool_batch(&audit.run_id, round)?;
+                        audit.finish_batch(round).await?;
                     }
                     let repeat_count = repeat_detector.observe(fingerprints);
                     if repeat_count == REPETITION_THRESHOLD {
@@ -758,7 +1111,8 @@ impl LoopEngine {
         operation: Option<&str>,
         round: usize,
     ) -> Result<Vec<Message>> {
-        let Some((store, owner)) = current_session_repository() else {
+        let legacy = current_session_repository();
+        let Some(owner) = current_execution_owner() else {
             let mut projected = history.to_vec();
             let before = self.context.compose(&projected).await;
             if self
@@ -775,22 +1129,28 @@ impl LoopEngine {
             }
             return Ok(self.context.compose(&projected).await);
         };
+        let store = legacy.as_ref().map(|(store, _)| store);
+        let native = current_native_context();
         if let Some(operation) = operation {
-            if store.compact_result(&owner, operation, None)?.is_some() {
-                let fresh = store.session_snapshot(&owner.session_key)?;
-                return Ok(self
-                    .context
-                    .compose(&store.context_projection(&fresh)?.messages)
-                    .await);
+            let installed = if let Some((envelope, ports)) = &native {
+                ports
+                    .read_compaction_result(envelope, operation, None)
+                    .await
+                    .map_err(RuntimeError::from)?
+            } else {
+                legacy_context_store(store)?.compact_result(&owner, operation, None)?
+            };
+            if installed.is_some() {
+                let fresh = execution_context(store, &owner, native.as_ref()).await?;
+                return Ok(self.context.compose(&fresh.projection.messages).await);
             }
         }
-        let snapshot = store.session_snapshot(&owner.session_key)?;
-        let projection = store.context_projection(&snapshot)?;
+        let read = execution_context(store, &owner, native.as_ref()).await?;
+        let snapshot = read.snapshot;
+        let projection = read.projection;
+        let read_only = read.read_only;
         let mut projected = projection.messages;
         let before = self.context.compose(&projected).await;
-        let read_only = store
-            .run_snapshot(&owner.run_id)?
-            .is_some_and(|s| s.context_read_only);
         if !read_only
             && !self.strict_token_budget
             && (operation.is_some()
@@ -833,11 +1193,18 @@ impl LoopEngine {
                 owner,
                 source,
             };
-            store.begin_compact(&intent)?;
+            if let Some((envelope, ports)) = &native {
+                ports
+                    .begin_compaction(envelope, &intent)
+                    .await
+                    .map_err(RuntimeError::from)?;
+            } else {
+                legacy_context_store(store)?.begin_compact(&intent)?;
+            }
             if let Err(error)=crate::hooks::current(agent_core::HookEvent::PreCompact,&intent.operation,
                 serde_json::json!({"source_revision":intent.source.source_end,"projection_generation":intent.source.generation}),cancellation).await {
                 let outcome=if cancellation.is_cancelled() {"cancelled"} else {"rejected"};
-                store.settle_compact(&intent,None,outcome)?;
+                settle_execution_compact(store,native.as_ref(),&intent,None,outcome).await?;
                 crate::hooks::current(agent_core::HookEvent::PostCompact,&intent.operation,serde_json::json!({"outcome":outcome}),cancellation).await?;
                 return Err(error);
             }
@@ -845,21 +1212,33 @@ impl LoopEngine {
             let summary = self
                 .context
                 .with_summary_assembler(Arc::new(move |messages| {
-                    engine.assemble_provider_request(
-                        messages,
-                        &[],
-                        round,
-                        0,
-                        &engine.provider,
-                        agent_core::ProviderRequestPurpose::CompactSummary,
-                    )
+                    let engine = engine.clone();
+                    Box::pin(async move {
+                        engine
+                            .assemble_provider_request(
+                                &messages,
+                                &[],
+                                round,
+                                0,
+                                &engine.provider,
+                                agent_core::ProviderRequestPurpose::CompactSummary,
+                            )
+                            .await
+                    })
                 }));
             match summary
                 .compact_candidate(&projected, cancellation.cancelled(), operation.is_some())
                 .await
             {
                 Ok(Some((replacement, mode))) => {
-                    store.settle_compact(&intent, Some(&replacement), &mode)?;
+                    settle_execution_compact(
+                        store,
+                        native.as_ref(),
+                        &intent,
+                        Some(&replacement),
+                        &mode,
+                    )
+                    .await?;
                     crate::hooks::current(
                         agent_core::HookEvent::PostCompact,
                         &intent.operation,
@@ -869,7 +1248,8 @@ impl LoopEngine {
                     .await?;
                 }
                 Ok(None) => {
-                    store.settle_compact(&intent, None, "no_gain")?;
+                    settle_execution_compact(store, native.as_ref(), &intent, None, "no_gain")
+                        .await?;
                     crate::hooks::current(
                         agent_core::HookEvent::PostCompact,
                         &intent.operation,
@@ -884,7 +1264,9 @@ impl LoopEngine {
                     } else {
                         "failed"
                     };
-                    store.settle_compact(
+                    settle_execution_compact(
+                        store,
+                        native.as_ref(),
                         &intent,
                         None,
                         if cancellation.is_cancelled() {
@@ -892,7 +1274,8 @@ impl LoopEngine {
                         } else {
                             "summary_failed"
                         },
-                    )?;
+                    )
+                    .await?;
                     crate::hooks::current(
                         agent_core::HookEvent::PostCompact,
                         &intent.operation,
@@ -906,31 +1289,44 @@ impl LoopEngine {
                     return Err(error);
                 }
             }
-            let fresh = store.session_snapshot(&intent.owner.session_key)?;
-            projected = store.context_projection(&fresh)?.messages;
+            projected = execution_context(store, &intent.owner, native.as_ref())
+                .await?
+                .projection
+                .messages;
         } else if read_only && operation.is_some() {
             bail!("context_read_only 禁止 compact 安装");
         }
         Ok(self.context.compose(&projected).await)
     }
 
-    fn insert_delegation_context(&self, messages: &mut Vec<Message>) -> Result<()> {
-        if let Some((repository, owner)) = current_session_repository()
-            && let Some(context) = repository
+    async fn insert_delegation_context(&self, messages: &mut Vec<Message>) -> Result<()> {
+        let context = if let Some((envelope, ports)) = current_native_context() {
+            ports
+                .read_execution_context(&envelope)
+                .await
+                .map_err(RuntimeError::from)?
+                .frozen
+                .delegation_context
+        } else if let Some((repository, owner)) = current_session_repository() {
+            repository
                 .run_snapshot(&owner.run_id)?
                 .and_then(|s| s.delegation_context)
-        {
+        } else {
+            None
+        };
+        if let Some(context) = context {
             insert_retrieved(messages, agent_context::render_delegation(&context)?);
         }
         Ok(())
     }
 
-    fn recall_memory_segment(&self, history: &[Message]) -> Result<Option<Message>> {
-        let Some((repository, owner)) = current_session_repository() else {
+    async fn recall_memory_segment(&self, history: &[Message]) -> Result<Option<Message>> {
+        let Some(owner) = current_execution_owner() else {
             return Ok(None);
         };
-        let visibility = crate::memory::visibility_for(&*repository, &owner)?;
-        let snapshot = repository.run_snapshot(&owner.run_id)?;
+        let repository = current_session_repository().map(|(store, _)| store);
+        let (visibility, snapshot) =
+            crate::memory::current_memory_settings(repository.as_deref(), &owner).await?;
         let entry_budget = snapshot.as_ref().map_or(8, |s| s.memory_entry_budget);
         let token_budget = snapshot.as_ref().map_or(1024, |s| s.memory_token_budget);
         let query = history
@@ -941,12 +1337,14 @@ impl LoopEngine {
             .unwrap_or_default();
         let now = unix_time_ms() / 1000;
         let entries = agent_memory::rank_with_feedback(
-            repository.memory_candidates(&visibility)?,
+            crate::memory::current_memory_candidates(repository.as_deref(), &owner, &visibility)
+                .await?,
             &visibility,
             query,
             20,
             now,
-            &repository.memory_assessments(&visibility)?,
+            &crate::memory::current_memory_assessments(repository.as_deref(), &owner, &visibility)
+                .await?,
         );
         let segment = agent_memory::render_context(
             &entries,
@@ -960,7 +1358,7 @@ impl LoopEngine {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn assemble_provider_request(
+    async fn assemble_provider_request(
         &self,
         messages: &[Message],
         specs: &[crate::provider::ToolSpec],
@@ -981,10 +1379,38 @@ impl LoopEngine {
             .transpose()?
             .unwrap_or_else(|| provider.api_type().to_string());
         let repository = current_session_repository();
-        let source = repository
-            .as_ref()
-            .map(|(store, owner)| store.request_context_source(owner, route, &identity))
-            .transpose()?;
+        let native = TOOL_AUDIT
+            .try_with(|audit| {
+                audit
+                    .attempts
+                    .as_ref()
+                    .zip(audit.requests.as_ref())
+                    .map(|((envelope, _), requests)| (envelope.clone(), requests.clone()))
+            })
+            .ok()
+            .flatten();
+        let source = if let Some((envelope, requests)) = &native {
+            Some(
+                requests
+                    .read_run_request_source(envelope, route, &identity)
+                    .await
+                    .map_err(RuntimeError::from)?,
+            )
+        } else if let Some((store, owner)) = &repository {
+            let (snapshot, revision, calibration) =
+                store.request_context_source(owner, route, &identity)?;
+            let frozen = store
+                .run_snapshot(&owner.run_id)?
+                .ok_or_else(|| anyhow::anyhow!("冻结 request snapshot 缺失"))?;
+            Some(agent_core::RunRequestSource {
+                snapshot,
+                revision,
+                calibration,
+                frozen,
+            })
+        } else {
+            None
+        };
         let budget = self
             .route
             .as_ref()
@@ -995,7 +1421,8 @@ impl LoopEngine {
                     .token_budget
                     .min(self.context.token_budget())
             }) as u64;
-        let context_source = if let Some((snapshot, _, _)) = &source {
+        let context_source = if let Some(source) = &source {
+            let snapshot = &source.snapshot;
             agent_core::ContextSource {
                 lifetime: snapshot.lifetime.clone(),
                 source_start: agent_core::TranscriptSeq(0),
@@ -1034,15 +1461,16 @@ impl LoopEngine {
             provider_identity: identity,
             images: capabilities.images,
             tool_calls: capabilities.tools,
-            budget: if repository.is_some() {
+            budget: if native.is_some() || repository.is_some() {
                 budget
             } else {
                 u64::MAX
             },
-            calibration: source.as_ref().and_then(|(_, _, calibration)| *calibration),
+            calibration: source.as_ref().and_then(|source| source.calibration),
         };
         let assembled = agent_context::assemble_request(&input)?;
-        if let (Some((store, owner)), Some((_, revision, _))) = (repository, source) {
+        if let (Some(owner), Some(source)) = (current_execution_owner(), source) {
+            let store = repository.as_ref().map(|(store, _)| store);
             let capture = agent_core::ProviderRequestCapture {
                 schema_version: 1,
                 capture_id: format!(
@@ -1053,19 +1481,23 @@ impl LoopEngine {
                 owner: owner.clone(),
                 round: u32::try_from(round)?,
                 candidate_index: u32::try_from(candidate_index)?,
-                snapshot_revision: revision,
+                snapshot_revision: source.revision,
                 input,
                 policy_fingerprint: format!(
                     "{:x}",
-                    Sha256::digest(serde_json::to_vec(
-                        &store
-                            .run_snapshot(&owner.run_id)?
-                            .ok_or_else(|| anyhow::anyhow!("冻结 request snapshot 缺失"))?
-                    )?)
+                    Sha256::digest(serde_json::to_vec(&source.frozen)?)
                 ),
                 request_digest: assembled.request_digest.clone(),
             };
-            store.record_provider_request(&capture, &assembled.envelope)?;
+            if let Some((envelope, requests)) = native {
+                requests
+                    .capture_run_request(&envelope, &capture, &assembled.envelope)
+                    .await
+                    .map_err(RuntimeError::from)?;
+            } else {
+                legacy_context_store(store)?
+                    .record_provider_request(&capture, &assembled.envelope)?;
+            }
             // 计完整预算后记录实际请求材料中的版本；不把召回候选记成曝光。
             for message in messages {
                 if message.role == Role::System
@@ -1081,12 +1513,15 @@ impl LoopEngine {
                             .and_then(|s| s.split_once('\n'))
                             .map_or("[]", |(_, json)| json),
                     )?;
-                    if let Err(error) = store.record_memory_exposures(
+                    if let Err(error) = crate::memory::current_memory_exposures(
+                        store.map(|store| store.as_ref()),
                         &owner,
                         &entries,
                         "context_prepared",
                         agent_memory::RECALL_POLICY,
-                    ) {
+                    )
+                    .await
+                    {
                         tracing::warn!(error=%error,"memory 曝光维护未写入");
                     }
                 }
@@ -1120,6 +1555,7 @@ impl LoopEngine {
                     None,
                     &mut AttemptObservation::default(),
                     0,
+                    None,
                 )
                 .await;
         };
@@ -1137,13 +1573,12 @@ impl LoopEngine {
             let circuit_key = candidate.circuit_key();
             if route.circuit.acquire(&circuit_key) == crate::provider::CircuitState::Open {
                 if let Ok(audit) = TOOL_AUDIT.try_with(Clone::clone) {
-                    audit.store.append_event(
-                        &audit.run_id,
+                    audit.provider_event(
                         "provider_circuit",
                         &serde_json::json!({
                             "candidate_index": candidate_index, "state": "open", "action": "skip",
                         }),
-                    )?;
+                    ).await?;
                 }
                 continue;
             }
@@ -1175,9 +1610,6 @@ impl LoopEngine {
                     finished_at_ms: None,
                     usage: None,
                 });
-                if let (Some(audit), Some(attempt)) = (&audit, &attempt) {
-                    audit.store.start_provider_attempt(attempt)?;
-                }
                 let mut observation = AttemptObservation::default();
                 let outcome = self
                     .request_model_once(
@@ -1191,13 +1623,15 @@ impl LoopEngine {
                         Some(&route.snapshot.timeout_policy),
                         &mut observation,
                         candidate_index,
+                        audit.as_ref().zip(attempt.as_ref()),
                     )
                     .await;
                 let result: std::result::Result<(), ProviderError> = match outcome {
                     Ok(_output) if observation.output_truncated => Err(ProviderError::new(
                         ProviderErrorKind::OutputTruncated,
                         "Provider 输出被截断",
-                    )),
+                    )
+                    .completed()),
                     Ok(output) if matches!(&output.response, Response::Text(text) if text.is_empty()) =>
                     {
                         let kind = if output.thinking.is_some() {
@@ -1205,7 +1639,7 @@ impl LoopEngine {
                         } else {
                             ProviderErrorKind::EmptyCompletion
                         };
-                        Err(ProviderError::new(kind, "Provider 未返回可用内容"))
+                        Err(ProviderError::new(kind, "Provider 未返回可用内容").completed())
                     }
                     Ok(output) => {
                         if matches!(output.response, Response::ToolAssemblyFailed(_)) {
@@ -1225,7 +1659,7 @@ impl LoopEngine {
                                 attempt.error_kind = Some(last_error.kind);
                                 attempt.diagnostic = Some(last_error.diagnostic.clone());
                             }
-                            finish_attempt(audit, attempt, &observation)?;
+                            finish_attempt(audit, attempt, &observation).await?;
                         }
                         let circuit_state = route.circuit.record(
                             &circuit_key,
@@ -1233,9 +1667,9 @@ impl LoopEngine {
                             false,
                         );
                         if let Some(audit) = &audit {
-                            audit.store.append_event(&audit.run_id, "provider_circuit", &serde_json::json!({
+                            audit.provider_event("provider_circuit", &serde_json::json!({
                                 "candidate_index": candidate_index, "state": format!("{circuit_state:?}").to_ascii_lowercase(),
-                            }))?;
+                            })).await?;
                         }
                         return Ok(output);
                     }
@@ -1251,8 +1685,11 @@ impl LoopEngine {
                     })),
                 };
                 let error = result.expect_err("失败分支");
-                if let (Some(audit), Some(attempt)) = (&audit, &mut attempt) {
-                    attempt.status = if error.kind == ProviderErrorKind::Cancelled {
+                let unknown = observation.dispatched && error.outcome_unknown();
+                if observation.attempt_started && let (Some(audit), Some(attempt)) = (&audit, &mut attempt) {
+                    attempt.status = if unknown {
+                        AttemptStatus::OutcomeUnknown
+                    } else if error.kind == ProviderErrorKind::Cancelled {
                         AttemptStatus::Cancelled
                     } else {
                         AttemptStatus::Failed
@@ -1260,7 +1697,11 @@ impl LoopEngine {
                     attempt.error_kind = Some(error.kind);
                     attempt.diagnostic = Some(error.diagnostic.clone());
                     attempt.retry_after_ms = error.diagnostic.retry_after_ms;
-                    finish_attempt(audit, attempt, &observation)?;
+                    finish_attempt(audit, attempt, &observation).await?;
+                }
+                // 终态事实先落库；结果未知时绝不进入 retry、fallback 或 overflow 重建。
+                if unknown {
+                    return Err(error.into());
                 }
                 let transient = matches!(
                     error.kind,
@@ -1271,9 +1712,9 @@ impl LoopEngine {
                 );
                 let circuit_state = route.circuit.record(&circuit_key, false, transient);
                 if let Some(audit) = &audit {
-                    audit.store.append_event(&audit.run_id, "provider_circuit", &serde_json::json!({
+                    audit.provider_event("provider_circuit", &serde_json::json!({
                         "candidate_index": candidate_index, "state": format!("{circuit_state:?}").to_ascii_lowercase(),
-                    }))?;
+                    })).await?;
                 }
                 // continuation 每轮仅一次请求；失败不额外消费未计量的 retry/摘要预算。
                 if self.strict_token_budget {
@@ -1282,18 +1723,18 @@ impl LoopEngine {
                 let safe = !observation.stream_committed && !observation.tool_call_seen;
                 if error.kind == ProviderErrorKind::ContextOverflow && !compacted && safe {
                     compacted = true;
-                    if let Some((store, owner)) = current_session_repository() {
-                        let readonly = store
-                            .run_snapshot(&owner.run_id)?
-                            .is_some_and(|s| s.context_read_only);
+                    if let Some(owner) = current_execution_owner() {
+                        let readonly = current_run_settings()
+                            .await?
+                            .is_some_and(|snapshot| snapshot.context_read_only);
                         if !readonly {
                             let operation =
                                 format!("{}:overflow:{round}:{candidate_index}", owner.run_id.0);
                             let mut rebuilt = self
                                 .prepare_context(&[], specs, cancellation, Some(&operation), round)
                                 .await?;
-                            self.insert_delegation_context(&mut rebuilt)?;
-                            if let Some(memory) = self.recall_memory_segment(messages)? {
+                            self.insert_delegation_context(&mut rebuilt).await?;
+                            if let Some(memory) = self.recall_memory_segment(messages).await? {
                                 insert_retrieved(&mut rebuilt, memory);
                             }
                             request_messages = rebuilt;
@@ -1326,10 +1767,10 @@ impl LoopEngine {
                 match decision {
                     RetryDecision::Retry(delay) => {
                         if let Some(audit) = &audit {
-                            audit.store.append_event(&audit.run_id, "provider_retry", &serde_json::json!({
+                            audit.provider_event("provider_retry", &serde_json::json!({
                                 "candidate_index": candidate_index, "round": round,
                                 "error_kind": last_error.kind, "delay_ms": delay.as_millis() as u64,
-                            }))?;
+                            })).await?;
                         }
                         prior_retries += 1;
                         tokio::select! {
@@ -1339,10 +1780,10 @@ impl LoopEngine {
                     }
                     RetryDecision::Fallback => {
                         if let Some(audit) = &audit {
-                            audit.store.append_event(&audit.run_id, "provider_fallback", &serde_json::json!({
+                            audit.provider_event("provider_fallback", &serde_json::json!({
                                 "from_candidate_index": candidate_index, "to_candidate_index": candidate_index + 1,
                                 "reason": last_error.kind,
-                            }))?;
+                            })).await?;
                         }
                         break;
                     }
@@ -1366,15 +1807,22 @@ impl LoopEngine {
         timeout: Option<&TimeoutPolicy>,
         observation: &mut AttemptObservation,
         candidate_index: usize,
+        starter:Option<(&ToolAuditContext,&ProviderAttempt)>,
     ) -> Result<ModelOutput> {
-        let prepared = self.assemble_provider_request(
-            messages,
-            specs,
-            round,
-            candidate_index,
-            provider,
-            agent_core::ProviderRequestPurpose::Model,
-        )?;
+        let prepared = self
+            .assemble_provider_request(
+                messages,
+                specs,
+                round,
+                candidate_index,
+                provider,
+                agent_core::ProviderRequestPurpose::Model,
+            )
+            .await?;
+        if let Some((audit,attempt))=starter {
+            audit.start_attempt(attempt).await?;
+            observation.attempt_started=true;
+        }
         let messages = &prepared.messages;
         let specs = &prepared.tools;
         let (provider_events, mut provider_rx) = mpsc::unbounded_channel();
@@ -1396,7 +1844,9 @@ impl LoopEngine {
             })
             .await;
         }
-        let request = provider.chat_stream(messages, specs, provider_events);
+        observation.dispatched = true;
+        let output_limit=current_run_settings().await?.and_then(|s|s.billing_policy).map(|f|f.policy.limits.max_output_tokens_per_attempt);
+        let request = provider.chat_stream_bounded(messages, specs, provider_events,output_limit);
         tokio::pin!(request);
         let mut assembler = ToolCallAssembler::default();
         let started_at = Instant::now();
@@ -1576,13 +2026,9 @@ impl LoopEngine {
 
     async fn record(&self, history: &mut Vec<Message>, message: Message) -> Result<()> {
         if let Ok(audit) = TOOL_AUDIT.try_with(Clone::clone) {
-            let owner = audit
-                .owner
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("缺少 exact run owner"))?;
             let sequence = audit.next_message.fetch_add(1, Ordering::Relaxed);
             if message.role == Role::Assistant && message.tool_calls.is_empty() {
-                audit.store.stage_assistant(owner, &message)?;
+                audit.stage_assistant(&message).await?;
             } else {
                 let operation = if message.role == Role::User && sequence == 0 {
                     "user-input".to_owned()
@@ -1590,8 +2036,8 @@ impl LoopEngine {
                     format!("message-{sequence}")
                 };
                 audit
-                    .store
-                    .append_transcript(owner, &operation, std::slice::from_ref(&message))?;
+                    .append_transcript(&operation, std::slice::from_ref(&message))
+                    .await?;
                 if operation == "user-input" && history.last() == Some(&message) {
                     return Ok(());
                 }
@@ -1617,26 +2063,45 @@ impl LoopEngine {
     async fn execute_in_waves(
         &self,
         calls: &[ToolCall],
+        descriptors: &[agent_core::ToolDescriptor],
         events: Option<mpsc::UnboundedSender<AgentEvent>>,
         cancellation: &CancellationToken,
         round: usize,
         trace_request_id: Option<&str>,
     ) -> Result<Vec<ToolExecution>> {
         let mut results = Vec::with_capacity(calls.len());
-        for wave in self.tools.scheduled_waves(calls)? {
-            let batch = stream::iter(wave.into_iter().map(|i| calls[i].clone()))
-                .map(|call| {
-                    let events = events.clone();
-                    async move {
-                        self.execute_one(&call, events, cancellation, round, trace_request_id)
-                            .await
-                    }
-                })
-                .buffered(8)
-                .collect::<Vec<Result<ToolExecution>>>()
-                .await;
+        for wave in ToolRegistry::schedule_descriptors(descriptors) {
+            let batch = stream::iter(
+                wave.into_iter()
+                    .map(|i| (calls[i].clone(), descriptors[i].clone())),
+            )
+            .map(|(call, descriptor)| {
+                let events = events.clone();
+                async move {
+                    self.execute_one(
+                        &call,
+                        &descriptor,
+                        events,
+                        cancellation,
+                        round,
+                        trace_request_id,
+                    )
+                    .await
+                }
+            })
+            .buffered(8)
+            .collect::<Vec<Result<ToolExecution>>>()
+            .await;
             // 所有已启动 future 都 join 后才传播错误，避免 detached 副作用。
-            results.extend(batch.into_iter().collect::<Result<Vec<_>>>()?);
+            let completed = batch.into_iter().collect::<Result<Vec<_>>>()?;
+            // 当前 wave 的已启动 future 全部 join；未知收据落库后不启动下一 wave。
+            if completed.iter().any(|result| result.outcome_unknown) {
+                return Err(agent_core::ToolOutcomeUnknown(
+                    "工具已接受但结果未知，停止后续执行".into(),
+                )
+                .into());
+            }
+            results.extend(completed);
         }
         Ok(results)
     }
@@ -1644,6 +2109,7 @@ impl LoopEngine {
     async fn execute_one(
         &self,
         call: &ToolCall,
+        descriptor: &agent_core::ToolDescriptor,
         events: Option<mpsc::UnboundedSender<AgentEvent>>,
         cancellation: &CancellationToken,
         round: usize,
@@ -1655,7 +2121,7 @@ impl LoopEngine {
         let started_at = Instant::now();
         let audit = TOOL_AUDIT.try_with(Clone::clone).ok();
         if let Some(audit) = &audit {
-            audit.store.start_tool(&audit.run_id, round, &call.id)?;
+            audit.start_tool(round, &call.id).await?;
         }
         debug!(
             tool_call_id = %call.id,
@@ -1712,28 +2178,54 @@ impl LoopEngine {
             }
         };
         if let Some(audit) = &audit {
-            let artifact_ref = audit.store.store_owned_output(
-                audit
-                    .owner
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("缺少 artifact owner"))?,
-                &result.content,
-            )?;
+            let owner = audit
+                .owner
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("缺少 artifact owner"))?;
             let original_bytes = result.content.len();
-            let descriptor = self.tools.descriptor(call)?;
             let original_digest = format!("{:x}", Sha256::digest(result.content.as_bytes()));
-            if result.content.len() > descriptor.output_budget.min(16384) {
+            let truncated = original_bytes > descriptor.output_budget.min(16384);
+            let preview = if truncated {
+                result.content.chars().take(4096).collect::<String>()
+            } else {
+                result.content.clone()
+            };
+            let completion = agent_core::ToolArtifactCompletion {
+                round,
+                call_id: call.id.clone(),
+                outcome: if outcome_unknown {
+                    "outcome_unknown"
+                } else if failed {
+                    "tool_error"
+                } else {
+                    "success"
+                }
+                .into(),
+                receipt: serde_json::json!({"success":!failed,"output":preview.chars().take(16384).collect::<String>(),"output_truncated":truncated,"output_sha256":original_digest,"error":error_message,"output_bytes":original_bytes,"duration_ms":started_at.elapsed().as_millis() as u64}),
+            };
+            let frozen_store = audit.artifact_binding().await?;
+            let artifact_ref = if let Some(store_id) = frozen_store {
+                let service = self
+                    .artifact_service
+                    .as_ref()
+                    .filter(|service| service.store_id() == store_id)
+                    .ok_or(agent_core::ArtifactError::StorageUnavailable)?;
+                service
+                    .complete(owner, &completion, &result.content)
+                    .await?
+            } else {
+                let content = if truncated {
+                    std::mem::take(&mut result.content)
+                } else {
+                    result.content.clone()
+                };
+                audit.complete_file(&completion, content).await?
+            };
+            if truncated {
                 result.content = format!(
-                    "{}\n[artifact_ref={artifact_ref};sha256={original_digest};大结果可通过 artifacts.read 分页读取]",
-                    result.content.chars().take(4096).collect::<String>()
+                    "{preview}\n[artifact_ref={artifact_ref};sha256={original_digest};大结果可通过 artifacts.read 分页读取]"
                 );
             }
-            audit.store.finish_tool(&audit.run_id, round, &call.id,
-                if outcome_unknown {"outcome_unknown"} else if failed { "tool_error" } else { "success" }, Some(&artifact_ref),
-                &serde_json::json!({"success": !failed, "output": result.content.chars().take(16384).collect::<String>(), "output_truncated": original_bytes > result.content.len(),
-                    "output_sha256": original_digest,
-                    "error": error_message, "output_bytes": original_bytes,
-                    "duration_ms": started_at.elapsed().as_millis() as u64}))?;
         }
         emit(
             &events,
@@ -1782,6 +2274,7 @@ impl LoopEngine {
             transient_messages: result.transient_messages,
             fingerprint,
             failed,
+            outcome_unknown,
             error: error_message,
         })
     }
@@ -1801,6 +2294,8 @@ struct ModelOutput {
 
 #[derive(Default)]
 struct AttemptObservation {
+    attempt_started:bool,
+    dispatched: bool,
     response_started: bool,
     first_event: bool,
     first_event_at_ms: Option<i64>,
@@ -1846,7 +2341,7 @@ impl AttemptObservation {
     }
 }
 
-fn finish_attempt(
+async fn finish_attempt(
     audit: &ToolAuditContext,
     attempt: &mut ProviderAttempt,
     observation: &AttemptObservation,
@@ -1855,7 +2350,7 @@ fn finish_attempt(
     attempt.first_event_at_ms = observation.first_event_at_ms;
     attempt.finished_at_ms = Some(unix_time_ms() as i64);
     attempt.usage = observation.usage.clone();
-    audit.store.finish_provider_attempt(attempt)?;
+    audit.finish_attempt(attempt).await?;
     Ok(())
 }
 
@@ -1952,6 +2447,7 @@ struct ToolExecution {
     transient_messages: Vec<Message>,
     fingerprint: ToolFingerprint,
     failed: bool,
+    outcome_unknown: bool,
     error: Option<String>,
 }
 
@@ -2008,6 +2504,146 @@ fn fingerprint_text(text: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     text.hash(&mut hasher);
     hasher.finish()
+}
+
+pub async fn publish_current_discovery(
+    receipt: &agent_core::ToolDiscoveryReceipt,
+) -> Result<agent_core::ToolDiscoveryReceipt> {
+    if let Some((envelope, repository)) = current_native_discovery() {
+        Ok(repository
+            .publish_run_discovery(&envelope, receipt)
+            .await
+            .map_err(RuntimeError::from)?)
+    } else {
+        let (repository, _) = current_session_repository()
+            .ok_or_else(|| anyhow::anyhow!("工具发现缺canonical owner"))?;
+        Ok(repository.publish_discovery(receipt)?)
+    }
+}
+pub async fn current_discovery_permission(generation: &str, name: &str) -> Result<bool> {
+    if let Some((envelope, repository)) = current_native_discovery() {
+        Ok(repository
+            .read_discovered_tool(&envelope, generation, name)
+            .await
+            .map_err(RuntimeError::from)?)
+    } else {
+        let (repository, owner) = current_session_repository()
+            .ok_or_else(|| anyhow::anyhow!("嵌套工具缺canonical owner"))?;
+        Ok(repository.discovered_tool(&owner, generation, name)?)
+    }
+}
+type NativeDiscoveryPort = (
+    agent_core::EnterpriseOwnerEnvelope,
+    Arc<dyn agent_storage_ports::RunDiscoveryRepository>,
+);
+fn current_native_discovery() -> Option<NativeDiscoveryPort> {
+    TOOL_AUDIT
+        .try_with(|audit| {
+            audit
+                .attempts
+                .as_ref()
+                .zip(audit.discoveries.as_ref())
+                .map(|((env, _), ports)| (env.clone(), ports.clone()))
+        })
+        .ok()
+        .flatten()
+}
+/// 返回原准入时捕获的身份；后台任务不能从当前head重建它。
+pub fn current_execution_envelope() -> Option<agent_core::EnterpriseOwnerEnvelope> {
+    TOOL_AUDIT
+        .try_with(|audit| {
+            audit
+                .attempts
+                .as_ref()
+                .map(|(envelope, _)| envelope.clone())
+        })
+        .ok()
+        .flatten()
+}
+pub(crate) type NativeMemoryPort = (
+    agent_core::EnterpriseOwnerEnvelope,
+    Arc<dyn agent_storage_ports::ScopedMemoryRepository>,
+);
+pub(crate) fn current_native_memory() -> Option<NativeMemoryPort> {
+    TOOL_AUDIT
+        .try_with(|audit| {
+            audit
+                .attempts
+                .as_ref()
+                .zip(audit.memories.as_ref())
+                .map(|((envelope, _), ports)| (envelope.clone(), ports.clone()))
+        })
+        .ok()
+        .flatten()
+}
+type NativeContextPort = (
+    agent_core::EnterpriseOwnerEnvelope,
+    Arc<dyn agent_storage_ports::RunContextRepository>,
+);
+fn current_native_context() -> Option<NativeContextPort> {
+    TOOL_AUDIT
+        .try_with(|audit| {
+            audit
+                .attempts
+                .as_ref()
+                .zip(audit.requests.as_ref())
+                .map(|((envelope, _), ports)| (envelope.clone(), ports.clone()))
+        })
+        .ok()
+        .flatten()
+}
+struct PreparedExecutionContext {
+    snapshot: agent_core::SessionSnapshot,
+    projection: agent_core::ContextProjection,
+    read_only: bool,
+}
+fn legacy_context_store(
+    store: Option<&Arc<dyn ControlRepository>>,
+) -> Result<&Arc<dyn ControlRepository>> {
+    store.ok_or_else(|| anyhow::anyhow!("native上下文缺领域端口，禁止读取旧文件"))
+}
+async fn execution_context(
+    store: Option<&Arc<dyn ControlRepository>>,
+    owner: &agent_core::ExactOwner,
+    native: Option<&NativeContextPort>,
+) -> Result<PreparedExecutionContext> {
+    if let Some((envelope, ports)) = native {
+        let read = ports
+            .read_execution_context(envelope)
+            .await
+            .map_err(RuntimeError::from)?;
+        return Ok(PreparedExecutionContext {
+            snapshot: read.snapshot,
+            projection: read.projection,
+            read_only: read.frozen.context_read_only,
+        });
+    }
+    let store = legacy_context_store(store)?;
+    let snapshot = store.session_snapshot(&owner.session_key)?;
+    let projection = store.context_projection(&snapshot)?;
+    let read_only = store
+        .run_snapshot(&owner.run_id)?
+        .is_some_and(|s| s.context_read_only);
+    Ok(PreparedExecutionContext {
+        snapshot,
+        projection,
+        read_only,
+    })
+}
+async fn settle_execution_compact(
+    store: Option<&Arc<dyn ControlRepository>>,
+    native: Option<&NativeContextPort>,
+    intent: &agent_core::CompactIntent,
+    replacement: Option<&[Message]>,
+    reason: &str,
+) -> Result<agent_core::ProjectionGeneration> {
+    if let Some((envelope, ports)) = native {
+        return Ok(ports
+            .settle_compaction(envelope, intent, replacement, reason)
+            .await
+            .map_err(RuntimeError::from)?);
+    }
+    Ok(legacy_context_store(store)?.settle_compact(intent, replacement, reason)?)
 }
 
 #[cfg(test)]
@@ -2835,6 +3471,138 @@ mod tests {
         }
     }
 
+    struct AmbiguousEffectProbe {
+        executions: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    #[async_trait]
+    impl crate::tools::Tool for AmbiguousEffectProbe {
+        fn name(&self) -> &str {
+            "ambiguous_effect"
+        }
+        fn description(&self) -> &str {
+            "测试已接受但未确认的外部副作用"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            json!({"type":"object","properties":{},"additionalProperties":false})
+        }
+        async fn execute(&self, _: serde_json::Value) -> Result<String> {
+            self.executions
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(agent_core::ToolOutcomeUnknown("测试外部调用已接受，确认丢失".into()).into())
+        }
+    }
+    #[tokio::test]
+    async fn accepted_unknown_tool_stops_later_waves_and_model_rounds_after_original_receipt_commit()
+     {
+        use agent_storage::{RunStatus, SessionQuery};
+        let provider = Arc::new(MockProvider {
+            responses: Mutex::new(VecDeque::from([
+                Response::ToolCalls(vec![
+                    ToolCall {
+                        id: "unknown".into(),
+                        name: "ambiguous_effect".into(),
+                        arguments: json!({}),
+                    },
+                    ToolCall {
+                        id: "after".into(),
+                        name: "after_unknown".into(),
+                        arguments: json!({"value":"forbidden"}),
+                    },
+                ]),
+                Response::Text("不应该继续请求模型".into()),
+            ])),
+            snapshots: Mutex::new(Vec::new()),
+        });
+        let uncertain = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let after = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry.register(AmbiguousEffectProbe {
+            executions: uncertain.clone(),
+        });
+        registry.register(SideEffectProbe {
+            name: "after_unknown",
+            executions: after.clone(),
+        });
+        let context = ContextManager::new(
+            provider.clone(),
+            std::env::current_dir().unwrap(),
+            ContextConfig {
+                token_budget: 100_000,
+                recent_messages: 1,
+                mild_compression_percent: 60,
+                strong_compression_percent: 85,
+                summary_chunk_tokens: 1000,
+            },
+            Arc::new(PlanStore::memory_only()),
+        )
+        .unwrap();
+        let engine = LoopEngine::ephemeral(provider.clone(), registry, context, 10);
+        let root = std::env::temp_dir().join(format!(
+            "ma-unknown-tool-{}-{}",
+            std::process::id(),
+            NEXT_ATTEMPT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let store = Arc::new(RunStore::open(&root.join("runtime.sqlite3")).unwrap());
+        let frozen:agent_core::RunSnapshot=serde_json::from_value(json!({"tools":engine.tool_specs(),"cwd":".","permission_mode":"risk_approval","sandbox_requested":"native","sandbox_effective":"native","context_read_only":false,"max_tool_calls":null,"context_token_budget":engine.token_budget(),"context_policy_fingerprint":engine.context_policy_fingerprint(),"tool_catalog_digest":format!("{:x}",Sha256::digest(serde_json::to_vec(&engine.tool_specs()).unwrap())),"config_generation":1})).unwrap();
+        let admission = agent_core::RunAdmission {
+            workflow_node: None,
+            plan_execution: None,
+            session_key: agent_storage::SessionId("unknown-tool".into()),
+            expected_lifetime: None,
+            request_id: agent_core::RequestId::Number(1),
+            input: "不可重放".into(),
+            mode: agent_storage::AdmissionMode::Queue,
+        };
+        let agent_storage::Admission::New(run) = store.admit_run(&admission, &frozen).unwrap()
+        else {
+            panic!("new")
+        };
+        store.try_start_queued(&run.run_id).unwrap();
+        let envelope = agent_core::EnterpriseOwnerEnvelope {
+            scope: agent_core::TenantContext::local(),
+            owner: store.run_owner(&run.run_id).unwrap(),
+        };
+        let result = with_tool_audit_execution(
+            store.clone(),
+            envelope,
+            NativeExecutionPorts {
+                attempts: store.clone(),
+                tools: store.clone(),
+                turns: store.clone(),
+                requests: store.clone(),
+                discoveries: store.clone(),
+                memories: store.clone(),
+            },
+            engine.run_turn(&mut vec![], "不可重放".into()),
+        )
+        .await;
+        let requests = provider.snapshots.lock().unwrap().len();
+        let effects = after.load(std::sync::atomic::Ordering::SeqCst);
+        let attempts = store.tool_receipts(&run.run_id).unwrap();
+        let status = store
+            .finish(
+                &run.run_id,
+                RunStatus::Failed,
+                None,
+                Some((-32603, "测试终态")),
+            )
+            .unwrap()
+            .status;
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.downcast_ref::<agent_core::ToolOutcomeUnknown>().is_some()),
+            "未知结果必须直接typed收口，实际 {result:?}，requests={requests}，后续副作用={effects}"
+        );
+        assert_eq!(uncertain.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(effects, 0, "未知结果之后的wave不能新启动副作用");
+        assert_eq!(requests, 1, "不能再喂模型自动换call_id重试未知副作用");
+        assert_eq!(attempts[0].outcome.as_deref(), Some("outcome_unknown"));
+        assert_eq!(attempts[1].status, "prepared");
+        assert_eq!(status, RunStatus::UnknownAfterRestart);
+    }
     #[tokio::test]
     async fn main_turn_continues_past_fifty_rounds_and_completes() {
         let mut responses = (0..=DEFAULT_PROGRESS_CHECKPOINT_ROUNDS)
@@ -3139,7 +3907,19 @@ mod resilience_tests {
     fn failure(kind: ProviderErrorKind) -> Script {
         Script {
             events: vec![(0, ProviderEvent::ResponseStarted)],
-            error: Some(ProviderError::new(kind, "mock Provider 错误")),
+            error: Some(if kind == ProviderErrorKind::ContextOverflow {
+                ProviderError::from_http(
+                    reqwest::StatusCode::BAD_REQUEST,
+                    &reqwest::header::HeaderMap::new(),
+                    r#"{"error":{"code":"context_overflow"}}"#,
+                )
+            } else {
+                ProviderError::from_http(
+                    reqwest::StatusCode::TOO_MANY_REQUESTS,
+                    &reqwest::header::HeaderMap::new(),
+                    "",
+                )
+            }),
             hang: false,
         }
     }
@@ -3241,7 +4021,11 @@ mod resilience_tests {
                         }),
                     ),
                 ],
-                error: Some(ProviderError::new(ProviderErrorKind::Server, "mock 503")),
+                error: Some(ProviderError::from_http(
+                    reqwest::StatusCode::TOO_MANY_REQUESTS,
+                    &reqwest::header::HeaderMap::new(),
+                    "",
+                )),
                 hang: false,
             },
             success(
@@ -3254,7 +4038,7 @@ mod resilience_tests {
             ),
         ]);
         let mut retry = no_retry();
-        retry.server_retries = 1;
+        retry.rate_limit_retries = 1;
         let engine = engine(vec![provider.clone()], retry, short_timeout());
         let path = std::env::temp_dir().join(format!(
             "p4-ledger-{}-{}.sqlite",
@@ -3267,6 +4051,7 @@ mod resilience_tests {
         let Admission::New(run) = store
             .admit_run(
                 &agent_core::RunAdmission {
+                    workflow_node: None,
                     session_key: metadata.key,
                     expected_lifetime: Some(metadata.lifetime),
                     request_id: RequestId::Number(1),
@@ -3322,7 +4107,7 @@ mod resilience_tests {
 
     #[tokio::test]
     async fn fallback_requires_no_visible_text_or_partial_tool_call() {
-        let first = ScriptedProvider::new(vec![failure(ProviderErrorKind::Server)]);
+        let first = ScriptedProvider::new(vec![failure(ProviderErrorKind::RateLimit)]);
         let second = ScriptedProvider::new(vec![success("备用", None)]);
         let retry = no_retry();
         let routed = engine(
@@ -3478,9 +4263,9 @@ mod resilience_tests {
                 ProviderErrorKind::Cancelled
             );
         }
-        let provider = ScriptedProvider::new(vec![failure(ProviderErrorKind::Server)]);
+        let provider = ScriptedProvider::new(vec![failure(ProviderErrorKind::RateLimit)]);
         let mut retry = no_retry();
-        retry.server_retries = 1;
+        retry.rate_limit_retries = 1;
         retry.max_backoff_ms = 1000;
         let engine = engine(vec![provider.clone()], retry, short_timeout());
         let token = CancellationToken::new();
@@ -3564,7 +4349,7 @@ mod resilience_tests {
     }
 
     #[tokio::test]
-    async fn real_http_5xx_and_rate_limit_follow_retry_budget() {
+    async fn real_http_5xx_is_unknown_and_explicit_rate_limit_follows_retry_budget() {
         let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"成功\"}}]}\n\ndata: [DONE]\n\n";
         let (url, mut requests) = start_mock_http(vec![
             MockHttpResponse::error(500, "", r#"{"error":{"code":"server_error"}}"#),
@@ -3590,16 +4375,14 @@ mod resilience_tests {
                 overall_ms: 2000,
             },
         );
-        assert_eq!(
-            request(&first_engine, None, &CancellationToken::new())
-                .await
-                .unwrap()
-                .response,
-            Response::Text("成功".into())
-        );
-        for _ in 0..3 {
-            requests.recv().await.expect("应按预算请求三次");
-        }
+        let error = request(&first_engine, None, &CancellationToken::new())
+            .await
+            .unwrap_err();
+        let typed = error.downcast_ref::<ProviderError>().unwrap();
+        assert_eq!(typed.kind, ProviderErrorKind::Server);
+        assert!(typed.outcome_unknown());
+        requests.recv().await.expect("第一次请求到达上游");
+        assert!(requests.try_recv().is_err(), "未知5xx不能重试");
 
         let (url, mut requests) = start_mock_http(vec![
             MockHttpResponse::error(
@@ -3697,5 +4480,71 @@ mod resilience_tests {
             );
             task.abort();
         }
+    }
+}
+
+#[cfg(test)]
+mod audit_future_contract {
+    use super::*;
+    struct LargeExecution {
+        bytes: [u8; 256 * 1024],
+        owner: agent_core::ExactOwner,
+    }
+    impl std::future::Future for LargeExecution {
+        type Output = usize;
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<usize> {
+            assert_eq!(current_session_repository().unwrap().1, self.owner);
+            std::task::Poll::Ready(self.bytes.len())
+        }
+    }
+    #[tokio::test]
+    async fn tool_audit_keeps_large_execution_future_on_heap_and_preserves_owner_for_both_callers()
+    {
+        let root = std::env::temp_dir().join(format!("ma-audit-future-{}", std::process::id()));
+        let store = Arc::new(RunStore::open(&root.join("runtime.sqlite3")).unwrap());
+        let agent_core::Admission::New(run) = store
+            .admit_with_route(
+                agent_core::SessionKey("stack".into()),
+                agent_core::RequestId::Number(1),
+                "input",
+                agent_core::AdmissionMode::Queue,
+                None,
+            )
+            .unwrap()
+        else {
+            panic!("new")
+        };
+        let owner = agent_storage::SessionQuery::run_owner(store.as_ref(), &run.run_id).unwrap();
+        let native = with_tool_audit_owned(
+            store.clone(),
+            owner.clone(),
+            LargeExecution {
+                bytes: [0; 256 * 1024],
+                owner: owner.clone(),
+            },
+        );
+        assert!(
+            std::mem::size_of_val(&native) < 4096,
+            "执行上下文不能把大 Future 重复内联到 caller 栈"
+        );
+        assert_eq!(native.await, 256 * 1024);
+        let legacy = with_tool_audit(
+            store.clone(),
+            run.run_id,
+            LargeExecution {
+                bytes: [0; 256 * 1024],
+                owner,
+            },
+        );
+        assert!(
+            std::mem::size_of_val(&legacy) < 4096,
+            "兼容 caller 同样受栈预算约束"
+        );
+        assert_eq!(legacy.await, 256 * 1024);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

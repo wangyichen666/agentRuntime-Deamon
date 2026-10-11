@@ -1,0 +1,24 @@
+   Compiling my-agent v0.1.0 (/Users/pilot/Documents/myproject/agent-rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.58s
+     Running tests/run_turn_contract.rs (target/debug/deps/run_turn_contract-f4d8aa1774b2031e)
+
+running 1 test
+test original_turn_commit_publishes_stages_and_transcript_once_and_survives_reopen ... FAILED
+
+failures:
+
+---- original_turn_commit_publishes_stages_and_transcript_once_and_survives_reopen stdout ----
+
+thread 'original_turn_commit_publishes_stages_and_transcript_once_and_survives_reopen' panicked at tests/run_turn_contract.rs:316:5:
+assertion `left == right` failed: 已结算 run 不能取得计划执行 permit，即使没有决策行
+  left: Ok(())
+ right: Err(Coordination(Conflict))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    original_turn_commit_publishes_stages_and_transcript_once_and_survives_reopen
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.05s
+
+error: test failed, to rerun pass `--test run_turn_contract`

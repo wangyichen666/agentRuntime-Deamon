@@ -102,9 +102,14 @@ impl RuntimePaths {
             executable_fingerprint: Some(current_executable_fingerprint().await?),
         };
         let bytes = serde_json::to_vec_pretty(&marker).context("序列化 ready 标记失败")?;
-        tokio::fs::write(&self.ready, bytes)
+        // 完整 marker 原子发布，读者不会将半写 JSON 误判为旧 binary。
+        let pending = self.directory.join("ready.pending");
+        tokio::fs::write(&pending, bytes)
             .await
-            .with_context(|| format!("写入 ready 标记失败: {}", self.ready.display()))
+            .context("暂存 ready 标记失败")?;
+        tokio::fs::rename(&pending, &self.ready)
+            .await
+            .with_context(|| format!("发布 ready 标记失败: {}", self.ready.display()))
     }
 
     pub async fn cleanup(&self) {
@@ -141,6 +146,17 @@ impl RuntimePaths {
     pub async fn ensure_daemon(&self, workspace: &Path) -> Result<()> {
         self.prepare().await?;
         if matches!(self.status().await, DaemonStatus::Ready { .. }) {
+            // bind 与指纹发布之间仍属启动；缺 marker 不是旧版本证据。
+            let started = tokio::time::Instant::now();
+            while !self.ready.exists() {
+                if started.elapsed() >= Duration::from_secs(10) {
+                    bail!("daemon 启动标记尚未发布，不能安全判断版本；请稍后重试");
+                }
+                if !matches!(self.status().await, DaemonStatus::Ready { .. }) {
+                    bail!("daemon 启动中连接已关闭；请检查持久日志");
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
             if self.ready_marker_matches_current_executable().await {
                 return Ok(());
             }
@@ -371,5 +387,39 @@ mod tests {
             .unwrap();
         assert!(paths.ready_marker_matches_current_executable().await);
         paths.cleanup().await;
+    }
+    #[tokio::test]
+    async fn socket_before_ready_publication_never_triggers_an_upgrade_stop() {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            use tokio::io::AsyncReadExt;
+            let folder =
+                std::env::temp_dir().join(format!("ma-ready-barrier-{}", std::process::id()));
+            let paths = RuntimePaths::for_test(folder);
+            paths.prepare().await.unwrap();
+            let listener = tokio::net::UnixListener::bind(&paths.socket).unwrap();
+            let client_paths = paths.clone();
+            let workspace = std::env::current_dir().unwrap();
+            let client_workspace = workspace.clone();
+            let client =
+                tokio::spawn(async move { client_paths.ensure_daemon(&client_workspace).await });
+            // 第二次 socket 观测是等待分支的可控 barrier；旧实现会发送 daemon.stop。
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                stream.read_to_end(&mut bytes).await.unwrap();
+                assert!(
+                    bytes.is_empty(),
+                    "缺 ready marker 不能当作旧 binary：{bytes:?}"
+                );
+            }
+            assert!(!paths.ready.exists());
+            paths.mark_ready(&workspace).await.unwrap();
+            client.await.unwrap().unwrap();
+            drop(listener);
+            paths.cleanup().await;
+            std::fs::remove_dir_all(&paths.directory).unwrap();
+        })
+        .await
+        .expect("ready 发布 barrier 合同超时");
     }
 }
